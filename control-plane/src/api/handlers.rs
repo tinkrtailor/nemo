@@ -57,8 +57,8 @@ pub async fn start(
     };
 
     // Compute effective flags first so max_rounds uses the right values
-    // If ship_mode with require_harden and no --harden, auto-add harden (FR-20)
-    let effective_harden = req.harden || (req.ship_mode && state.config.ship.require_harden);
+    // harden_only implies harden; ship_mode with require_harden also implies harden (FR-20)
+    let effective_harden = req.harden || req.harden_only || (req.ship_mode && state.config.ship.require_harden);
 
     // ship --harden implies auto_approve (FR-20: zero human gates)
     let effective_auto_approve = req.auto_approve || req.ship_mode;

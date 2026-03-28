@@ -24,7 +24,15 @@ pub async fn run(client: &NemoClient, engineer: &str, team: bool, json: bool) ->
     let path = if team {
         "/status?team=true".to_string()
     } else {
-        format!("/status?engineer={engineer}")
+        // Percent-encode engineer name to handle special characters
+        let encoded: String = engineer.bytes().map(|b| {
+            if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' {
+                format!("{}", b as char)
+            } else {
+                format!("%{b:02X}")
+            }
+        }).collect();
+        format!("/status?engineer={encoded}")
     };
 
     let resp: StatusResponse = client.get(&path).await?;

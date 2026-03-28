@@ -892,6 +892,11 @@ impl ConvergentLoopDriver {
             .write_file(&record.branch, feedback_path, &feedback_json)
             .await?;
 
+        // Refresh current_sha after the commit so divergence detection doesn't false-pause
+        if let Some(new_sha) = self.git.get_branch_sha(&record.branch).await? {
+            record.current_sha = Some(new_sha);
+        }
+
         record.state = LoopState::Implementing;
         record.sub_state = Some(SubState::Dispatched);
         record.retry_count = 0;

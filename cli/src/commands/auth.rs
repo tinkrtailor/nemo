@@ -19,7 +19,8 @@ pub async fn run(client: &NemoClient, engineer: &str, claude: bool, openai: bool
         _ => vec!["claude", "openai"],
     };
 
-    let mut any_found = false;
+    let mut any_registered = false;
+    let mut any_error = false;
 
     for provider in &providers {
         let cred_path = match *provider {
@@ -51,20 +52,29 @@ pub async fn run(client: &NemoClient, engineer: &str, claude: bool, openai: bool
         match client.register_credentials(engineer, provider, &content).await {
             Ok(()) => {
                 println!("Registered {provider} credentials with control plane");
-                any_found = true;
+                any_registered = true;
             }
             Err(e) => {
                 eprintln!("Failed to register {provider} credentials: {e}");
                 eprintln!("  Credentials found locally at {cred_path} but could not be pushed.");
                 eprintln!("  Ensure the control plane is reachable and your API key is valid.");
+                any_error = true;
             }
         }
     }
 
-    if any_found {
+    if any_registered {
         println!();
         println!("Credentials registered. If you have loops in AWAITING_REAUTH state,");
         println!("resume them with: nemo resume <loop-id>");
+    }
+
+    if !any_registered {
+        if any_error {
+            anyhow::bail!("All credential uploads failed");
+        } else {
+            anyhow::bail!("No credential files found. Run the provider CLI to authenticate first.");
+        }
     }
 
     Ok(())

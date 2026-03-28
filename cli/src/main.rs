@@ -171,6 +171,21 @@ async fn main() -> anyhow::Result<()> {
     let insecure = cli.insecure || std::env::var("NEMO_INSECURE").is_ok();
     let http_client = client::NemoClient::new(&server_url, eng_config.api_key.as_deref(), insecure);
 
+    // Validate engineer is configured for commands that need it
+    let needs_engineer = matches!(
+        cli.command,
+        Commands::Harden { .. }
+            | Commands::Start { .. }
+            | Commands::Ship { .. }
+            | Commands::Status { .. }
+            | Commands::Auth { .. }
+    );
+    if needs_engineer && eng_config.engineer.is_empty() {
+        anyhow::bail!(
+            "Engineer name not configured. Run: nemo config --set engineer=<your-name>"
+        );
+    }
+
     match cli.command {
         Commands::Harden {
             spec_path,

@@ -19,19 +19,31 @@ pub struct NemoConfig {
 }
 
 impl NemoConfig {
-    /// Load config from `NEMO_CONFIG_PATH` env var, or `/etc/nemo/nemo.toml`,
-    /// or fall back to defaults if no file exists.
+    /// Load config from `NEMO_CONFIG_PATH` env var, or `./nemo.toml` (repo-local),
+    /// or `/etc/nemo/nemo.toml` (system), or fall back to defaults.
     pub fn load() -> std::result::Result<Self, String> {
-        let path = std::env::var("NEMO_CONFIG_PATH")
-            .unwrap_or_else(|_| "/etc/nemo/nemo.toml".to_string());
+        let candidates: Vec<String> = if let Ok(explicit) = std::env::var("NEMO_CONFIG_PATH") {
+            vec![explicit]
+        } else {
+            vec![
+                "./nemo.toml".to_string(),
+                "/etc/nemo/nemo.toml".to_string(),
+            ]
+        };
 
-        let path = std::path::Path::new(&path);
-        if !path.exists() {
-            tracing::warn!(path = %path.display(), "Config file not found, using defaults");
-            return Ok(Self::default());
-        }
+        let path = candidates.iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.exists());
 
-        let contents = std::fs::read_to_string(path)
+        let path = match path {
+            Some(p) => p,
+            None => {
+                tracing::warn!("No config file found at {:?}, using defaults", candidates);
+                return Ok(Self::default());
+            }
+        };
+
+        let contents = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read config at {}: {e}", path.display()))?;
 
         let config: NemoConfig = toml::from_str(&contents)
