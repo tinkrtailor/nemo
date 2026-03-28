@@ -370,6 +370,22 @@ impl ConvergentLoopDriver {
                 }
             }
             "revise" => {
+                // Parse revise output to detect spec path changes
+                let revise_output: Option<crate::types::verdict::ReviseOutput> = last_round
+                    .and_then(|r| r.output.as_ref())
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+                if let Some(ref output) = revise_output
+                    && output.updated_spec_path != record.spec_path
+                {
+                    tracing::info!(
+                        loop_id = %record.id,
+                        old = %record.spec_path,
+                        new = %output.updated_spec_path,
+                        "Spec path updated by revise stage"
+                    );
+                    record.spec_path = output.updated_spec_path.clone();
+                }
+
                 // After revise: check max rounds, then re-audit
                 if record.round >= record.max_rounds {
                     record.state = LoopState::Failed;

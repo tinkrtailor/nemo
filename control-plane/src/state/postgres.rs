@@ -510,29 +510,14 @@ impl StateStore for PgStateStore {
         &self,
         loop_id: Uuid,
         after: DateTime<Utc>,
-        after_id: Option<Uuid>,
     ) -> Result<Vec<LogEvent>> {
-        let rows = match after_id {
-            Some(id) => {
-                sqlx::query(
-                    "SELECT * FROM log_events WHERE loop_id = $1 AND (timestamp > $2 OR (timestamp = $2 AND id > $3)) ORDER BY timestamp ASC, id ASC",
-                )
-                .bind(loop_id)
-                .bind(after)
-                .bind(id)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            None => {
-                sqlx::query(
-                    "SELECT * FROM log_events WHERE loop_id = $1 AND timestamp > $2 ORDER BY timestamp ASC, id ASC",
-                )
-                .bind(loop_id)
-                .bind(after)
-                .fetch_all(&self.pool)
-                .await?
-            }
-        };
+        let rows = sqlx::query(
+            "SELECT * FROM log_events WHERE loop_id = $1 AND timestamp >= $2 ORDER BY timestamp ASC, id ASC",
+        )
+        .bind(loop_id)
+        .bind(after)
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows.iter().map(row_to_log_event).collect())
     }
