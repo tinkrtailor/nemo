@@ -119,8 +119,22 @@ async fn main() -> anyhow::Result<()> {
             .expect("Server failed");
     });
 
-    // Wait for SIGTERM/SIGINT
-    tokio::signal::ctrl_c().await?;
+    // Wait for SIGTERM (K8s pod shutdown) or SIGINT (ctrl-c)
+    {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate())?;
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await?;
+        }
+    }
     tracing::info!("Received shutdown signal");
 
     // Signal all tasks to stop
