@@ -142,6 +142,7 @@ pub fn build_job(
         spec: Some(JobSpec {
             active_deadline_seconds: active_deadline,
             backoff_limit: Some(0), // No K8s-level retries; we handle retries in the loop engine
+            ttl_seconds_after_finished: Some(300), // K8s auto-cleans completed Jobs after 5 min
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(labels),

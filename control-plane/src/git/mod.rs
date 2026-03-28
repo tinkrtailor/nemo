@@ -81,6 +81,49 @@ pub mod bare {
         }
     }
 
+    impl BareRepoGitOperations {
+        /// Inner write_file logic; caller handles worktree cleanup.
+        async fn write_file_in_worktree(&self, worktree_dir: &str, path: &str, content: &str) -> Result<()> {
+            let file_path = std::path::Path::new(worktree_dir).join(path);
+            if let Some(parent) = file_path.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    crate::error::NemoError::Git(format!("Failed to create dirs: {e}"))
+                })?;
+            }
+            tokio::fs::write(&file_path, content).await.map_err(|e| {
+                crate::error::NemoError::Git(format!("Failed to write file: {e}"))
+            })?;
+
+            let add = Command::new("git")
+                .args(["add", path])
+                .current_dir(worktree_dir)
+                .output()
+                .await
+                .map_err(|e| crate::error::NemoError::Git(format!("git add spawn failed: {e}")))?;
+            if !add.status.success() {
+                let stderr = String::from_utf8_lossy(&add.stderr).trim().to_string();
+                return Err(crate::error::NemoError::Git(format!("git add failed: {stderr}")));
+            }
+
+            let commit = Command::new("git")
+                .args([
+                    "-c", "user.name=nemo-control-plane",
+                    "-c", "user.email=nemo@nemo.dev",
+                    "commit", "-m", &format!("chore(agent): add {path}"),
+                ])
+                .current_dir(worktree_dir)
+                .output()
+                .await
+                .map_err(|e| crate::error::NemoError::Git(format!("git commit spawn failed: {e}")))?;
+            if !commit.status.success() {
+                let stderr = String::from_utf8_lossy(&commit.stderr).trim().to_string();
+                return Err(crate::error::NemoError::Git(format!("git commit failed: {stderr}")));
+            }
+
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl GitOperations for BareRepoGitOperations {
         async fn spec_exists(&self, spec_path: &str) -> Result<bool> {
@@ -163,7 +206,8 @@ pub mod bare {
         }
 
         async fn write_file(&self, branch: &str, path: &str, content: &str) -> Result<()> {
-            // Create a temporary worktree, write the file, commit, and clean up
+            // Create a temporary worktree, write the file, commit, and clean up.
+            // All error paths clean up the worktree to avoid leaks.
             let worktree_dir = format!("/tmp/nemo-wt-{}", uuid::Uuid::new_v4());
             self.run_git(&["worktree", "add", &worktree_dir, branch])
                 .await
@@ -171,49 +215,12 @@ pub mod bare {
                     "Failed to create worktree for {branch}: {e}"
                 )))?;
 
-            // Write the file
-            let file_path = std::path::Path::new(&worktree_dir).join(path);
-            if let Some(parent) = file_path.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    crate::error::NemoError::Git(format!("Failed to create dirs: {e}"))
-                })?;
-            }
-            tokio::fs::write(&file_path, content).await.map_err(|e| {
-                crate::error::NemoError::Git(format!("Failed to write file: {e}"))
-            })?;
+            let result = self.write_file_in_worktree(&worktree_dir, path, content).await;
 
-            // Stage, commit, and clean up worktree
-            let add = Command::new("git")
-                .args(["add", path])
-                .current_dir(&worktree_dir)
-                .output()
-                .await
-                .map_err(|e| crate::error::NemoError::Git(format!("git add spawn failed: {e}")))?;
-            if !add.status.success() {
-                let stderr = String::from_utf8_lossy(&add.stderr).trim().to_string();
-                let _ = self.run_git(&["worktree", "remove", "--force", &worktree_dir]).await;
-                return Err(crate::error::NemoError::Git(format!("git add failed: {stderr}")));
-            }
-
-            let commit = Command::new("git")
-                .args([
-                    "-c", "user.name=nemo-control-plane",
-                    "-c", "user.email=nemo@nemo.dev",
-                    "commit", "-m", &format!("chore(agent): add {path}"),
-                ])
-                .current_dir(&worktree_dir)
-                .output()
-                .await
-                .map_err(|e| crate::error::NemoError::Git(format!("git commit spawn failed: {e}")))?;
-            if !commit.status.success() {
-                let stderr = String::from_utf8_lossy(&commit.stderr).trim().to_string();
-                let _ = self.run_git(&["worktree", "remove", "--force", &worktree_dir]).await;
-                return Err(crate::error::NemoError::Git(format!("git commit failed: {stderr}")));
-            }
-
-            // Clean up worktree
+            // Always clean up worktree regardless of success/failure
             let _ = self.run_git(&["worktree", "remove", "--force", &worktree_dir]).await;
-            Ok(())
+
+            result
         }
 
         async fn delete_branch(&self, branch: &str) -> Result<()> {
@@ -294,31 +301,38 @@ pub mod bare {
                 .await
                 .map_err(|e| crate::error::NemoError::Git(format!("Failed to run gh: {e}")))?;
 
-            if output.status.success() {
-                return Ok(Some(true)); // All checks passed (or no required checks)
-            }
-
-            // Non-zero: parse output to distinguish "fail" from "pending"
             let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
             let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+
+            if output.status.success() {
+                // Exit 0: all checks passed. Check for failure keywords in case
+                // gh reports partial results on success (shouldn't happen, but defensive).
+                if stdout.contains("fail") || stdout.contains("cancelled") {
+                    return Ok(Some(false));
+                }
+                return Ok(Some(true));
+            }
+
+            // Non-zero exit: could be CI failure, pending checks, or gh tool error.
+            // Only classify as definitively failed if stdout shows actual CI results
+            // with failure indicators. gh tool errors (auth, network) should be
+            // treated as unknown to avoid permanently blocking auto-merge.
 
             // No required checks configured = pass
             if stderr.contains("no required checks") || stdout.contains("no required checks") {
                 return Ok(Some(true));
             }
 
-            if stdout.contains("fail") || stdout.contains("error") || stdout.contains("cancelled")
-                || stderr.contains("fail") || stderr.contains("error")
+            // CI results present with failure indicators = definitively failed
+            let has_ci_results = stdout.contains("pass") || stdout.contains("fail")
+                || stdout.contains("pending") || stdout.contains("queued");
+            if has_ci_results
+                && (stdout.contains("fail") || stdout.contains("cancelled"))
             {
-                Ok(Some(false)) // Definitively failed
-            } else if stdout.contains("pending") || stdout.contains("queued") || stdout.contains("in_progress") {
-                Ok(None) // Explicitly pending
-            } else if stdout.trim().is_empty() {
-                // No output + non-zero: could be gh auth/network error, not CI info.
-                // Treat as unknown (keep polling) rather than assuming pass.
-                Ok(None)
+                Ok(Some(false))
             } else {
-                Ok(None) // Unknown state, treat as pending
+                // Non-zero without clear CI failure = unknown (transient/pending)
+                Ok(None)
             }
         }
 
