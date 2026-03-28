@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use k8s_openapi::api::batch::v1::Job;
-use kube::api::{Api, DeleteParams, PostParams};
+use k8s_openapi::api::core::v1::Pod;
+use kube::api::{Api, DeleteParams, ListParams, PostParams};
 use kube::Client;
 
 use super::{JobDispatcher, JobStatus};
@@ -63,11 +64,35 @@ impl JobDispatcher for KubeJobDispatcher {
             namespace
         };
         let jobs_api: Api<Job> = Api::namespaced(self.client.clone(), ns);
-        match jobs_api.get(name).await {
-            Ok(job) => Ok(job_to_status(&job)),
-            Err(kube::Error::Api(err)) if err.code == 404 => Ok(JobStatus::NotFound),
-            Err(e) => Err(e.into()),
+        let job = match jobs_api.get(name).await {
+            Ok(job) => job,
+            Err(kube::Error::Api(err)) if err.code == 404 => return Ok(JobStatus::NotFound),
+            Err(e) => return Err(e.into()),
+        };
+
+        let mut status = job_to_status(&job);
+
+        // For failed jobs, inspect pod exit codes for auth expiry (exit code 42)
+        if matches!(status, JobStatus::Failed { .. }) {
+            let pods_api: Api<Pod> = Api::namespaced(self.client.clone(), ns);
+            let lp = ListParams::default().labels(&format!("job-name={name}"));
+            if let Ok(pod_list) = pods_api.list(&lp).await {
+                for pod in &pod_list.items {
+                    if let Some(exit_code) = extract_exit_code(pod)
+                        && exit_code == 42
+                    {
+                        let reason = match &status {
+                            JobStatus::Failed { reason } => reason.clone(),
+                            _ => "Auth expired (exit code 42)".to_string(),
+                        };
+                        status = JobStatus::AuthExpired { reason };
+                        break;
+                    }
+                }
+            }
         }
+
+        Ok(status)
     }
 
     async fn get_job(&self, name: &str, namespace: &str) -> Result<Option<Job>> {
@@ -83,6 +108,17 @@ impl JobDispatcher for KubeJobDispatcher {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Extract the exit code from a pod's first terminated container.
+fn extract_exit_code(pod: &Pod) -> Option<i32> {
+    let status = pod.status.as_ref()?;
+    for cs in status.container_statuses.as_ref()? {
+        if let Some(ref terminated) = cs.state.as_ref()?.terminated {
+            return Some(terminated.exit_code);
+        }
+    }
+    None
 }
 
 /// Extract job status from K8s Job resource.

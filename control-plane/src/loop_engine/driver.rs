@@ -174,6 +174,10 @@ impl ConvergentLoopDriver {
                         // Job failed: check retry logic
                         self.handle_job_failed(record, &reason).await
                     }
+                    JobStatus::AuthExpired { reason } => {
+                        // Auth expired (exit code 42): go directly to AWAITING_REAUTH
+                        self.handle_auth_expired(record, &reason).await
+                    }
                     JobStatus::NotFound => {
                         // Job disappeared: treat as failure
                         self.handle_job_failed(record, "Job not found (deleted externally)")
@@ -758,6 +762,30 @@ impl ConvergentLoopDriver {
 
         tracing::info!(loop_id = %record.id, "Loop CANCELLED by user");
         Ok(LoopState::Cancelled)
+    }
+
+    /// Handle auth expiry (exit code 42 detected by K8s pod inspection).
+    async fn handle_auth_expired(&self, record: &LoopRecord, reason: &str) -> Result<LoopState> {
+        let mut updated = record.clone();
+
+        if let Some(ref job_name) = record.active_job_name {
+            let _ = self
+                .dispatcher
+                .delete_job(job_name, &self.config.cluster.jobs_namespace)
+                .await;
+        }
+
+        updated.state = LoopState::AwaitingReauth;
+        updated.sub_state = None;
+        updated.reauth_from_state = Some(record.state);
+        updated.active_job_name = None;
+        self.store.update_loop(&updated).await?;
+        tracing::warn!(
+            loop_id = %record.id,
+            reason = reason,
+            "Auth expired (exit code 42), transitioning to AWAITING_REAUTH"
+        );
+        Ok(LoopState::AwaitingReauth)
     }
 
     /// Handle a failed job: detect auth errors, retry, or fail the loop.

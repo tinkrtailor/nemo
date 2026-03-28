@@ -120,8 +120,10 @@ pub mod bare {
                             )));
                         }
                         Some("MERGED") | Some("CLOSED") => {
-                            // Old PR is done: delete branch and recreate fresh
+                            // Old PR is done: delete local and remote branch, recreate fresh
                             let _ = self.run_git(&["branch", "-D", branch]).await;
+                            // Delete remote branch so push doesn't fail non-fast-forward
+                            let _ = self.run_git(&["push", "origin", "--delete", branch]).await;
                             self.run_git(&["branch", branch, &base_ref])
                                 .await
                                 .map_err(|e| crate::error::NemoError::Git(

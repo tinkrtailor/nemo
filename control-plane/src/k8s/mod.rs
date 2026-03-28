@@ -17,6 +17,8 @@ pub enum JobStatus {
     Succeeded,
     /// Job failed (backoff limit reached or pod failure).
     Failed { reason: String },
+    /// Job failed with exit code 42 (auth/credential expiry convention).
+    AuthExpired { reason: String },
     /// Job not found.
     NotFound,
 }
