@@ -99,10 +99,13 @@ fn job_to_status(job: &Job) -> JobStatus {
                 return JobStatus::Succeeded;
             }
             if condition.type_ == "Failed" && condition.status == "True" {
-                let reason = condition
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "Unknown failure".to_string());
+                // Include both reason and message for auth error detection
+                let reason = match (&condition.reason, &condition.message) {
+                    (Some(r), Some(m)) => format!("{r}: {m}"),
+                    (Some(r), None) => r.clone(),
+                    (None, Some(m)) => m.clone(),
+                    (None, None) => "Unknown failure".to_string(),
+                };
                 return JobStatus::Failed { reason };
             }
         }

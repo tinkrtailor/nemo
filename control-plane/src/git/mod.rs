@@ -189,7 +189,11 @@ pub mod bare {
             }
 
             let commit = Command::new("git")
-                .args(["commit", "-m", &format!("chore(agent): add {path}")])
+                .args([
+                    "-c", "user.name=nemo-control-plane",
+                    "-c", "user.email=nemo@nemo.dev",
+                    "commit", "-m", &format!("chore(agent): add {path}"),
+                ])
                 .current_dir(&worktree_dir)
                 .output()
                 .await

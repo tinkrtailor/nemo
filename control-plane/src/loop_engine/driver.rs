@@ -392,6 +392,7 @@ impl ConvergentLoopDriver {
     async fn advance_to_testing(&self, record: &mut LoopRecord) -> Result<LoopState> {
         record.state = LoopState::Testing;
         record.sub_state = Some(SubState::Dispatched);
+        record.retry_count = 0; // Reset per-stage retry budget
 
         let stage_config = self.test_stage_config();
         let ctx = self.build_context(record);

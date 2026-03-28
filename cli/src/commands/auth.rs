@@ -69,12 +69,17 @@ pub async fn run(client: &NemoClient, engineer: &str, claude: bool, openai: bool
         println!("resume them with: nemo resume <loop-id>");
     }
 
-    if !any_registered {
-        if any_error {
-            anyhow::bail!("All credential uploads failed");
+    if any_error {
+        // Some or all providers failed
+        if any_registered {
+            anyhow::bail!("Some credential uploads failed (see errors above)");
         } else {
-            anyhow::bail!("No credential files found. Run the provider CLI to authenticate first.");
+            anyhow::bail!("All credential uploads failed");
         }
+    }
+
+    if !any_registered {
+        anyhow::bail!("No credential files found. Run the provider CLI to authenticate first.");
     }
 
     Ok(())

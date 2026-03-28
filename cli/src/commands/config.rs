@@ -10,9 +10,12 @@ pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
             "engineer" => println!("{}", config.engineer),
             "api_key" => {
                 if let Some(key) = &config.api_key {
-                    // Mask sensitive value: show first 4 and last 4 chars
-                    if key.len() > 12 {
-                        println!("{}...{}", &key[..4], &key[key.len()-4..]);
+                    // Mask sensitive value using chars() to handle non-ASCII safely
+                    let chars: Vec<char> = key.chars().collect();
+                    if chars.len() > 12 {
+                        let prefix: String = chars[..4].iter().collect();
+                        let suffix: String = chars[chars.len()-4..].iter().collect();
+                        println!("{prefix}...{suffix}");
                     } else {
                         println!("****");
                     }
