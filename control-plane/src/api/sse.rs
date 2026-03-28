@@ -41,16 +41,13 @@ pub async fn stream_logs(
                     continue;
                 }
 
-                // Advance cursor to latest timestamp seen
+                // Advance cursor: when timestamp moves forward, old IDs can't reappear
                 if log.timestamp > cursor_timestamp {
                     cursor_timestamp = log.timestamp;
-                    // Prune seen_ids: only need to track IDs at cursor_timestamp
-                    seen_ids.retain(|id| {
-                        // Keep all IDs (we can't check timestamp from ID alone).
-                        // The set is bounded by events-per-poll which is small.
-                        let _ = id;
-                        true
-                    });
+                    // Clear seen_ids: the inclusive query won't return events
+                    // before cursor_timestamp, so old IDs are irrelevant
+                    seen_ids.clear();
+                    seen_ids.insert(log.id);
                 }
 
                 // Apply filters

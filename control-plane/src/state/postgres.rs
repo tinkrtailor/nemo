@@ -342,17 +342,18 @@ impl StateStore for PgStateStore {
         sqlx::query(
             r#"
             UPDATE loops SET
-                state = $2::loop_state, sub_state = $3::sub_state, round = $4,
-                paused_from_state = $5::loop_state, reauth_from_state = $6::loop_state,
-                failure_reason = $7, current_sha = $8, session_id = $9,
-                active_job_name = $10, retry_count = $11,
-                merge_sha = $12, merged_at = $13,
-                hardened_spec_path = $14, spec_pr_url = $15,
+                spec_path = $2, state = $3::loop_state, sub_state = $4::sub_state, round = $5,
+                paused_from_state = $6::loop_state, reauth_from_state = $7::loop_state,
+                failure_reason = $8, current_sha = $9, session_id = $10,
+                active_job_name = $11, retry_count = $12,
+                merge_sha = $13, merged_at = $14,
+                hardened_spec_path = $15, spec_pr_url = $16,
                 updated_at = NOW()
             WHERE id = $1
             "#,
         )
         .bind(record.id)
+        .bind(&record.spec_path)
         .bind(loop_state_str(record.state))
         .bind(record.sub_state.map(sub_state_str))
         .bind(record.round)

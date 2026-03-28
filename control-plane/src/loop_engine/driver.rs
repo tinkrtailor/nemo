@@ -336,16 +336,26 @@ impl ConvergentLoopDriver {
                                     .await?;
                                 record.merge_sha = Some(merge_sha);
                                 record.merged_at = Some(chrono::Utc::now());
-                            }
 
-                            record.state = LoopState::Hardened;
-                            record.sub_state = None;
-                            record.active_job_name = None;
-                            record.hardened_spec_path =
-                                Some(record.spec_path.clone());
-                            self.store.update_loop(record).await?;
-                            tracing::info!(loop_id = %record.id, "Harden loop HARDENED");
-                            Ok(LoopState::Hardened)
+                                record.state = LoopState::Hardened;
+                                record.sub_state = None;
+                                record.active_job_name = None;
+                                record.hardened_spec_path =
+                                    Some(record.spec_path.clone());
+                                self.store.update_loop(record).await?;
+                                tracing::info!(loop_id = %record.id, "Harden loop HARDENED (spec PR merged)");
+                                Ok(LoopState::Hardened)
+                            } else {
+                                // PR created but not auto-merged: needs human merge
+                                record.state = LoopState::Converged;
+                                record.sub_state = None;
+                                record.active_job_name = None;
+                                record.hardened_spec_path =
+                                    Some(record.spec_path.clone());
+                                self.store.update_loop(record).await?;
+                                tracing::info!(loop_id = %record.id, "Harden loop CONVERGED (spec PR needs human merge)");
+                                Ok(LoopState::Converged)
+                            }
                         } else if record.auto_approve {
                             // Auto-approve: go to implementing
                             self.start_implementing(record).await
