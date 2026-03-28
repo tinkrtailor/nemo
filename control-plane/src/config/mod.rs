@@ -18,6 +18,30 @@ pub struct NemoConfig {
     pub harden: HardenMergeConfig,
 }
 
+impl NemoConfig {
+    /// Load config from `NEMO_CONFIG_PATH` env var, or `/etc/nemo/nemo.toml`,
+    /// or fall back to defaults if no file exists.
+    pub fn load() -> std::result::Result<Self, String> {
+        let path = std::env::var("NEMO_CONFIG_PATH")
+            .unwrap_or_else(|_| "/etc/nemo/nemo.toml".to_string());
+
+        let path = std::path::Path::new(&path);
+        if !path.exists() {
+            tracing::warn!(path = %path.display(), "Config file not found, using defaults");
+            return Ok(Self::default());
+        }
+
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read config at {}: {e}", path.display()))?;
+
+        let config: NemoConfig = toml::from_str(&contents)
+            .map_err(|e| format!("Failed to parse config at {}: {e}", path.display()))?;
+
+        tracing::info!(path = %path.display(), "Loaded config");
+        Ok(config)
+    }
+}
+
 /// Ship configuration from `[ship]` in nemo.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShipConfig {

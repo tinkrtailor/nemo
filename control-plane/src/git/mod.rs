@@ -96,9 +96,18 @@ pub mod bare {
                 .await
                 .map_err(|e| crate::error::NemoError::Git(format!("Failed to get HEAD: {e}")))?;
 
-            self.run_git(&["branch", branch, "HEAD"])
-                .await
-                .map_err(|e| crate::error::NemoError::Git(format!("Failed to create branch: {e}")))?;
+            // If branch already exists (from a previous terminal run), reset it to HEAD
+            match self.run_git(&["branch", branch, "HEAD"]).await {
+                Ok(_) => {}
+                Err(_) => {
+                    // Branch exists — reset it to current HEAD for a fresh start
+                    self.run_git(&["branch", "-f", branch, "HEAD"])
+                        .await
+                        .map_err(|e| crate::error::NemoError::Git(
+                            format!("Failed to reset existing branch {branch}: {e}")
+                        ))?;
+                }
+            }
 
             Ok(head_sha)
         }
@@ -144,20 +153,24 @@ pub mod bare {
                 .args(["add", path])
                 .current_dir(&worktree_dir)
                 .output()
-                .await;
-            if let Err(e) = add {
+                .await
+                .map_err(|e| crate::error::NemoError::Git(format!("git add spawn failed: {e}")))?;
+            if !add.status.success() {
+                let stderr = String::from_utf8_lossy(&add.stderr).trim().to_string();
                 let _ = self.run_git(&["worktree", "remove", "--force", &worktree_dir]).await;
-                return Err(crate::error::NemoError::Git(format!("git add failed: {e}")));
+                return Err(crate::error::NemoError::Git(format!("git add failed: {stderr}")));
             }
 
             let commit = Command::new("git")
                 .args(["commit", "-m", &format!("chore(agent): add {path}")])
                 .current_dir(&worktree_dir)
                 .output()
-                .await;
-            if let Err(e) = commit {
+                .await
+                .map_err(|e| crate::error::NemoError::Git(format!("git commit spawn failed: {e}")))?;
+            if !commit.status.success() {
+                let stderr = String::from_utf8_lossy(&commit.stderr).trim().to_string();
                 let _ = self.run_git(&["worktree", "remove", "--force", &worktree_dir]).await;
-                return Err(crate::error::NemoError::Git(format!("git commit failed: {e}")));
+                return Err(crate::error::NemoError::Git(format!("git commit failed: {stderr}")));
             }
 
             // Clean up worktree

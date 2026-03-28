@@ -10,9 +10,9 @@ pub struct NemoClient {
 }
 
 impl NemoClient {
-    pub fn new(base_url: &str, api_key: Option<&str>) -> Self {
+    pub fn new(base_url: &str, api_key: Option<&str>, insecure: bool) -> Self {
         let client = Client::builder()
-            .danger_accept_invalid_certs(true) // For self-signed certs in dev
+            .danger_accept_invalid_certs(insecure)
             .build()
             .expect("Failed to create HTTP client");
 

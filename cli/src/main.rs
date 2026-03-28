@@ -13,6 +13,10 @@ struct Cli {
     /// API server URL override
     #[arg(long, global = true)]
     server: Option<String>,
+
+    /// Disable TLS certificate verification (dev/self-signed certs only)
+    #[arg(long, global = true)]
+    insecure: bool,
 }
 
 #[derive(Subcommand)]
@@ -164,7 +168,8 @@ async fn main() -> anyhow::Result<()> {
 
     let server_url = cli.server.unwrap_or(eng_config.server_url.clone());
 
-    let http_client = client::NemoClient::new(&server_url, eng_config.api_key.as_deref());
+    let insecure = cli.insecure || std::env::var("NEMO_INSECURE").is_ok();
+    let http_client = client::NemoClient::new(&server_url, eng_config.api_key.as_deref(), insecure);
 
     match cli.command {
         Commands::Harden {

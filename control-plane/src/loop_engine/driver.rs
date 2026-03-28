@@ -703,6 +703,14 @@ impl ConvergentLoopDriver {
 
         // Detect credential expiry (FR-10): transition to AWAITING_REAUTH
         if is_auth_error(reason) && record.state.is_active_stage() {
+            // Delete the failed Job so redispatch on resume doesn't hit AlreadyExists
+            if let Some(ref job_name) = record.active_job_name {
+                let _ = self
+                    .dispatcher
+                    .delete_job(job_name, &self.config.cluster.jobs_namespace)
+                    .await;
+            }
+
             updated.state = LoopState::AwaitingReauth;
             updated.sub_state = None;
             updated.reauth_from_state = Some(record.state);

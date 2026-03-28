@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting Nemo control plane");
 
-    let config = NemoConfig::default();
+    let config = NemoConfig::load().map_err(|e| anyhow::anyhow!(e))?;
     let config_arc = Arc::new(config.clone());
 
     // Connect to Postgres and run migrations
