@@ -45,6 +45,8 @@ fn parse_loop_state(s: &str) -> LoopState {
         "CANCELLED" => LoopState::Cancelled,
         "PAUSED" => LoopState::Paused,
         "AWAITING_REAUTH" => LoopState::AwaitingReauth,
+        "HARDENED" => LoopState::Hardened,
+        "SHIPPED" => LoopState::Shipped,
         _ => LoopState::Pending,
     }
 }
@@ -79,6 +81,8 @@ fn loop_state_str(s: LoopState) -> &'static str {
         LoopState::Cancelled => "CANCELLED",
         LoopState::Paused => "PAUSED",
         LoopState::AwaitingReauth => "AWAITING_REAUTH",
+        LoopState::Hardened => "HARDENED",
+        LoopState::Shipped => "SHIPPED",
     }
 }
 
@@ -128,8 +132,13 @@ fn row_to_loop_record(row: &PgRow) -> LoopRecord {
         session_id: row.get("session_id"),
         active_job_name: row.get("active_job_name"),
         retry_count: row.get("retry_count"),
+        ship_mode: row.get("ship_mode"),
         model_implementor: row.get("model_implementor"),
         model_reviewer: row.get("model_reviewer"),
+        merge_sha: row.get("merge_sha"),
+        merged_at: row.get("merged_at"),
+        hardened_spec_path: row.get("hardened_spec_path"),
+        spec_pr_url: row.get("spec_pr_url"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
@@ -180,17 +189,19 @@ impl StateStore for PgStateStore {
             INSERT INTO loops (
                 id, engineer, spec_path, spec_content_hash, branch, kind,
                 state, sub_state, round, max_rounds, harden, harden_only,
-                auto_approve, cancel_requested, approve_requested, resume_requested,
+                auto_approve, ship_mode, cancel_requested, approve_requested, resume_requested,
                 paused_from_state, reauth_from_state, failure_reason, current_sha,
                 session_id, active_job_name, retry_count, model_implementor,
-                model_reviewer, created_at, updated_at
+                model_reviewer, merge_sha, merged_at, hardened_spec_path, spec_pr_url,
+                created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6::loop_kind,
                 $7::loop_state, $8::sub_state, $9, $10, $11, $12,
-                $13, $14, $15, $16,
-                $17::loop_state, $18::loop_state, $19, $20,
-                $21, $22, $23, $24,
-                $25, $26, $27
+                $13, $14, $15, $16, $17,
+                $18::loop_state, $19::loop_state, $20, $21,
+                $22, $23, $24, $25,
+                $26, $27, $28, $29, $30,
+                $31, $32
             )
             RETURNING *
             "#,
@@ -208,6 +219,7 @@ impl StateStore for PgStateStore {
         .bind(record.harden)
         .bind(record.harden_only)
         .bind(record.auto_approve)
+        .bind(record.ship_mode)
         .bind(record.cancel_requested)
         .bind(record.approve_requested)
         .bind(record.resume_requested)
@@ -220,6 +232,10 @@ impl StateStore for PgStateStore {
         .bind(record.retry_count)
         .bind(&record.model_implementor)
         .bind(&record.model_reviewer)
+        .bind(&record.merge_sha)
+        .bind(record.merged_at)
+        .bind(&record.hardened_spec_path)
+        .bind(&record.spec_pr_url)
         .bind(record.created_at)
         .bind(record.updated_at)
         .fetch_one(&self.pool)
@@ -239,7 +255,7 @@ impl StateStore for PgStateStore {
 
     async fn get_loop_by_branch(&self, branch: &str) -> Result<Option<LoopRecord>> {
         let row = sqlx::query(
-            "SELECT * FROM loops WHERE branch = $1 AND state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED')",
+            "SELECT * FROM loops WHERE branch = $1 AND state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED')",
         )
         .bind(branch)
         .fetch_optional(&self.pool)
@@ -308,6 +324,8 @@ impl StateStore for PgStateStore {
                 paused_from_state = $8::loop_state, reauth_from_state = $9::loop_state,
                 failure_reason = $10, current_sha = $11, session_id = $12,
                 active_job_name = $13, retry_count = $14,
+                merge_sha = $15, merged_at = $16,
+                hardened_spec_path = $17, spec_pr_url = $18,
                 updated_at = NOW()
             WHERE id = $1
             "#,
@@ -326,6 +344,10 @@ impl StateStore for PgStateStore {
         .bind(&record.session_id)
         .bind(&record.active_job_name)
         .bind(record.retry_count)
+        .bind(&record.merge_sha)
+        .bind(record.merged_at)
+        .bind(&record.hardened_spec_path)
+        .bind(&record.spec_pr_url)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -348,7 +370,7 @@ impl StateStore for PgStateStore {
 
     async fn has_active_loop_for_branch(&self, branch: &str) -> Result<bool> {
         let row: (bool,) = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM loops WHERE branch = $1 AND state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED'))",
+            "SELECT EXISTS(SELECT 1 FROM loops WHERE branch = $1 AND state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED'))",
         )
         .bind(branch)
         .fetch_one(&self.pool)
@@ -521,5 +543,20 @@ impl StateStore for PgStateStore {
         .fetch_one(&self.pool)
         .await?;
         Ok(row.0)
+    }
+
+    async fn create_merge_event(&self, event: &crate::types::MergeEvent) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO merge_events (id, loop_id, merge_sha, merge_strategy, ci_status, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(event.id)
+        .bind(event.loop_id)
+        .bind(&event.merge_sha)
+        .bind(&event.merge_strategy)
+        .bind(&event.ci_status)
+        .bind(event.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }

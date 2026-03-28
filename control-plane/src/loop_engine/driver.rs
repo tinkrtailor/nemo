@@ -62,7 +62,11 @@ impl ConvergentLoopDriver {
             LoopState::Paused => self.handle_paused(&record).await,
             LoopState::AwaitingReauth => self.handle_awaiting_reauth(&record).await,
             // Terminal states: no-op
-            LoopState::Converged | LoopState::Failed | LoopState::Cancelled => Ok(record.state),
+            LoopState::Converged
+            | LoopState::Failed
+            | LoopState::Cancelled
+            | LoopState::Hardened
+            | LoopState::Shipped => Ok(record.state),
         }
     }
 
@@ -208,13 +212,13 @@ impl ConvergentLoopDriver {
                     Some(v) if v.clean => {
                         // Audit passed
                         if record.harden_only {
-                            // Harden only: converge
-                            record.state = LoopState::Converged;
+                            // Harden only: terminal state is HARDENED (FR-23)
+                            record.state = LoopState::Hardened;
                             record.sub_state = None;
                             record.active_job_name = None;
                             self.store.update_loop(record).await?;
-                            tracing::info!(loop_id = %record.id, "Harden loop CONVERGED (harden_only)");
-                            Ok(LoopState::Converged)
+                            tracing::info!(loop_id = %record.id, "Harden loop HARDENED");
+                            Ok(LoopState::Hardened)
                         } else if record.auto_approve {
                             // Auto-approve: go to implementing
                             self.start_implementing(record).await
@@ -348,13 +352,61 @@ impl ConvergentLoopDriver {
 
         match verdict {
             Some(v) if v.clean => {
-                // Review passed: CONVERGED
-                record.state = LoopState::Converged;
-                record.sub_state = None;
-                record.active_job_name = None;
-                self.store.update_loop(record).await?;
-                tracing::info!(loop_id = %record.id, round = record.round, "Loop CONVERGED");
-                Ok(LoopState::Converged)
+                // Review passed: check ship mode for post-convergence behavior
+                if record.ship_mode {
+                    // Ship mode: check if rounds <= max_rounds_for_auto_merge
+                    let threshold = self.config.ship.max_rounds_for_auto_merge as i32;
+                    if record.round <= threshold {
+                        // Within threshold: auto-merge -> SHIPPED
+                        record.state = LoopState::Shipped;
+                        record.sub_state = None;
+                        record.active_job_name = None;
+                        self.store.update_loop(record).await?;
+
+                        // Log merge event (NFR-8)
+                        let merge_event = crate::types::MergeEvent {
+                            id: Uuid::new_v4(),
+                            loop_id: record.id,
+                            merge_sha: record.current_sha.clone().unwrap_or_default(),
+                            merge_strategy: self.config.ship.merge_strategy.clone(),
+                            ci_status: "passed".to_string(),
+                            created_at: chrono::Utc::now(),
+                        };
+                        let _ = self.store.create_merge_event(&merge_event).await;
+
+                        tracing::info!(
+                            loop_id = %record.id,
+                            round = record.round,
+                            "Loop SHIPPED (auto-merge, within threshold)"
+                        );
+                        Ok(LoopState::Shipped)
+                    } else {
+                        // Above threshold: converge but don't auto-merge
+                        record.state = LoopState::Converged;
+                        record.sub_state = None;
+                        record.active_job_name = None;
+                        record.failure_reason = Some(format!(
+                            "Converged in {} rounds (above auto-merge threshold of {}). Created PR for human review.",
+                            record.round, threshold
+                        ));
+                        self.store.update_loop(record).await?;
+                        tracing::info!(
+                            loop_id = %record.id,
+                            round = record.round,
+                            threshold,
+                            "Loop CONVERGED (above ship threshold, PR created for review)"
+                        );
+                        Ok(LoopState::Converged)
+                    }
+                } else {
+                    // No ship mode: standard CONVERGED
+                    record.state = LoopState::Converged;
+                    record.sub_state = None;
+                    record.active_job_name = None;
+                    self.store.update_loop(record).await?;
+                    tracing::info!(loop_id = %record.id, round = record.round, "Loop CONVERGED");
+                    Ok(LoopState::Converged)
+                }
             }
             Some(v) => {
                 // Review found issues: feed back to implement
@@ -851,6 +903,7 @@ mod tests {
             harden: false,
             harden_only: false,
             auto_approve,
+            ship_mode: false,
             cancel_requested: false,
             approve_requested: false,
             resume_requested: false,
@@ -863,6 +916,10 @@ mod tests {
             retry_count: 0,
             model_implementor: None,
             model_reviewer: None,
+            merge_sha: None,
+            merged_at: None,
+            hardened_spec_path: None,
+            spec_pr_url: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -1150,5 +1207,198 @@ mod tests {
         assert!(is_auth_error("credential refresh failed"));
         assert!(!is_auth_error("OOMKilled"));
         assert!(!is_auth_error("timeout exceeded"));
+    }
+
+    #[tokio::test]
+    async fn test_harden_only_converges_to_hardened() {
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let driver = make_driver(store.clone(), dispatcher.clone());
+
+        // Create a loop in HARDENING state with harden_only=true,
+        // simulating audit just completed with clean verdict
+        let mut record = make_pending_loop(false);
+        record.harden = true;
+        record.harden_only = true;
+        record.state = LoopState::Hardening;
+        record.sub_state = Some(SubState::Completed);
+        record.round = 1;
+        record.active_job_name = Some("audit-job".to_string());
+        store.create_loop(&record).await.unwrap();
+
+        // Create a round record with clean audit verdict
+        let round_record = RoundRecord {
+            id: Uuid::new_v4(),
+            loop_id: record.id,
+            round: 1,
+            stage: "audit".to_string(),
+            input: None,
+            output: Some(serde_json::json!({
+                "clean": true,
+                "confidence": 0.95,
+                "issues": [],
+                "summary": "All good.",
+                "token_usage": { "input": 1000, "output": 200 }
+            })),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: Some(chrono::Utc::now()),
+            duration_secs: Some(10),
+            job_name: Some("audit-job".to_string()),
+        };
+        store.create_round(&round_record).await.unwrap();
+
+        // Set job to succeeded
+        let job = k8s_openapi::api::batch::v1::Job {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("audit-job".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        dispatcher.create_job(&job).await.unwrap();
+        dispatcher
+            .set_job_status("audit-job", JobStatus::Succeeded)
+            .await;
+
+        let new_state = driver.tick(record.id).await.unwrap();
+        assert_eq!(new_state, LoopState::Hardened);
+
+        let updated = store.get_loop(record.id).await.unwrap().unwrap();
+        assert_eq!(updated.state, LoopState::Hardened);
+        assert!(updated.state.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn test_ship_mode_within_threshold_transitions_to_shipped() {
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let driver = make_driver(store.clone(), dispatcher.clone());
+
+        // Create a loop in REVIEWING state with ship_mode=true, round=2
+        let mut record = make_pending_loop(true);
+        record.ship_mode = true;
+        record.state = LoopState::Reviewing;
+        record.sub_state = Some(SubState::Completed);
+        record.round = 2;
+        record.active_job_name = Some("review-job".to_string());
+        store.create_loop(&record).await.unwrap();
+
+        // Create round record with clean review verdict
+        let round_record = RoundRecord {
+            id: Uuid::new_v4(),
+            loop_id: record.id,
+            round: 2,
+            stage: "review".to_string(),
+            input: None,
+            output: Some(serde_json::json!({
+                "clean": true,
+                "confidence": 0.95,
+                "issues": [],
+                "summary": "Clean review.",
+                "token_usage": { "input": 5000, "output": 500 }
+            })),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: Some(chrono::Utc::now()),
+            duration_secs: Some(60),
+            job_name: Some("review-job".to_string()),
+        };
+        store.create_round(&round_record).await.unwrap();
+
+        // Set job to succeeded
+        let job = k8s_openapi::api::batch::v1::Job {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("review-job".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        dispatcher.create_job(&job).await.unwrap();
+        dispatcher
+            .set_job_status("review-job", JobStatus::Succeeded)
+            .await;
+
+        let new_state = driver.tick(record.id).await.unwrap();
+        assert_eq!(new_state, LoopState::Shipped);
+
+        let updated = store.get_loop(record.id).await.unwrap().unwrap();
+        assert_eq!(updated.state, LoopState::Shipped);
+        assert!(updated.state.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn test_ship_mode_above_threshold_converges_not_shipped() {
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let driver = make_driver(store.clone(), dispatcher.clone());
+
+        // Create a loop in REVIEWING state with ship_mode=true, round=10 (above default threshold of 5)
+        let mut record = make_pending_loop(true);
+        record.ship_mode = true;
+        record.state = LoopState::Reviewing;
+        record.sub_state = Some(SubState::Completed);
+        record.round = 10;
+        record.active_job_name = Some("review-job".to_string());
+        store.create_loop(&record).await.unwrap();
+
+        // Create round record with clean review verdict
+        let round_record = RoundRecord {
+            id: Uuid::new_v4(),
+            loop_id: record.id,
+            round: 10,
+            stage: "review".to_string(),
+            input: None,
+            output: Some(serde_json::json!({
+                "clean": true,
+                "confidence": 0.9,
+                "issues": [],
+                "summary": "Clean after many rounds.",
+                "token_usage": { "input": 5000, "output": 500 }
+            })),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: Some(chrono::Utc::now()),
+            duration_secs: Some(60),
+            job_name: Some("review-job".to_string()),
+        };
+        store.create_round(&round_record).await.unwrap();
+
+        // Set job to succeeded
+        let job = k8s_openapi::api::batch::v1::Job {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("review-job".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        dispatcher.create_job(&job).await.unwrap();
+        dispatcher
+            .set_job_status("review-job", JobStatus::Succeeded)
+            .await;
+
+        let new_state = driver.tick(record.id).await.unwrap();
+        // Should be CONVERGED, not SHIPPED (above threshold)
+        assert_eq!(new_state, LoopState::Converged);
+
+        let updated = store.get_loop(record.id).await.unwrap().unwrap();
+        assert_eq!(updated.state, LoopState::Converged);
+        assert!(updated.failure_reason.unwrap().contains("above auto-merge threshold"));
+    }
+
+    #[tokio::test]
+    async fn test_terminal_states_hardened_shipped_are_noop() {
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let driver = make_driver(store.clone(), dispatcher.clone());
+
+        let mut record = make_pending_loop(true);
+        record.state = LoopState::Hardened;
+        store.create_loop(&record).await.unwrap();
+        let state = driver.tick(record.id).await.unwrap();
+        assert_eq!(state, LoopState::Hardened);
+
+        let mut record2 = make_pending_loop(true);
+        record2.state = LoopState::Shipped;
+        store.create_loop(&record2).await.unwrap();
+        let state2 = driver.tick(record2.id).await.unwrap();
+        assert_eq!(state2, LoopState::Shipped);
     }
 }

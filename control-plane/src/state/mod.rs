@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::error::Result;
 use crate::types::{
-    EngineerCredential, LogEvent, LoopRecord, LoopState, RoundRecord, SubState,
+    EngineerCredential, LogEvent, LoopRecord, LoopState, MergeEvent, RoundRecord, SubState,
 };
 
 /// Trait abstracting all database operations for the control plane.
@@ -83,6 +83,9 @@ pub trait StateStore: Send + Sync + 'static {
 
     /// Check if credentials are valid for an engineer and provider.
     async fn are_credentials_valid(&self, engineer: &str, provider: &str) -> Result<bool>;
+
+    /// Create a merge event record (NFR-8).
+    async fn create_merge_event(&self, event: &MergeEvent) -> Result<()>;
 }
 
 /// Flags that can be set on a loop by the API server.
@@ -106,6 +109,7 @@ pub mod memory {
         rounds: Arc<RwLock<Vec<RoundRecord>>>,
         logs: Arc<RwLock<Vec<LogEvent>>>,
         credentials: Arc<RwLock<Vec<EngineerCredential>>>,
+        merge_events: Arc<RwLock<Vec<MergeEvent>>>,
     }
 
     impl MemoryStateStore {
@@ -293,6 +297,12 @@ pub mod memory {
             Ok(creds
                 .iter()
                 .any(|c| c.engineer == engineer && c.provider == provider && c.valid))
+        }
+
+        async fn create_merge_event(&self, event: &MergeEvent) -> Result<()> {
+            let mut events = self.merge_events.write().await;
+            events.push(event.clone());
+            Ok(())
         }
     }
 }

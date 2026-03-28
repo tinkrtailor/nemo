@@ -24,6 +24,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Starting Nemo control plane");
 
     let config = NemoConfig::default();
+    let config_arc = Arc::new(config.clone());
 
     // For now, use in-memory/mock implementations.
     // Production: use PgStateStore, KubeJobDispatcher, real GitOperations.
@@ -43,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
     let app_state = AppState {
         store: store.clone(),
         git: git.clone(),
+        config: config_arc,
     };
     let router = api::build_router(app_state);
 

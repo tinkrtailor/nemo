@@ -44,6 +44,9 @@ pub enum NemoError {
     #[error("Git operation failed: {0}")]
     Git(String),
 
+    #[error("nemo ship is not enabled for this repo. Set [ship] allowed = true in nemo.toml")]
+    ShipNotEnabled,
+
     #[error("Config error: {0}")]
     Config(String),
 
@@ -62,6 +65,7 @@ impl NemoError {
                 StatusCode::CONFLICT
             }
             Self::AuthenticationFailed | Self::UnknownEngineer => StatusCode::UNAUTHORIZED,
+            Self::ShipNotEnabled => StatusCode::BAD_REQUEST,
             Self::Database(_) | Self::ClusterUnavailable | Self::Kube(_) => {
                 StatusCode::SERVICE_UNAVAILABLE
             }

@@ -12,6 +12,72 @@ pub struct NemoConfig {
     pub models: ModelConfig,
     #[serde(default)]
     pub cluster: ClusterConfig,
+    #[serde(default)]
+    pub ship: ShipConfig,
+    #[serde(default)]
+    pub harden: HardenMergeConfig,
+}
+
+/// Ship configuration from `[ship]` in nemo.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShipConfig {
+    /// Enable nemo ship (default: false).
+    #[serde(default)]
+    pub allowed: bool,
+    /// Wait for CI before merge (default: true).
+    #[serde(default = "default_true")]
+    pub require_passing_ci: bool,
+    /// Force --harden on nemo ship (default: false).
+    #[serde(default)]
+    pub require_harden: bool,
+    /// Max rounds for auto-merge threshold (default: 5).
+    #[serde(default = "default_max_rounds_auto_merge")]
+    pub max_rounds_for_auto_merge: u32,
+    /// Merge strategy: squash | merge | rebase (default: squash).
+    #[serde(default = "default_merge_strategy")]
+    pub merge_strategy: String,
+}
+
+impl Default for ShipConfig {
+    fn default() -> Self {
+        Self {
+            allowed: false,
+            require_passing_ci: true,
+            require_harden: false,
+            max_rounds_for_auto_merge: default_max_rounds_auto_merge(),
+            merge_strategy: default_merge_strategy(),
+        }
+    }
+}
+
+/// Harden merge configuration from `[harden]` in nemo.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardenMergeConfig {
+    /// Merge strategy for spec PRs (default: squash).
+    #[serde(default = "default_merge_strategy")]
+    pub merge_strategy: String,
+    /// Auto-merge the hardened spec PR (default: true).
+    #[serde(default = "default_true")]
+    pub auto_merge_spec_pr: bool,
+}
+
+impl Default for HardenMergeConfig {
+    fn default() -> Self {
+        Self {
+            merge_strategy: default_merge_strategy(),
+            auto_merge_spec_pr: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_max_rounds_auto_merge() -> u32 {
+    5
+}
+fn default_merge_strategy() -> String {
+    "squash".to_string()
 }
 
 

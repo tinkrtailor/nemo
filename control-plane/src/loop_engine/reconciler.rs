@@ -153,6 +153,7 @@ mod tests {
             harden: false,
             harden_only: false,
             auto_approve: true,
+            ship_mode: false,
             cancel_requested: false,
             approve_requested: false,
             resume_requested: false,
@@ -165,6 +166,10 @@ mod tests {
             retry_count: 0,
             model_implementor: None,
             model_reviewer: None,
+            merge_sha: None,
+            merged_at: None,
+            hardened_spec_path: None,
+            spec_pr_url: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

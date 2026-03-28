@@ -23,6 +23,8 @@ pub enum LoopState {
     Cancelled,
     Paused,
     AwaitingReauth,
+    Hardened,
+    Shipped,
 }
 
 impl fmt::Display for LoopState {
@@ -39,6 +41,8 @@ impl fmt::Display for LoopState {
             Self::Cancelled => write!(f, "CANCELLED"),
             Self::Paused => write!(f, "PAUSED"),
             Self::AwaitingReauth => write!(f, "AWAITING_REAUTH"),
+            Self::Hardened => write!(f, "HARDENED"),
+            Self::Shipped => write!(f, "SHIPPED"),
         }
     }
 }
@@ -46,7 +50,10 @@ impl fmt::Display for LoopState {
 impl LoopState {
     /// Whether this state is terminal (no further transitions possible).
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Converged | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Converged | Self::Failed | Self::Cancelled | Self::Hardened | Self::Shipped
+        )
     }
 
     /// Whether this state is an active stage that has sub-states.
@@ -158,8 +165,13 @@ pub struct LoopRecord {
     pub session_id: Option<String>,
     pub active_job_name: Option<String>,
     pub retry_count: i32,
+    pub ship_mode: bool,
     pub model_implementor: Option<String>,
     pub model_reviewer: Option<String>,
+    pub merge_sha: Option<String>,
+    pub merged_at: Option<DateTime<Utc>>,
+    pub hardened_spec_path: Option<String>,
+    pub spec_pr_url: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -199,6 +211,17 @@ pub struct EngineerCredential {
     pub credential_ref: String,
     pub valid: bool,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A merge event logged when ship mode auto-merges (NFR-8).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeEvent {
+    pub id: Uuid,
+    pub loop_id: Uuid,
+    pub merge_sha: String,
+    pub merge_strategy: String,
+    pub ci_status: String,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Generate a branch name per FR-5: agent/{engineer}/{spec-slug}-{short-hash}
@@ -253,6 +276,8 @@ mod tests {
         assert!(LoopState::Converged.is_terminal());
         assert!(LoopState::Failed.is_terminal());
         assert!(LoopState::Cancelled.is_terminal());
+        assert!(LoopState::Hardened.is_terminal());
+        assert!(LoopState::Shipped.is_terminal());
         assert!(!LoopState::Pending.is_terminal());
         assert!(!LoopState::Implementing.is_terminal());
     }

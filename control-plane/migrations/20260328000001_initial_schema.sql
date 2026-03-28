@@ -12,7 +12,9 @@ CREATE TYPE loop_state AS ENUM (
     'FAILED',
     'CANCELLED',
     'PAUSED',
-    'AWAITING_REAUTH'
+    'AWAITING_REAUTH',
+    'HARDENED',
+    'SHIPPED'
 );
 
 CREATE TYPE sub_state AS ENUM (
@@ -41,6 +43,7 @@ CREATE TABLE loops (
     harden BOOLEAN NOT NULL DEFAULT FALSE,
     harden_only BOOLEAN NOT NULL DEFAULT FALSE,
     auto_approve BOOLEAN NOT NULL DEFAULT FALSE,
+    ship_mode BOOLEAN NOT NULL DEFAULT FALSE,
     cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
     approve_requested BOOLEAN NOT NULL DEFAULT FALSE,
     resume_requested BOOLEAN NOT NULL DEFAULT FALSE,
@@ -53,17 +56,21 @@ CREATE TABLE loops (
     retry_count INTEGER NOT NULL DEFAULT 0,
     model_implementor TEXT,
     model_reviewer TEXT,
+    merge_sha TEXT,
+    merged_at TIMESTAMPTZ,
+    hardened_spec_path TEXT,
+    spec_pr_url TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Index for finding active loops (non-terminal states)
 CREATE INDEX idx_loops_active ON loops (state)
-    WHERE state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED');
+    WHERE state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED');
 
 -- Index for branch uniqueness check (active loops only)
 CREATE UNIQUE INDEX idx_loops_active_branch ON loops (branch)
-    WHERE state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED');
+    WHERE state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED');
 
 -- Index for engineer status queries
 CREATE INDEX idx_loops_engineer ON loops (engineer);
@@ -111,3 +118,15 @@ CREATE TABLE engineer_credentials (
 );
 
 CREATE UNIQUE INDEX idx_credentials_engineer_provider ON engineer_credentials (engineer, provider);
+
+-- Merge events table (NFR-8): log auto-merge events from nemo ship
+CREATE TABLE merge_events (
+    id UUID PRIMARY KEY,
+    loop_id UUID NOT NULL REFERENCES loops(id),
+    merge_sha TEXT NOT NULL,
+    merge_strategy TEXT NOT NULL,
+    ci_status TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_merge_events_loop ON merge_events (loop_id);

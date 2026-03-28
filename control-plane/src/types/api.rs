@@ -4,9 +4,9 @@ use uuid::Uuid;
 
 use super::{LoopState, SubState};
 
-/// POST /submit request body.
+/// POST /start request body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmitRequest {
+pub struct StartRequest {
     pub spec_path: String,
     pub engineer: String,
     #[serde(default)]
@@ -15,6 +15,8 @@ pub struct SubmitRequest {
     pub harden_only: bool,
     #[serde(default)]
     pub auto_approve: bool,
+    #[serde(default)]
+    pub ship_mode: bool,
     #[serde(default)]
     pub model_overrides: Option<ModelOverrides>,
 }
@@ -25,12 +27,20 @@ pub struct ModelOverrides {
     pub reviewer: Option<String>,
 }
 
-/// POST /submit response body.
+/// POST /start response body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmitResponse {
+pub struct StartResponse {
     pub loop_id: Uuid,
     pub branch: String,
     pub state: LoopState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardened_spec_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_pr_url: Option<String>,
 }
 
 /// GET /status response body.

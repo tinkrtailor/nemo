@@ -8,16 +8,21 @@ use super::AppState;
 use crate::error::NemoError;
 use crate::state::LoopFlag;
 use crate::types::api::{
-    ApproveResponse, CancelResponse, InspectResponse, LogsQuery, ResumeResponse, RoundSummary,
-    StatusQuery, StatusResponse, SubmitRequest, SubmitResponse, LoopSummary,
+    ApproveResponse, CancelResponse, InspectResponse, LogsQuery, LoopSummary, ResumeResponse,
+    RoundSummary, StartRequest, StartResponse, StatusQuery, StatusResponse,
 };
 use crate::types::{generate_branch_name, LoopKind, LoopRecord, LoopState};
 
-/// POST /submit - Submit a spec for processing.
-pub async fn submit(
+/// POST /start - Submit a spec for processing.
+pub async fn start(
     State(state): State<AppState>,
-    Json(req): Json<SubmitRequest>,
+    Json(req): Json<StartRequest>,
 ) -> Result<impl IntoResponse, NemoError> {
+    // If ship_mode, check that ship is allowed in config
+    if req.ship_mode && !state.config.ship.allowed {
+        return Err(NemoError::ShipNotEnabled);
+    }
+
     // Validate spec exists in repo
     if !state.git.spec_exists(&req.spec_path).await? {
         return Err(NemoError::SpecNotFound {
@@ -45,13 +50,24 @@ pub async fn submit(
         hex::encode(hasher.finalize())[..8].to_string()
     };
 
-    let kind = if req.harden {
+    let kind = if req.harden || req.harden_only {
         LoopKind::Harden
     } else {
         LoopKind::Implement
     };
 
-    let max_rounds = if req.harden { 10 } else { 15 };
+    // Determine max rounds from config
+    let max_rounds = if req.harden || req.harden_only {
+        state.config.limits.max_rounds_harden as i32
+    } else {
+        state.config.limits.max_rounds_implement as i32
+    };
+
+    // If ship_mode with require_harden and no --harden, auto-add harden (FR-20)
+    let effective_harden = req.harden || (req.ship_mode && state.config.ship.require_harden);
+
+    // ship --harden implies auto_approve (FR-20: zero human gates)
+    let effective_auto_approve = req.auto_approve || req.ship_mode;
 
     let record = LoopRecord {
         id: loop_id,
@@ -64,9 +80,10 @@ pub async fn submit(
         sub_state: None,
         round: 0,
         max_rounds,
-        harden: req.harden,
+        harden: effective_harden,
         harden_only: req.harden_only,
-        auto_approve: req.auto_approve,
+        auto_approve: effective_auto_approve,
+        ship_mode: req.ship_mode,
         cancel_requested: false,
         approve_requested: false,
         resume_requested: false,
@@ -79,6 +96,10 @@ pub async fn submit(
         retry_count: 0,
         model_implementor: req.model_overrides.as_ref().and_then(|m| m.implementor.clone()),
         model_reviewer: req.model_overrides.as_ref().and_then(|m| m.reviewer.clone()),
+        merge_sha: None,
+        merged_at: None,
+        hardened_spec_path: None,
+        spec_pr_url: None,
         created_at: now,
         updated_at: now,
     };
@@ -90,13 +111,18 @@ pub async fn submit(
         engineer = %req.engineer,
         spec_path = %req.spec_path,
         branch = %branch,
-        "Submitted new loop"
+        ship_mode = req.ship_mode,
+        "Started new loop"
     );
 
-    let response = SubmitResponse {
+    let response = StartResponse {
         loop_id,
         branch,
         state: LoopState::Pending,
+        merge_sha: None,
+        merged_at: None,
+        hardened_spec_path: None,
+        spec_pr_url: None,
     };
 
     Ok((StatusCode::CREATED, Json(response)))
@@ -164,9 +190,11 @@ pub async fn logs(
     }
 
     // For active loops, use SSE streaming
-    Ok(super::sse::stream_logs(state.store, id, query.round, query.stage)
-        .await
-        .into_response())
+    Ok(
+        super::sse::stream_logs(state.store, id, query.round, query.stage)
+            .await
+            .into_response(),
+    )
 }
 
 /// DELETE /cancel/:id - Cancel a running loop.
@@ -189,7 +217,10 @@ pub async fn cancel(
     }
 
     // Set cancel flag; the loop engine handles the actual cancellation
-    state.store.set_loop_flag(id, LoopFlag::Cancel, true).await?;
+    state
+        .store
+        .set_loop_flag(id, LoopFlag::Cancel, true)
+        .await?;
 
     Ok(Json(CancelResponse {
         loop_id: id,
@@ -271,9 +302,7 @@ pub async fn inspect(
         .store
         .get_loop_by_branch(&branch)
         .await?
-        .ok_or(NemoError::LoopNotFound {
-            id: Uuid::nil(),
-        })?;
+        .ok_or(NemoError::LoopNotFound { id: Uuid::nil() })?;
 
     let rounds = state.store.get_rounds(record.id).await?;
 
@@ -282,14 +311,16 @@ pub async fn inspect(
         std::collections::BTreeMap::new();
 
     for r in &rounds {
-        let summary = round_summaries.entry(r.round).or_insert_with(|| RoundSummary {
-            round: r.round,
-            implement: None,
-            test: None,
-            review: None,
-            audit: None,
-            revise: None,
-        });
+        let summary = round_summaries
+            .entry(r.round)
+            .or_insert_with(|| RoundSummary {
+                round: r.round,
+                implement: None,
+                test: None,
+                review: None,
+                audit: None,
+                revise: None,
+            });
 
         match r.stage.as_str() {
             "implement" => summary.implement = r.output.clone(),
@@ -314,6 +345,7 @@ pub async fn inspect(
 mod tests {
     use super::*;
     use crate::api::{build_router, AppState};
+    use crate::config::NemoConfig;
     use crate::git::mock::MockGitOperations;
     use crate::state::memory::MemoryStateStore;
     use crate::state::StateStore;
@@ -327,11 +359,14 @@ mod tests {
     fn test_app() -> (Router, Arc<MemoryStateStore>, Arc<MockGitOperations>) {
         let store = Arc::new(MemoryStateStore::new());
         let git = Arc::new(MockGitOperations::new());
+        let mut config = NemoConfig::default();
+        config.ship.allowed = true;
         let state = AppState {
             store: store.clone(),
             git: git.clone(),
+            config: Arc::new(config),
         };
-        let router = build_router(state);
+        let router = crate::api::build_router_no_auth(state);
         (router, store, git)
     }
 
@@ -340,7 +375,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_submit_success() {
+    async fn test_start_success() {
         let (app, _store, git) = test_app();
 
         git.add_file("specs/test.md", "# Test Spec\n").await;
@@ -355,7 +390,7 @@ mod tests {
             app,
             Request::builder()
                 .method(http::Method::POST)
-                .uri("/submit")
+                .uri("/start")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&body).unwrap()))
                 .unwrap(),
@@ -367,13 +402,13 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let resp: SubmitResponse = serde_json::from_slice(&body).unwrap();
+        let resp: StartResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(resp.state, LoopState::Pending);
         assert!(resp.branch.starts_with("agent/alice/test-"));
     }
 
     #[tokio::test]
-    async fn test_submit_spec_not_found() {
+    async fn test_start_spec_not_found() {
         let (app, _store, _git) = test_app();
 
         let body = serde_json::json!({
@@ -385,7 +420,7 @@ mod tests {
             app,
             Request::builder()
                 .method(http::Method::POST)
-                .uri("/submit")
+                .uri("/start")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&body).unwrap()))
                 .unwrap(),
@@ -396,7 +431,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_submit_duplicate_branch_conflict() {
+    async fn test_start_duplicate_branch_conflict() {
         let (app, store, git) = test_app();
 
         git.add_file("specs/test.md", "# Test Spec\n").await;
@@ -417,6 +452,7 @@ mod tests {
             harden: false,
             harden_only: false,
             auto_approve: true,
+            ship_mode: false,
             cancel_requested: false,
             approve_requested: false,
             resume_requested: false,
@@ -429,6 +465,10 @@ mod tests {
             retry_count: 0,
             model_implementor: None,
             model_reviewer: None,
+            merge_sha: None,
+            merged_at: None,
+            hardened_spec_path: None,
+            spec_pr_url: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -443,7 +483,7 @@ mod tests {
             app,
             Request::builder()
                 .method(http::Method::POST)
-                .uri("/submit")
+                .uri("/start")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&body).unwrap()))
                 .unwrap(),
@@ -471,6 +511,7 @@ mod tests {
             harden: false,
             harden_only: false,
             auto_approve: true,
+            ship_mode: false,
             cancel_requested: false,
             approve_requested: false,
             resume_requested: false,
@@ -483,6 +524,10 @@ mod tests {
             retry_count: 0,
             model_implementor: None,
             model_reviewer: None,
+            merge_sha: None,
+            merged_at: None,
+            hardened_spec_path: None,
+            spec_pr_url: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -519,6 +564,7 @@ mod tests {
             harden: false,
             harden_only: false,
             auto_approve: true,
+            ship_mode: false,
             cancel_requested: false,
             approve_requested: false,
             resume_requested: false,
@@ -531,6 +577,10 @@ mod tests {
             retry_count: 0,
             model_implementor: None,
             model_reviewer: None,
+            merge_sha: None,
+            merged_at: None,
+            hardened_spec_path: None,
+            spec_pr_url: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -554,5 +604,39 @@ mod tests {
         let resp: StatusResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(resp.loops.len(), 1);
         assert_eq!(resp.loops[0].engineer, "alice");
+    }
+
+    #[tokio::test]
+    async fn test_ship_not_enabled() {
+        let store = Arc::new(MemoryStateStore::new());
+        let git = Arc::new(MockGitOperations::new());
+        let config = NemoConfig::default(); // ship.allowed = false by default
+        let state = AppState {
+            store: store.clone(),
+            git: git.clone(),
+            config: Arc::new(config),
+        };
+        let app = crate::api::build_router_no_auth(state);
+
+        git.add_file("specs/test.md", "# Test\n").await;
+
+        let body = serde_json::json!({
+            "spec_path": "specs/test.md",
+            "engineer": "alice",
+            "ship_mode": true
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

@@ -17,22 +17,50 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Submit a spec for processing
-    Submit {
+    /// Harden spec, merge spec PR. Terminal: HARDENED
+    Harden {
         /// Path to the spec file
         spec_path: String,
 
-        /// Run hardening loop first
+        /// Override implementor model
+        #[arg(long)]
+        model_impl: Option<String>,
+
+        /// Override reviewer model
+        #[arg(long)]
+        model_review: Option<String>,
+    },
+
+    /// Implement spec, create PR. Terminal: CONVERGED
+    Start {
+        /// Path to the spec file
+        spec_path: String,
+
+        /// Harden spec first, then implement
         #[arg(long)]
         harden: bool,
-
-        /// Harden only, do not implement
-        #[arg(long)]
-        harden_only: bool,
 
         /// Skip AWAITING_APPROVAL gate
         #[arg(long)]
         auto_approve: bool,
+
+        /// Override implementor model
+        #[arg(long)]
+        model_impl: Option<String>,
+
+        /// Override reviewer model
+        #[arg(long)]
+        model_review: Option<String>,
+    },
+
+    /// Implement + auto-merge. Terminal: SHIPPED
+    Ship {
+        /// Path to the spec file
+        spec_path: String,
+
+        /// Harden first (skips approval gate), then implement + merge
+        #[arg(long)]
+        harden: bool,
 
         /// Override implementor model
         #[arg(long)]
@@ -134,29 +162,71 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let eng_config = config::load_config()?;
 
-    let server_url = cli
-        .server
-        .unwrap_or(eng_config.server_url.clone());
+    let server_url = cli.server.unwrap_or(eng_config.server_url.clone());
 
     let http_client = client::NemoClient::new(&server_url, eng_config.api_key.as_deref());
 
     match cli.command {
-        Commands::Submit {
+        Commands::Harden {
+            spec_path,
+            model_impl,
+            model_review,
+        } => {
+            // nemo harden: harden=true, harden_only=true, ship_mode=false
+            commands::start::run(
+                &http_client,
+                commands::start::StartArgs {
+                    engineer: &eng_config.engineer,
+                    spec_path: &spec_path,
+                    harden: true,
+                    harden_only: true,
+                    auto_approve: false,
+                    ship_mode: false,
+                    model_impl,
+                    model_review,
+                },
+            )
+            .await?;
+        }
+        Commands::Start {
             spec_path,
             harden,
-            harden_only,
             auto_approve,
             model_impl,
             model_review,
         } => {
-            commands::submit::run(
+            // nemo start: ship_mode=false
+            commands::start::run(
                 &http_client,
-                commands::submit::SubmitArgs {
+                commands::start::StartArgs {
                     engineer: &eng_config.engineer,
                     spec_path: &spec_path,
                     harden,
-                    harden_only,
+                    harden_only: false,
                     auto_approve,
+                    ship_mode: false,
+                    model_impl,
+                    model_review,
+                },
+            )
+            .await?;
+        }
+        Commands::Ship {
+            spec_path,
+            harden,
+            model_impl,
+            model_review,
+        } => {
+            // nemo ship: ship_mode=true, auto_approve implied
+            commands::start::run(
+                &http_client,
+                commands::start::StartArgs {
+                    engineer: &eng_config.engineer,
+                    spec_path: &spec_path,
+                    harden,
+                    harden_only: false,
+                    auto_approve: true,
+                    ship_mode: true,
                     model_impl,
                     model_review,
                 },
