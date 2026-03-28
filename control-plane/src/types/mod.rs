@@ -226,22 +226,68 @@ pub struct MergeEvent {
 }
 
 /// Generate a branch name per FR-5: agent/{engineer}/{spec-slug}-{short-hash}
+///
+/// Slugifies engineer and spec path to produce valid git refs.
+/// Includes path hash to avoid collisions between same-stem specs in different dirs.
 pub fn generate_branch_name(engineer: &str, spec_path: &str, spec_content: &str) -> String {
     use sha2::{Digest, Sha256};
 
+    let safe_engineer = slugify(engineer);
+
     // Extract slug from spec path: "specs/feature/invoice-cancel.md" -> "invoice-cancel"
-    let slug = std::path::Path::new(spec_path)
+    let raw_slug = std::path::Path::new(spec_path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown");
+    let safe_slug = slugify(raw_slug);
 
-    // First 8 chars of SHA-256 of spec content
+    // Hash includes both spec content AND full path to avoid collisions
+    // between same-name specs in different directories
     let mut hasher = Sha256::new();
+    hasher.update(spec_path.as_bytes());
     hasher.update(spec_content.as_bytes());
     let hash = hasher.finalize();
     let short_hash = &hex::encode(hash)[..8];
 
-    format!("agent/{engineer}/{slug}-{short_hash}")
+    format!("agent/{safe_engineer}/{safe_slug}-{short_hash}")
+}
+
+/// Sanitize a string for use in a git ref name.
+/// Replaces invalid characters with hyphens, collapses runs, strips leading/trailing.
+fn slugify(s: &str) -> String {
+    let slug: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // Collapse consecutive hyphens, strip leading/trailing
+    let mut result = String::new();
+    let mut prev_hyphen = true; // treat start as hyphen to strip leading
+    for c in slug.chars() {
+        if c == '-' {
+            if !prev_hyphen {
+                result.push('-');
+            }
+            prev_hyphen = true;
+        } else {
+            result.push(c.to_ascii_lowercase());
+            prev_hyphen = false;
+        }
+    }
+    // Strip trailing hyphen
+    while result.ends_with('-') {
+        result.pop();
+    }
+    if result.is_empty() {
+        "unknown".to_string()
+    } else {
+        result
+    }
 }
 
 #[cfg(test)]

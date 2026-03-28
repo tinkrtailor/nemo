@@ -379,6 +379,9 @@ pub async fn inspect(
 }
 
 /// POST /credentials - Register or update engineer credentials.
+///
+/// V1 limitation: credential content is stored as plaintext in Postgres (credential_ref column).
+/// V2 should migrate to K8s Secrets or a KMS-backed store.
 pub async fn upsert_credentials(
     State(state): State<AppState>,
     Json(req): Json<CredentialRequest>,

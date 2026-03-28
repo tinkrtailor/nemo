@@ -114,7 +114,7 @@ enum Commands {
 
     /// Show detailed loop state, round history, and verdicts
     Inspect {
-        /// User/branch path (e.g., "alice/invoice-cancel-a1b2c3d4")
+        /// Branch path (e.g., "alice/invoice-cancel-a1b2c3d4" or "agent/alice/invoice-cancel-a1b2c3d4")
         path: String,
     },
 
