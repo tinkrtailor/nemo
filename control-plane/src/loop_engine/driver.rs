@@ -464,9 +464,24 @@ impl ConvergentLoopDriver {
         Ok(LoopState::Cancelled)
     }
 
-    /// Handle a failed job: retry or fail the loop.
+    /// Handle a failed job: detect auth errors, retry, or fail the loop.
     async fn handle_job_failed(&self, record: &LoopRecord, reason: &str) -> Result<LoopState> {
         let mut updated = record.clone();
+
+        // Detect credential expiry (FR-10): transition to AWAITING_REAUTH
+        if is_auth_error(reason) && record.state.is_active_stage() {
+            updated.state = LoopState::AwaitingReauth;
+            updated.sub_state = None;
+            updated.reauth_from_state = Some(record.state);
+            updated.active_job_name = None;
+            self.store.update_loop(&updated).await?;
+            tracing::warn!(
+                loop_id = %record.id,
+                reason = reason,
+                "Credentials expired, transitioning to AWAITING_REAUTH"
+            );
+            return Ok(LoopState::AwaitingReauth);
+        }
 
         if updated.retry_count < self.max_retries_for_stage(record.state) as i32 {
             // Retry
@@ -794,6 +809,18 @@ impl ConvergentLoopDriver {
     }
 }
 
+/// Detect if a job failure reason indicates expired credentials.
+/// Agents exit with specific error codes/messages when auth fails.
+fn is_auth_error(reason: &str) -> bool {
+    let reason_lower = reason.to_lowercase();
+    reason_lower.contains("auth")
+        || reason_lower.contains("credential")
+        || reason_lower.contains("unauthorized")
+        || reason_lower.contains("token expired")
+        || reason_lower.contains("api key")
+        || reason_lower.contains("401")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1074,5 +1101,54 @@ mod tests {
 
         let updated = store.get_loop(record.id).await.unwrap().unwrap();
         assert!(updated.failure_reason.unwrap().contains("OOM"));
+    }
+
+    #[tokio::test]
+    async fn test_auth_error_transitions_to_awaiting_reauth() {
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let driver = make_driver(store.clone(), dispatcher.clone());
+
+        let mut record = make_pending_loop(true);
+        record.state = LoopState::Implementing;
+        record.sub_state = Some(SubState::Dispatched);
+        record.round = 1;
+        record.retry_count = 0;
+        record.active_job_name = Some("test-job".to_string());
+        store.create_loop(&record).await.unwrap();
+
+        let job = k8s_openapi::api::batch::v1::Job {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("test-job".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        dispatcher.create_job(&job).await.unwrap();
+        dispatcher
+            .set_job_status(
+                "test-job",
+                JobStatus::Failed {
+                    reason: "unauthorized: token expired".to_string(),
+                },
+            )
+            .await;
+
+        let new_state = driver.tick(record.id).await.unwrap();
+        assert_eq!(new_state, LoopState::AwaitingReauth);
+
+        let updated = store.get_loop(record.id).await.unwrap().unwrap();
+        assert_eq!(updated.state, LoopState::AwaitingReauth);
+        assert_eq!(updated.reauth_from_state, Some(LoopState::Implementing));
+    }
+
+    #[test]
+    fn test_is_auth_error_detection() {
+        assert!(is_auth_error("unauthorized: token expired"));
+        assert!(is_auth_error("Authentication failed: 401"));
+        assert!(is_auth_error("API key invalid"));
+        assert!(is_auth_error("credential refresh failed"));
+        assert!(!is_auth_error("OOMKilled"));
+        assert!(!is_auth_error("timeout exceeded"));
     }
 }
