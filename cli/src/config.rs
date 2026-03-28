@@ -56,5 +56,13 @@ pub fn save_config(config: &EngineerConfig) -> Result<()> {
     }
     let contents = toml::to_string_pretty(config)?;
     std::fs::write(&path, contents)?;
+
+    // Restrict permissions to owner-only (0600) since file may contain API keys
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
     Ok(())
 }

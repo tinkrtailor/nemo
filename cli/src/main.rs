@@ -168,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
 
     let server_url = cli.server.unwrap_or(eng_config.server_url.clone());
 
-    let insecure = cli.insecure || std::env::var("NEMO_INSECURE").is_ok();
+    let insecure = cli.insecure || matches!(std::env::var("NEMO_INSECURE").as_deref(), Ok("true" | "1"));
     let http_client = client::NemoClient::new(&server_url, eng_config.api_key.as_deref(), insecure);
 
     // Validate engineer is configured for commands that need it

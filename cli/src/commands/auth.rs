@@ -42,7 +42,14 @@ pub async fn run(client: &NemoClient, engineer: &str, claude: bool, openai: bool
         }
 
         // Validate the credential file is readable JSON
-        let content = std::fs::read_to_string(&cred_path)?;
+        let content = match std::fs::read_to_string(&cred_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Warning: could not read {provider} credentials at {cred_path}: {e}");
+                any_error = true;
+                continue;
+            }
+        };
         if serde_json::from_str::<serde_json::Value>(&content).is_err() {
             eprintln!("Warning: {provider} credentials at {cred_path} are not valid JSON");
             continue;

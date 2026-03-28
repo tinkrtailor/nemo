@@ -47,7 +47,15 @@ impl ConvergentLoopDriver {
             .await?
             .ok_or(NemoError::LoopNotFound { id: loop_id })?;
 
-        // Check for cancel request first (highest priority)
+        // Terminal states: clear stale flags and return (never transition out)
+        if record.state.is_terminal() {
+            if record.cancel_requested {
+                let _ = self.store.set_loop_flag(record.id, crate::state::LoopFlag::Cancel, false).await;
+            }
+            return Ok(record.state);
+        }
+
+        // Check for cancel request (highest priority for non-terminal states)
         if record.cancel_requested {
             return self.handle_cancel(&record).await;
         }
@@ -61,12 +69,8 @@ impl ConvergentLoopDriver {
             LoopState::Reviewing => self.handle_active_stage(&record).await,
             LoopState::Paused => self.handle_paused(&record).await,
             LoopState::AwaitingReauth => self.handle_awaiting_reauth(&record).await,
-            // Terminal states: no-op
-            LoopState::Converged
-            | LoopState::Failed
-            | LoopState::Cancelled
-            | LoopState::Hardened
-            | LoopState::Shipped => Ok(record.state),
+            // Terminal states handled above; this arm is unreachable but required for exhaustiveness
+            _ => Ok(record.state),
         }
     }
 
@@ -85,7 +89,7 @@ impl ConvergentLoopDriver {
             updated.kind = LoopKind::Harden;
 
             let stage_config = self.audit_stage_config();
-            let ctx = self.build_context(&updated).await;
+            let ctx = self.build_context(&updated).await?;
             let job = job_builder::build_job(
                 &ctx,
                 &stage_config,
@@ -424,7 +428,7 @@ impl ConvergentLoopDriver {
         record.retry_count = 0; // Reset per-stage retry budget
 
         let stage_config = self.test_stage_config();
-        let ctx = self.build_context(record).await;
+        let ctx = self.build_context(record).await?;
         let job = job_builder::build_job(
             &ctx,
             &stage_config,
@@ -669,6 +673,11 @@ impl ConvergentLoopDriver {
                 let mut updated = record.clone();
                 updated.state = paused_from;
                 updated.paused_from_state = None;
+                // Refresh current_sha to current branch tip so divergence check
+                // doesn't immediately re-pause after resume
+                if let Ok(Some(sha)) = self.git.get_branch_sha(&record.branch).await {
+                    updated.current_sha = Some(sha);
+                }
                 let result = self.redispatch_current_stage(&updated).await?;
                 self.store
                     .set_loop_flag(record.id, crate::state::LoopFlag::Resume, false)
@@ -819,7 +828,7 @@ impl ConvergentLoopDriver {
         updated.retry_count = 0;
 
         let stage_config = self.implement_stage_config(record);
-        let ctx = self.build_context(&updated).await;
+        let ctx = self.build_context(&updated).await?;
         let job = job_builder::build_job(
             &ctx,
             &stage_config,
@@ -845,7 +854,7 @@ impl ConvergentLoopDriver {
         record.retry_count = 0;
 
         let stage_config = self.audit_stage_config();
-        let ctx = self.build_context(record).await;
+        let ctx = self.build_context(record).await?;
         let job = job_builder::build_job(
             &ctx,
             &stage_config,
@@ -868,7 +877,7 @@ impl ConvergentLoopDriver {
         record.retry_count = 0;
 
         let stage_config = self.revise_stage_config(record);
-        let ctx = self.build_context(record).await;
+        let ctx = self.build_context(record).await?;
         let job = job_builder::build_job(
             &ctx,
             &stage_config,
@@ -892,7 +901,7 @@ impl ConvergentLoopDriver {
         record.retry_count = 0;
 
         let stage_config = self.review_stage_config(record);
-        let ctx = self.build_context(record).await;
+        let ctx = self.build_context(record).await?;
         let job = job_builder::build_job(
             &ctx,
             &stage_config,
@@ -935,7 +944,7 @@ impl ConvergentLoopDriver {
         record.retry_count = 0;
 
         let stage_config = self.implement_stage_config(record);
-        let mut ctx = self.build_context(record).await;
+        let mut ctx = self.build_context(record).await?;
         ctx.feedback_path = Some(feedback_path.to_string());
 
         let job = job_builder::build_job(
@@ -994,7 +1003,7 @@ impl ConvergentLoopDriver {
             _ => return Ok(record.state),
         };
 
-        let mut ctx = self.build_context(&updated).await;
+        let mut ctx = self.build_context(&updated).await?;
 
         // Restore feedback_path for implementing redispatch (N30):
         // look at the prior round's stage to determine review vs test feedback
@@ -1128,7 +1137,7 @@ impl ConvergentLoopDriver {
     }
 
     /// Build context with credentials loaded from the store.
-    async fn build_context(&self, record: &LoopRecord) -> LoopContext {
+    async fn build_context(&self, record: &LoopRecord) -> Result<LoopContext> {
         // feedback_path is set explicitly by dispatch_implement_with_feedback;
         // for redispatch/resume, it's restored by redispatch_current_stage.
         let feedback_path = None;
@@ -1137,14 +1146,13 @@ impl ConvergentLoopDriver {
         let credentials = self
             .store
             .get_credentials(&record.engineer)
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .filter(|c| c.valid)
             .map(|c| (c.provider, c.credential_ref))
             .collect();
 
-        LoopContext {
+        Ok(LoopContext {
             loop_id: record.id,
             engineer: record.engineer.clone(),
             spec_path: record.spec_path.clone(),
@@ -1156,7 +1164,7 @@ impl ConvergentLoopDriver {
             session_id: record.session_id.clone(),
             feedback_path,
             credentials,
-        }
+        })
     }
 
     async fn create_round_record(
