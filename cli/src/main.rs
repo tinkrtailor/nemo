@@ -172,14 +172,15 @@ async fn main() -> anyhow::Result<()> {
     let http_client = client::NemoClient::new(&server_url, eng_config.api_key.as_deref(), insecure);
 
     // Validate engineer is configured for commands that need it
-    let needs_engineer = matches!(
-        cli.command,
+    // Status --team doesn't need engineer
+    let needs_engineer = match &cli.command {
         Commands::Harden { .. }
-            | Commands::Start { .. }
-            | Commands::Ship { .. }
-            | Commands::Status { .. }
-            | Commands::Auth { .. }
-    );
+        | Commands::Start { .. }
+        | Commands::Ship { .. }
+        | Commands::Auth { .. } => true,
+        Commands::Status { team, .. } => !team,
+        _ => false,
+    };
     if needs_engineer && eng_config.engineer.is_empty() {
         anyhow::bail!(
             "Engineer name not configured. Run: nemo config --set engineer=<your-name>"

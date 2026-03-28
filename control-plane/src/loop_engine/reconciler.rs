@@ -87,11 +87,32 @@ impl Reconciler {
                     );
                 }
                 Err(e) => {
-                    tracing::error!(
-                        loop_id = %loop_record.id,
-                        error = %e,
-                        "Tick failed for loop"
-                    );
+                    if e.is_fatal() {
+                        // Fatal error: transition to FAILED so we don't retry forever
+                        tracing::error!(
+                            loop_id = %loop_record.id,
+                            error = %e,
+                            "Fatal tick error, transitioning to FAILED"
+                        );
+                        let mut failed = loop_record.clone();
+                        failed.state = crate::types::LoopState::Failed;
+                        failed.sub_state = None;
+                        failed.failure_reason = Some(format!("Fatal error: {e}"));
+                        failed.active_job_name = None;
+                        if let Err(update_err) = self.store.update_loop(&failed).await {
+                            tracing::error!(
+                                loop_id = %loop_record.id,
+                                error = %update_err,
+                                "Failed to mark loop as FAILED"
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            loop_id = %loop_record.id,
+                            error = %e,
+                            "Transient tick error, will retry"
+                        );
+                    }
                 }
             }
         }

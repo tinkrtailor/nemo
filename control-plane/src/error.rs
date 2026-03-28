@@ -58,6 +58,31 @@ pub enum NemoError {
 }
 
 impl NemoError {
+    /// Whether this error is fatal (non-retryable) and should transition the loop to FAILED.
+    /// Transient errors (DB timeout, K8s API blip) are retryable.
+    pub fn is_fatal(&self) -> bool {
+        match self {
+            // Git errors from missing binaries, corrupt repos, or invalid state
+            Self::Git(msg) => {
+                msg.contains("not found")
+                    || msg.contains("not a git repository")
+                    || msg.contains("corrupt")
+                    || msg.contains("No such file or directory")
+                    || msg.contains("has an open PR")
+            }
+            // Config/serialization errors won't self-heal
+            Self::Config(_) | Self::Serialization(_) | Self::Internal(_) => true,
+            // Spec not found, ship not enabled — logic errors, won't change on retry
+            Self::SpecNotFound { .. } | Self::ShipNotEnabled => true,
+            // Loop not found — data integrity issue
+            Self::LoopNotFound { .. } => true,
+            // DB and K8s errors are typically transient
+            Self::Database(_) | Self::Kube(_) | Self::ClusterUnavailable => false,
+            // Everything else: assume retryable
+            _ => false,
+        }
+    }
+
     pub fn status_code(&self) -> StatusCode {
         match self {
             Self::SpecNotFound { .. } | Self::LoopNotFound { .. } => StatusCode::NOT_FOUND,

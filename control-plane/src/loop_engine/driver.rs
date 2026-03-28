@@ -1137,9 +1137,13 @@ impl ConvergentLoopDriver {
 }
 
 /// Detect if a job failure reason indicates expired credentials.
-/// Agents exit with specific error codes/messages when auth fails.
+/// Agents use exit code 42 or specific error messages when auth fails.
 fn is_auth_error(reason: &str) -> bool {
     let reason_lower = reason.to_lowercase();
+    // Convention: exit code 42 = auth expired
+    if reason_lower.contains("exit code 42") || reason_lower.contains("exitcode: 42") {
+        return true;
+    }
     reason_lower.contains("auth")
         || reason_lower.contains("credential")
         || reason_lower.contains("unauthorized")

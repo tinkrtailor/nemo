@@ -118,9 +118,21 @@ fn job_to_status(job: &Job) -> JobStatus {
         return JobStatus::Succeeded;
     }
     if status.failed.unwrap_or(0) > 0 {
-        return JobStatus::Failed {
-            reason: "Pod failure".to_string(),
-        };
+        // Extract failure details from conditions or use exit-code convention
+        let reason = status
+            .conditions
+            .as_ref()
+            .and_then(|conds| {
+                conds.iter().find_map(|c| {
+                    if c.type_ == "Failed" {
+                        c.message.clone().or(c.reason.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_else(|| "Pod failure (check pod logs for details)".to_string());
+        return JobStatus::Failed { reason };
     }
 
     JobStatus::Pending

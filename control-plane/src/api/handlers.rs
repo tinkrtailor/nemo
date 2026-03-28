@@ -26,15 +26,19 @@ pub async fn start(
     // Fetch latest from remote so spec validation and branch creation use current state
     state.git.fetch().await?;
 
-    // Validate spec exists in repo
-    if !state.git.spec_exists(&req.spec_path).await? {
-        return Err(NemoError::SpecNotFound {
-            path: req.spec_path,
-        });
-    }
-
-    // Read spec content for branch name hash
-    let spec_content = state.git.read_file(&req.spec_path, "HEAD").await?;
+    // Validate spec exists and read content from origin/main (the ref we branch from).
+    // This ensures spec validation and branch creation use the same revision.
+    let spec_content = match state.git.read_file(&req.spec_path, "origin/main").await {
+        Ok(content) => content,
+        Err(_) => match state.git.read_file(&req.spec_path, "HEAD").await {
+            Ok(content) => content,
+            Err(_) => {
+                return Err(NemoError::SpecNotFound {
+                    path: req.spec_path,
+                });
+            }
+        },
+    };
     let branch = generate_branch_name(&req.engineer, &req.spec_path, &spec_content);
 
     // Check for active loop on this branch (early check; DB unique index is the real guard)
@@ -321,17 +325,19 @@ pub async fn resume(
     }))
 }
 
-/// GET /inspect/:user/:branch - View detailed loop state.
+/// GET /inspect/*branch_path - View detailed loop state.
+/// Accepts the full branch path (e.g., agent/alice/slug-hash).
 pub async fn inspect(
     State(state): State<AppState>,
-    Path((user, branch_name)): Path<(String, String)>,
+    Path(branch_path): Path<String>,
 ) -> Result<Json<InspectResponse>, NemoError> {
-    let branch = format!("agent/{user}/{branch_name}");
+    // Strip leading slash if present (axum wildcard includes it)
+    let branch = branch_path.strip_prefix('/').unwrap_or(&branch_path);
 
     // Use get_loop_by_branch_any to include terminal loops (N5)
     let record = state
         .store
-        .get_loop_by_branch_any(&branch)
+        .get_loop_by_branch_any(branch)
         .await?
         .ok_or(NemoError::LoopNotFound { id: Uuid::nil() })?;
 
