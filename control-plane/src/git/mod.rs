@@ -292,15 +292,29 @@ pub mod bare {
                 .map_err(|e| crate::error::NemoError::Git(format!("Failed to run gh: {e}")))?;
 
             if output.status.success() {
-                return Ok(Some(true)); // All checks passed
+                return Ok(Some(true)); // All checks passed (or no required checks)
             }
 
             // Non-zero: parse output to distinguish "fail" from "pending"
             let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
-            if stdout.contains("fail") || stdout.contains("error") || stdout.contains("cancelled") {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+
+            // No required checks configured = pass
+            if stderr.contains("no required checks") || stdout.contains("no required checks") {
+                return Ok(Some(true));
+            }
+
+            if stdout.contains("fail") || stdout.contains("error") || stdout.contains("cancelled")
+                || stderr.contains("fail") || stderr.contains("error")
+            {
                 Ok(Some(false)) // Definitively failed
+            } else if stdout.contains("pending") || stdout.contains("queued") || stdout.contains("in_progress") {
+                Ok(None) // Explicitly pending
+            } else if stdout.trim().is_empty() {
+                // No output + non-zero: likely no checks = treat as pass
+                Ok(Some(true))
             } else {
-                Ok(None) // Still pending
+                Ok(None) // Unknown state, treat as pending
             }
         }
 

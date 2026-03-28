@@ -508,48 +508,70 @@ impl ConvergentLoopDriver {
 
         match verdict {
             Some(v) if v.clean => {
-                // Clean up .agent/ artifacts before PR creation
-                if let Err(e) = self.git.remove_path(&record.branch, ".agent").await {
-                    tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
+                // Create PR if not already created (idempotent across ticks)
+                if record.spec_pr_url.is_none() {
+                    if let Err(e) = self.git.remove_path(&record.branch, ".agent").await {
+                        tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
+                    }
+
+                    let pr_title = format!(
+                        "feat(agent): {} for {}",
+                        record.spec_path,
+                        record.engineer,
+                    );
+                    let pr_body = format!(
+                        "Automated convergence loop completed in {} round(s).\n\nSpec: {}\nBranch: {}",
+                        record.round, record.spec_path, record.branch,
+                    );
+                    let pr_url = self
+                        .git
+                        .create_pr(&record.branch, &pr_title, &pr_body)
+                        .await?;
+                    record.spec_pr_url = Some(pr_url);
+                    // Persist PR URL so next tick knows PR was already created
+                    self.store.update_loop(record).await?;
                 }
 
-                // Review passed: create PR for all convergence paths
-                let pr_title = format!(
-                    "feat(agent): {} for {}",
-                    record.spec_path,
-                    record.engineer,
-                );
-                let pr_body = format!(
-                    "Automated convergence loop completed in {} round(s).\n\nSpec: {}\nBranch: {}",
-                    record.round, record.spec_path, record.branch,
-                );
-                let pr_url = self
-                    .git
-                    .create_pr(&record.branch, &pr_title, &pr_body)
-                    .await?;
-                record.spec_pr_url = Some(pr_url);
-
                 if record.ship_mode {
-                    // Ship mode: check if rounds <= max_rounds_for_auto_merge
                     let threshold = self.config.ship.max_rounds_for_auto_merge as i32;
                     if record.round <= threshold {
-                        // Check CI if required before merging — poll with backoff
+                        // Non-blocking CI check: one check per tick, return if pending
                         if self.config.ship.require_passing_ci {
-                            let ci_ok = self.poll_ci(&record.branch).await;
-                            if !ci_ok {
-                                // CI failed or timed out: converge without merge
-                                record.state = LoopState::Converged;
-                                record.sub_state = None;
-                                record.active_job_name = None;
-                                record.failure_reason = Some(
-                                    "CI checks failed or timed out. PR created but not merged.".to_string(),
-                                );
-                                self.store.update_loop(record).await?;
-                                tracing::warn!(
-                                    loop_id = %record.id,
-                                    "Ship mode: CI not passing, converging without merge"
-                                );
-                                return Ok(LoopState::Converged);
+                            match self.git.ci_status(&record.branch).await {
+                                Ok(Some(true)) => {
+                                    // CI passed, proceed to merge
+                                }
+                                Ok(Some(false)) => {
+                                    // CI definitively failed
+                                    record.state = LoopState::Converged;
+                                    record.sub_state = None;
+                                    record.active_job_name = None;
+                                    record.failure_reason = Some(
+                                        "CI checks failed. PR created but not merged.".to_string(),
+                                    );
+                                    self.store.update_loop(record).await?;
+                                    tracing::warn!(
+                                        loop_id = %record.id,
+                                        "Ship mode: CI failed, converging without merge"
+                                    );
+                                    return Ok(LoopState::Converged);
+                                }
+                                Ok(None) => {
+                                    // CI still pending: return current state, check again next tick
+                                    tracing::debug!(
+                                        loop_id = %record.id,
+                                        "Ship mode: CI pending, will check on next tick"
+                                    );
+                                    return Ok(record.state);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        loop_id = %record.id,
+                                        error = %e,
+                                        "CI check error, will retry next tick"
+                                    );
+                                    return Ok(record.state);
+                                }
                             }
                         }
 
@@ -1088,40 +1110,6 @@ impl ConvergentLoopDriver {
             prompt_template: Some(".nemo/prompts/review.md".to_string()),
             timeout: self.config.timeouts.review_duration(),
             max_retries: 2,
-        }
-    }
-
-    /// Poll CI status with exponential backoff. Returns true if checks pass
-    /// within the timeout window (30 min max, 30s initial interval doubling to 4 min).
-    /// Stops early on definitive failure (not just timeout).
-    async fn poll_ci(&self, branch: &str) -> bool {
-        let max_wait = std::time::Duration::from_secs(30 * 60);
-        let mut interval = std::time::Duration::from_secs(30);
-        let max_interval = std::time::Duration::from_secs(4 * 60);
-        let start = std::time::Instant::now();
-
-        loop {
-            match self.git.ci_status(branch).await {
-                Ok(Some(true)) => return true,
-                Ok(Some(false)) => {
-                    tracing::warn!(branch, "CI checks definitively failed");
-                    return false;
-                }
-                Ok(None) => {
-                    // Still pending, keep polling
-                }
-                Err(e) => {
-                    tracing::warn!(branch, error = %e, "CI check error, retrying");
-                }
-            }
-
-            if start.elapsed() >= max_wait {
-                tracing::warn!(branch, "CI poll timed out after 30 minutes");
-                return false;
-            }
-
-            tokio::time::sleep(interval).await;
-            interval = (interval * 2).min(max_interval);
         }
     }
 

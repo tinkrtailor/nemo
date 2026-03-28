@@ -103,7 +103,13 @@ pub fn build_job(
 
     // Inject credentials into the pod so agents can authenticate with model APIs
     for (provider, cred_ref) in &ctx.credentials {
-        let env_name = format!("NEMO_CRED_{}", provider.to_uppercase());
+        // Sanitize provider to valid env var chars (uppercase alphanumeric + underscore)
+        let safe_provider: String = provider
+            .to_uppercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let env_name = format!("NEMO_CRED_{safe_provider}");
         env_vars.push(EnvVar {
             name: env_name,
             value: Some(cred_ref.clone()),
