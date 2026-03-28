@@ -58,7 +58,7 @@ pub async fn run(client: &NemoClient, claude: bool, openai: bool) -> Result<()> 
     if any_found {
         println!();
         println!("Credentials registered. If you have loops in AWAITING_REAUTH state,");
-        println!("resume them with: nemo start resume <loop-id>");
+        println!("resume them with: nemo resume <loop-id>");
     }
 
     Ok(())

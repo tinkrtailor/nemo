@@ -135,6 +135,20 @@ pub struct RoundSummary {
     pub revise: Option<serde_json::Value>,
 }
 
+/// POST /credentials request body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRequest {
+    pub provider: String,
+    pub credential_ref: String,
+    #[serde(default = "default_valid")]
+    pub valid: bool,
+    pub engineer: Option<String>,
+}
+
+fn default_valid() -> bool {
+    true
+}
+
 /// Generic error response body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {

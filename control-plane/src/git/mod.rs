@@ -22,6 +22,15 @@ pub trait GitOperations: Send + Sync + 'static {
 
     /// Detect if a branch has diverged from the expected SHA.
     async fn has_diverged(&self, branch: &str, expected_sha: &str) -> Result<bool>;
+
+    /// Delete a branch (cleanup on failure).
+    async fn delete_branch(&self, branch: &str) -> Result<()>;
+
+    /// Create a pull request. Returns the PR URL.
+    async fn create_pr(&self, branch: &str, title: &str, body: &str) -> Result<String>;
+
+    /// Merge a pull request by branch name using the given strategy. Returns merge SHA.
+    async fn merge_pr(&self, branch: &str, strategy: &str) -> Result<String>;
 }
 
 /// Real git operations on a bare repository.
@@ -102,6 +111,55 @@ pub mod bare {
                 Some(sha) => Ok(sha != expected_sha),
                 None => Ok(false),
             }
+        }
+
+        async fn delete_branch(&self, branch: &str) -> Result<()> {
+            let _ = self.run_git(&["branch", "-D", branch]).await;
+            Ok(())
+        }
+
+        async fn create_pr(&self, branch: &str, title: &str, body: &str) -> Result<String> {
+            let output = Command::new("gh")
+                .args(["pr", "create", "--head", branch, "--title", title, "--body", body])
+                .current_dir(&self.repo_path)
+                .output()
+                .await
+                .map_err(|e| crate::error::NemoError::Git(format!("Failed to run gh: {e}")))?;
+
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                Err(crate::error::NemoError::Git(format!(
+                    "Failed to create PR for {branch}: {stderr}"
+                )))
+            }
+        }
+
+        async fn merge_pr(&self, branch: &str, strategy: &str) -> Result<String> {
+            let merge_flag = match strategy {
+                "rebase" => "--rebase",
+                "merge" => "--merge",
+                _ => "--squash",
+            };
+
+            let output = Command::new("gh")
+                .args(["pr", "merge", branch, merge_flag, "--auto"])
+                .current_dir(&self.repo_path)
+                .output()
+                .await
+                .map_err(|e| crate::error::NemoError::Git(format!("Failed to run gh: {e}")))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                return Err(crate::error::NemoError::Git(format!(
+                    "Failed to merge PR for {branch}: {stderr}"
+                )));
+            }
+
+            // Get the merge commit SHA from the target branch
+            let sha = self.run_git(&["rev-parse", "HEAD"]).await?;
+            Ok(sha)
         }
     }
 }
@@ -184,6 +242,24 @@ pub mod mock {
                 Some(sha) => Ok(sha != expected_sha),
                 None => Ok(false),
             }
+        }
+
+        async fn delete_branch(&self, branch: &str) -> Result<()> {
+            let mut branches = self.branches.write().await;
+            branches.remove(branch);
+            Ok(())
+        }
+
+        async fn create_pr(&self, branch: &str, _title: &str, _body: &str) -> Result<String> {
+            Ok(format!("https://github.com/mock/repo/pull/{branch}"))
+        }
+
+        async fn merge_pr(&self, branch: &str, _strategy: &str) -> Result<String> {
+            let branches = self.branches.read().await;
+            Ok(branches
+                .get(branch)
+                .cloned()
+                .unwrap_or_else(|| "merge-sha-mock".to_string()))
         }
     }
 }

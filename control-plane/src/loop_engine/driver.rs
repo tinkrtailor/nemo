@@ -451,22 +451,44 @@ impl ConvergentLoopDriver {
 
         match verdict {
             Some(v) if v.clean => {
-                // Review passed: check ship mode for post-convergence behavior
+                // Review passed: create PR for all convergence paths
+                let pr_title = format!(
+                    "feat(agent): {} for {}",
+                    record.spec_path,
+                    record.engineer,
+                );
+                let pr_body = format!(
+                    "Automated convergence loop completed in {} round(s).\n\nSpec: {}\nBranch: {}",
+                    record.round, record.spec_path, record.branch,
+                );
+                let pr_url = self
+                    .git
+                    .create_pr(&record.branch, &pr_title, &pr_body)
+                    .await?;
+                record.spec_pr_url = Some(pr_url);
+
                 if record.ship_mode {
                     // Ship mode: check if rounds <= max_rounds_for_auto_merge
                     let threshold = self.config.ship.max_rounds_for_auto_merge as i32;
                     if record.round <= threshold {
-                        // Within threshold: auto-merge -> SHIPPED
+                        // Within threshold: merge the PR -> SHIPPED
+                        let merge_sha = self
+                            .git
+                            .merge_pr(&record.branch, &self.config.ship.merge_strategy)
+                            .await?;
+
                         record.state = LoopState::Shipped;
                         record.sub_state = None;
                         record.active_job_name = None;
+                        record.merge_sha = Some(merge_sha.clone());
+                        record.merged_at = Some(chrono::Utc::now());
                         self.store.update_loop(record).await?;
 
                         // Log merge event (NFR-8)
                         let merge_event = crate::types::MergeEvent {
                             id: Uuid::new_v4(),
                             loop_id: record.id,
-                            merge_sha: record.current_sha.clone().unwrap_or_default(),
+                            merge_sha,
                             merge_strategy: self.config.ship.merge_strategy.clone(),
                             ci_status: "passed".to_string(),
                             created_at: chrono::Utc::now(),
@@ -480,12 +502,12 @@ impl ConvergentLoopDriver {
                         );
                         Ok(LoopState::Shipped)
                     } else {
-                        // Above threshold: converge but don't auto-merge
+                        // Above threshold: converge but don't auto-merge (PR already created)
                         record.state = LoopState::Converged;
                         record.sub_state = None;
                         record.active_job_name = None;
                         record.failure_reason = Some(format!(
-                            "Converged in {} rounds (above auto-merge threshold of {}). Created PR for human review.",
+                            "Converged in {} rounds (above auto-merge threshold of {}). PR created for human review.",
                             record.round, threshold
                         ));
                         self.store.update_loop(record).await?;
@@ -498,7 +520,7 @@ impl ConvergentLoopDriver {
                         Ok(LoopState::Converged)
                     }
                 } else {
-                    // No ship mode: standard CONVERGED
+                    // No ship mode: standard CONVERGED (PR already created for review)
                     record.state = LoopState::Converged;
                     record.sub_state = None;
                     record.active_job_name = None;

@@ -8,8 +8,8 @@ use super::AppState;
 use crate::error::NemoError;
 use crate::state::LoopFlag;
 use crate::types::api::{
-    ApproveResponse, CancelResponse, InspectResponse, LogsQuery, LoopSummary, ResumeResponse,
-    RoundSummary, StartRequest, StartResponse, StatusQuery, StatusResponse,
+    ApproveResponse, CancelResponse, CredentialRequest, InspectResponse, LogsQuery, LoopSummary,
+    ResumeResponse, RoundSummary, StartRequest, StartResponse, StatusQuery, StatusResponse,
 };
 use crate::types::{generate_branch_name, LoopKind, LoopRecord, LoopState};
 
@@ -108,15 +108,19 @@ pub async fn start(
     };
 
     // Create loop; the DB unique index on (branch, active state) prevents duplicates
-    // even under concurrent requests (Finding #5).
+    // even under concurrent requests. Clean up git branch on DB failure (N1).
     match state.store.create_loop(&record).await {
         Ok(_) => {}
         Err(NemoError::Database(ref e)) if is_unique_violation(e) => {
+            let _ = state.git.delete_branch(&branch).await;
             return Err(NemoError::ActiveLoopConflict {
                 branch: branch.clone(),
             });
         }
-        Err(e) => return Err(e),
+        Err(e) => {
+            let _ = state.git.delete_branch(&branch).await;
+            return Err(e);
+        }
     }
 
     tracing::info!(
@@ -353,6 +357,25 @@ pub async fn inspect(
         state: record.state,
         rounds: round_summaries.into_values().collect(),
     }))
+}
+
+/// POST /credentials - Register or update engineer credentials.
+pub async fn upsert_credentials(
+    State(state): State<AppState>,
+    Json(req): Json<CredentialRequest>,
+) -> Result<impl IntoResponse, NemoError> {
+    let cred = crate::types::EngineerCredential {
+        id: Uuid::new_v4(),
+        engineer: req.engineer.unwrap_or_default(),
+        provider: req.provider,
+        credential_ref: req.credential_ref,
+        valid: req.valid,
+        updated_at: chrono::Utc::now(),
+    };
+
+    state.store.upsert_credential(&cred).await?;
+
+    Ok((StatusCode::OK, Json(serde_json::json!({"status": "ok"}))))
 }
 
 /// Check if a sqlx error is a unique constraint violation (Postgres code 23505).

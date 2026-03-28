@@ -43,20 +43,13 @@ async fn main() -> anyhow::Result<()> {
 
     let store: Arc<dyn StateStore> = Arc::new(pg_store);
 
-    // Build K8s job dispatcher
-    let dispatcher: Arc<dyn JobDispatcher> = match kube::Client::try_default().await {
-        Ok(kube_client) => {
-            tracing::info!("Connected to Kubernetes cluster");
-            Arc::new(KubeJobDispatcher::new(
-                kube_client,
-                config.cluster.jobs_namespace.clone(),
-            ))
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to connect to Kubernetes, using mock dispatcher");
-            Arc::new(nemo_control_plane::k8s::mock::MockJobDispatcher::new())
-        }
-    };
+    // Build K8s job dispatcher — fail hard if unavailable
+    let kube_client = kube::Client::try_default().await?;
+    tracing::info!("Connected to Kubernetes cluster");
+    let dispatcher: Arc<dyn JobDispatcher> = Arc::new(KubeJobDispatcher::new(
+        kube_client,
+        config.cluster.jobs_namespace.clone(),
+    ));
 
     // Build git operations (bare repo)
     let bare_repo_path = std::env::var("NEMO_BARE_REPO_PATH")

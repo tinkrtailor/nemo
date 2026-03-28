@@ -42,4 +42,5 @@ fn build_routes(_state: AppState) -> Router<AppState> {
         .route("/approve/{id}", post(handlers::approve))
         .route("/resume/{id}", post(handlers::resume))
         .route("/inspect/{user}/{branch}", get(handlers::inspect))
+        .route("/credentials", post(handlers::upsert_credentials))
 }
