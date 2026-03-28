@@ -131,7 +131,8 @@ pub mod bare {
                                 ))?;
                         }
                         _ => {
-                            // No PR — safe to force-reset
+                            // No PR — safe to force-reset local and delete stale remote
+                            let _ = self.run_git(&["push", "origin", "--delete", branch]).await;
                             self.run_git(&["branch", "-f", branch, &base_ref])
                                 .await
                                 .map_err(|e| crate::error::NemoError::Git(

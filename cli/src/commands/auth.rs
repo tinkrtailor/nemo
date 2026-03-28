@@ -51,7 +51,8 @@ pub async fn run(client: &NemoClient, engineer: &str, claude: bool, openai: bool
             }
         };
         if serde_json::from_str::<serde_json::Value>(&content).is_err() {
-            eprintln!("Warning: {provider} credentials at {cred_path} are not valid JSON");
+            eprintln!("Error: {provider} credentials at {cred_path} are not valid JSON (corrupted?)");
+            any_error = true;
             continue;
         }
 

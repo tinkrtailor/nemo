@@ -28,10 +28,12 @@ pub trait StateStore: Send + Sync + 'static {
     async fn get_active_loops(&self) -> Result<Vec<LoopRecord>>;
 
     /// Get loops for an engineer, optionally filtered by team (all engineers).
+    /// If `include_terminal` is false, only returns active (non-terminal) loops.
     async fn get_loops_for_engineer(
         &self,
         engineer: Option<&str>,
         team: bool,
+        include_terminal: bool,
     ) -> Result<Vec<LoopRecord>>;
 
     /// Update loop state and sub-state. Also updates `updated_at`.
@@ -47,6 +49,9 @@ pub trait StateStore: Send + Sync + 'static {
 
     /// Set a command flag on a loop (cancel_requested, approve_requested, resume_requested).
     async fn set_loop_flag(&self, id: Uuid, flag: LoopFlag, value: bool) -> Result<()>;
+
+    /// Set current_sha on a loop (narrow update, no full record overwrite).
+    async fn set_current_sha(&self, id: Uuid, sha: &str) -> Result<()>;
 
     /// Check if there is an active loop for the given branch.
     async fn has_active_loop_for_branch(&self, branch: &str) -> Result<bool>;
@@ -205,18 +210,20 @@ pub mod memory {
             &self,
             engineer: Option<&str>,
             team: bool,
+            include_terminal: bool,
         ) -> Result<Vec<LoopRecord>> {
             let loops = self.loops.read().await;
             Ok(loops
                 .values()
                 .filter(|l| {
-                    if team {
+                    let eng_match = if team {
                         true
                     } else if let Some(eng) = engineer {
                         l.engineer == eng
                     } else {
                         true
-                    }
+                    };
+                    eng_match && (include_terminal || !l.state.is_terminal())
                 })
                 .cloned()
                 .collect())
@@ -263,6 +270,15 @@ pub mod memory {
                     LoopFlag::Approve => record.approve_requested = value,
                     LoopFlag::Resume => record.resume_requested = value,
                 }
+                record.updated_at = chrono::Utc::now();
+            }
+            Ok(())
+        }
+
+        async fn set_current_sha(&self, id: Uuid, sha: &str) -> Result<()> {
+            let mut loops = self.loops.write().await;
+            if let Some(record) = loops.get_mut(&id) {
+                record.current_sha = Some(sha.to_string());
                 record.updated_at = chrono::Utc::now();
             }
             Ok(())

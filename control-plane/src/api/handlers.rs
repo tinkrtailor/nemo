@@ -27,18 +27,14 @@ pub async fn start(
     state.git.fetch().await?;
 
     // Validate spec exists and read content from origin/main (the ref we branch from).
-    // This ensures spec validation and branch creation use the same revision.
-    let spec_content = match state.git.read_file(&req.spec_path, "origin/main").await {
-        Ok(content) => content,
-        Err(_) => match state.git.read_file(&req.spec_path, "HEAD").await {
-            Ok(content) => content,
-            Err(_) => {
-                return Err(NemoError::SpecNotFound {
-                    path: req.spec_path,
-                });
-            }
-        },
-    };
+    // No HEAD fallback: if spec isn't in origin/main, it hasn't been pushed.
+    let spec_content = state
+        .git
+        .read_file(&req.spec_path, "origin/main")
+        .await
+        .map_err(|_| NemoError::SpecNotFound {
+            path: req.spec_path.clone(),
+        })?;
     let branch = generate_branch_name(&req.engineer, &req.spec_path, &spec_content);
 
     let loop_id = Uuid::new_v4();
@@ -119,29 +115,18 @@ pub async fn start(
     }
 
     // DB insert succeeded — we own this branch name. Now create the git branch.
-    // If git fails, mark the loop as FAILED (DB record exists, preventing retries
-    // from a concurrent request).
+    // If git fails, mark the loop as FAILED via narrow state update (no full record overwrite).
     let branch_sha = match state.git.create_branch(&branch).await {
         Ok(sha) => sha,
         Err(e) => {
-            // Mark loop as failed so it doesn't block future attempts
-            let mut failed = record.clone();
-            failed.state = LoopState::Failed;
-            failed.failure_reason = Some(format!("Git branch creation failed: {e}"));
-            let _ = state.store.update_loop(&failed).await;
+            let _ = state.store.update_loop_state(loop_id, LoopState::Failed, None).await;
             return Err(e);
         }
     };
 
-    // Update current_sha now that we have the branch
-    state
-        .store
-        .update_loop_state(loop_id, LoopState::Pending, None)
-        .await?;
-    // Persist the SHA via a targeted update
-    let mut with_sha = record.clone();
-    with_sha.current_sha = Some(branch_sha);
-    state.store.update_loop(&with_sha).await?;
+    // Persist the SHA via a narrow SQL update — never use update_loop() from /start
+    // because the reconciler may have already advanced the record.
+    state.store.set_current_sha(loop_id, &branch_sha).await?;
 
     tracing::info!(
         loop_id = %loop_id,
@@ -170,18 +155,11 @@ pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
 ) -> Result<Json<StatusResponse>, NemoError> {
-    let all_loops = state
-        .store
-        .get_loops_for_engineer(query.engineer.as_deref(), query.team.unwrap_or(false))
-        .await?;
-
-    // Default to active-only; pass ?all=true to include terminal loops
     let show_all = query.all.unwrap_or(false);
-    let loops: Vec<_> = if show_all {
-        all_loops
-    } else {
-        all_loops.into_iter().filter(|l| !l.state.is_terminal()).collect()
-    };
+    let loops = state
+        .store
+        .get_loops_for_engineer(query.engineer.as_deref(), query.team.unwrap_or(false), show_all)
+        .await?;
 
     let summaries = loops
         .into_iter()

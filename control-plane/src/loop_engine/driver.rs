@@ -740,12 +740,11 @@ impl ConvergentLoopDriver {
 
     /// Handle cancel request: kill job and transition to CANCELLED.
     async fn handle_cancel(&self, record: &LoopRecord) -> Result<LoopState> {
-        // Delete active job if any
-        if let Some(ref job_name) = record.active_job_name {
-            let _ = self
-                .dispatcher
-                .delete_job(job_name, &self.config.cluster.jobs_namespace)
-                .await;
+        // Delete active job if any (log failure but proceed — orphan cleanup handles stragglers)
+        if let Some(ref job_name) = record.active_job_name
+            && let Err(e) = self.dispatcher.delete_job(job_name, &self.config.cluster.jobs_namespace).await
+        {
+            tracing::warn!(loop_id = %record.id, job = job_name, error = %e, "Failed to delete job during cancel");
         }
 
         // Perform transition first, then clear flag
@@ -768,11 +767,10 @@ impl ConvergentLoopDriver {
     async fn handle_auth_expired(&self, record: &LoopRecord, reason: &str) -> Result<LoopState> {
         let mut updated = record.clone();
 
-        if let Some(ref job_name) = record.active_job_name {
-            let _ = self
-                .dispatcher
-                .delete_job(job_name, &self.config.cluster.jobs_namespace)
-                .await;
+        if let Some(ref job_name) = record.active_job_name
+            && let Err(e) = self.dispatcher.delete_job(job_name, &self.config.cluster.jobs_namespace).await
+        {
+            tracing::warn!(loop_id = %record.id, job = job_name, error = %e, "Failed to delete job during auth expiry");
         }
 
         updated.state = LoopState::AwaitingReauth;
@@ -794,12 +792,10 @@ impl ConvergentLoopDriver {
 
         // Detect credential expiry (FR-10): transition to AWAITING_REAUTH
         if is_auth_error(reason) && record.state.is_active_stage() {
-            // Delete the failed Job so redispatch on resume doesn't hit AlreadyExists
-            if let Some(ref job_name) = record.active_job_name {
-                let _ = self
-                    .dispatcher
-                    .delete_job(job_name, &self.config.cluster.jobs_namespace)
-                    .await;
+            if let Some(ref job_name) = record.active_job_name
+                && let Err(e) = self.dispatcher.delete_job(job_name, &self.config.cluster.jobs_namespace).await
+            {
+                tracing::warn!(loop_id = %record.id, job = job_name, error = %e, "Failed to delete job during reauth");
             }
 
             updated.state = LoopState::AwaitingReauth;
@@ -1000,12 +996,12 @@ impl ConvergentLoopDriver {
     /// Re-dispatch the current stage (after retry or resume).
     /// Deletes the old K8s Job first to avoid AlreadyExists on deterministic names.
     async fn redispatch_current_stage(&self, record: &LoopRecord) -> Result<LoopState> {
-        // Clean up the old job before creating a new one with the same name
+        // Clean up the old job before creating a new one — fail if delete fails
+        // to prevent two concurrent jobs for one loop
         if let Some(ref old_job) = record.active_job_name {
-            let _ = self
-                .dispatcher
+            self.dispatcher
                 .delete_job(old_job, &self.config.cluster.jobs_namespace)
-                .await;
+                .await?;
         }
 
         let mut updated = record.clone();

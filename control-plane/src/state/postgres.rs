@@ -298,18 +298,29 @@ impl StateStore for PgStateStore {
         &self,
         engineer: Option<&str>,
         team: bool,
+        include_terminal: bool,
     ) -> Result<Vec<LoopRecord>> {
+        let terminal_filter = if include_terminal {
+            ""
+        } else {
+            " AND state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED')"
+        };
+
         let rows = match engineer {
             Some(eng) if !team => {
-                sqlx::query(
-                    "SELECT * FROM loops WHERE engineer = $1 ORDER BY created_at DESC LIMIT 100",
-                )
-                .bind(eng)
-                .fetch_all(&self.pool)
-                .await?
+                let q = format!(
+                    "SELECT * FROM loops WHERE engineer = $1{terminal_filter} ORDER BY created_at DESC LIMIT 100"
+                );
+                sqlx::query(&q)
+                    .bind(eng)
+                    .fetch_all(&self.pool)
+                    .await?
             }
             _ => {
-                sqlx::query("SELECT * FROM loops ORDER BY created_at DESC LIMIT 100")
+                let q = format!(
+                    "SELECT * FROM loops WHERE true{terminal_filter} ORDER BY created_at DESC LIMIT 100"
+                );
+                sqlx::query(&q)
                     .fetch_all(&self.pool)
                     .await?
             }
@@ -383,6 +394,15 @@ impl StateStore for PgStateStore {
         sqlx::query(&query)
             .bind(id)
             .bind(value)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_current_sha(&self, id: Uuid, sha: &str) -> Result<()> {
+        sqlx::query("UPDATE loops SET current_sha = $2, updated_at = NOW() WHERE id = $1")
+            .bind(id)
+            .bind(sha)
             .execute(&self.pool)
             .await?;
         Ok(())
