@@ -6,7 +6,13 @@ use crate::client::NemoClient;
 ///
 /// Reads local credential files, validates they exist, and registers them
 /// with the control plane so AWAITING_REAUTH loops can recover via `nemo resume`.
-pub async fn run(client: &NemoClient, claude: bool, openai: bool) -> Result<()> {
+pub async fn run(client: &NemoClient, engineer: &str, claude: bool, openai: bool) -> Result<()> {
+    if engineer.is_empty() {
+        anyhow::bail!(
+            "Engineer name not configured. Run: nemo config --set engineer=<your-name>"
+        );
+    }
+
     let providers: Vec<&str> = match (claude, openai) {
         (true, false) => vec!["claude"],
         (false, true) => vec!["openai"],
@@ -42,7 +48,7 @@ pub async fn run(client: &NemoClient, claude: bool, openai: bool) -> Result<()> 
         }
 
         // Register credentials with the control plane
-        match client.register_credentials(provider, &cred_path).await {
+        match client.register_credentials(engineer, provider, &cred_path).await {
             Ok(()) => {
                 println!("Registered {provider} credentials with control plane");
                 any_found = true;

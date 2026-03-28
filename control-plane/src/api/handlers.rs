@@ -316,9 +316,10 @@ pub async fn inspect(
 ) -> Result<Json<InspectResponse>, NemoError> {
     let branch = format!("agent/{user}/{branch_name}");
 
+    // Use get_loop_by_branch_any to include terminal loops (N5)
     let record = state
         .store
-        .get_loop_by_branch(&branch)
+        .get_loop_by_branch_any(&branch)
         .await?
         .ok_or(NemoError::LoopNotFound { id: Uuid::nil() })?;
 

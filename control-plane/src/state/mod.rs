@@ -18,8 +18,11 @@ pub trait StateStore: Send + Sync + 'static {
     /// Get a loop by ID.
     async fn get_loop(&self, id: Uuid) -> Result<Option<LoopRecord>>;
 
-    /// Get a loop by engineer and branch.
+    /// Get an active (non-terminal) loop by branch.
     async fn get_loop_by_branch(&self, branch: &str) -> Result<Option<LoopRecord>>;
+
+    /// Get the most recent loop by branch, including terminal states (for /inspect).
+    async fn get_loop_by_branch_any(&self, branch: &str) -> Result<Option<LoopRecord>>;
 
     /// Get all active (non-terminal) loops.
     async fn get_active_loops(&self) -> Result<Vec<LoopRecord>>;
@@ -136,6 +139,16 @@ pub mod memory {
             Ok(loops
                 .values()
                 .find(|l| l.branch == branch && !l.state.is_terminal())
+                .cloned())
+        }
+
+        async fn get_loop_by_branch_any(&self, branch: &str) -> Result<Option<LoopRecord>> {
+            let loops = self.loops.read().await;
+            // Return the most recently updated loop for this branch
+            Ok(loops
+                .values()
+                .filter(|l| l.branch == branch)
+                .max_by_key(|l| l.updated_at)
                 .cloned())
         }
 

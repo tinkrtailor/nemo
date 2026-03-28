@@ -311,10 +311,38 @@ impl ConvergentLoopDriver {
                     Some(v) if v.clean => {
                         // Audit passed
                         if record.harden_only {
-                            // Harden only: terminal state is HARDENED (FR-23)
+                            // Harden only: create spec PR, merge it, terminal HARDENED (FR-23)
+                            let pr_title = format!(
+                                "chore(spec): harden {} for {}",
+                                record.spec_path, record.engineer,
+                            );
+                            let pr_body = format!(
+                                "Spec hardening completed in {} round(s).\n\nSpec: {}\nBranch: {}",
+                                record.round, record.spec_path, record.branch,
+                            );
+                            let pr_url = self
+                                .git
+                                .create_pr(&record.branch, &pr_title, &pr_body)
+                                .await?;
+                            record.spec_pr_url = Some(pr_url);
+
+                            if self.config.harden.auto_merge_spec_pr {
+                                let merge_sha = self
+                                    .git
+                                    .merge_pr(
+                                        &record.branch,
+                                        &self.config.harden.merge_strategy,
+                                    )
+                                    .await?;
+                                record.merge_sha = Some(merge_sha);
+                                record.merged_at = Some(chrono::Utc::now());
+                            }
+
                             record.state = LoopState::Hardened;
                             record.sub_state = None;
                             record.active_job_name = None;
+                            record.hardened_spec_path =
+                                Some(record.spec_path.clone());
                             self.store.update_loop(record).await?;
                             tracing::info!(loop_id = %record.id, "Harden loop HARDENED");
                             Ok(LoopState::Hardened)

@@ -273,6 +273,17 @@ impl StateStore for PgStateStore {
         row.as_ref().map(row_to_loop_record).transpose()
     }
 
+    async fn get_loop_by_branch_any(&self, branch: &str) -> Result<Option<LoopRecord>> {
+        let row = sqlx::query(
+            "SELECT * FROM loops WHERE branch = $1 ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(branch)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.as_ref().map(row_to_loop_record).transpose()
+    }
+
     async fn get_active_loops(&self) -> Result<Vec<LoopRecord>> {
         let rows = sqlx::query(
             "SELECT * FROM loops WHERE state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED') ORDER BY created_at ASC",

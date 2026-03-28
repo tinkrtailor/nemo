@@ -143,8 +143,9 @@ pub mod bare {
                 _ => "--squash",
             };
 
+            // No --auto: block until merge completes so state and merge_sha are accurate
             let output = Command::new("gh")
-                .args(["pr", "merge", branch, merge_flag, "--auto"])
+                .args(["pr", "merge", branch, merge_flag, "--delete-branch"])
                 .current_dir(&self.repo_path)
                 .output()
                 .await
@@ -157,8 +158,12 @@ pub mod bare {
                 )));
             }
 
-            // Get the merge commit SHA from the target branch
-            let sha = self.run_git(&["rev-parse", "HEAD"]).await?;
+            // Fetch to get the merge commit, then read the target branch SHA
+            let _ = self.run_git(&["fetch", "origin"]).await;
+            let sha = match self.run_git(&["rev-parse", "origin/main"]).await {
+                Ok(s) => s,
+                Err(_) => self.run_git(&["rev-parse", "HEAD"]).await?,
+            };
             Ok(sha)
         }
     }
