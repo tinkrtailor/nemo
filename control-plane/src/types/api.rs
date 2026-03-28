@@ -138,11 +138,11 @@ pub struct RoundSummary {
 /// POST /credentials request body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialRequest {
+    pub engineer: String,
     pub provider: String,
     pub credential_ref: String,
     #[serde(default = "default_valid")]
     pub valid: bool,
-    pub engineer: Option<String>,
 }
 
 fn default_valid() -> bool {

@@ -14,10 +14,12 @@ pub async fn run(client: &NemoClient, loop_id: &str) -> Result<()> {
         .post(&format!("/resume/{loop_id}"), &serde_json::json!({}))
         .await?;
 
-    println!("Resumed loop {}", resp.loop_id);
-    println!("  State: {}", resp.state);
     if resp.resume_requested {
+        println!("Resumed loop {}", resp.loop_id);
+        println!("  State: {}", resp.state);
         println!("  Loop will resume on next reconciliation tick.");
+    } else {
+        println!("Loop {} is in state {} (resume not applicable)", resp.loop_id, resp.state);
     }
     Ok(())
 }

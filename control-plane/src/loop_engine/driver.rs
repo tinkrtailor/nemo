@@ -499,7 +499,27 @@ impl ConvergentLoopDriver {
                     // Ship mode: check if rounds <= max_rounds_for_auto_merge
                     let threshold = self.config.ship.max_rounds_for_auto_merge as i32;
                     if record.round <= threshold {
-                        // Within threshold: merge the PR -> SHIPPED
+                        // Check CI if required before merging
+                        if self.config.ship.require_passing_ci {
+                            let ci_ok = self.git.ci_passed(&record.branch).await?;
+                            if !ci_ok {
+                                // CI failed: converge without merge, leave PR for review
+                                record.state = LoopState::Converged;
+                                record.sub_state = None;
+                                record.active_job_name = None;
+                                record.failure_reason = Some(
+                                    "CI checks failed. PR created but not merged.".to_string(),
+                                );
+                                self.store.update_loop(record).await?;
+                                tracing::warn!(
+                                    loop_id = %record.id,
+                                    "Ship mode: CI failed, converging without merge"
+                                );
+                                return Ok(LoopState::Converged);
+                            }
+                        }
+
+                        // Within threshold + CI passed: merge the PR -> SHIPPED
                         let merge_sha = self
                             .git
                             .merge_pr(&record.branch, &self.config.ship.merge_strategy)
@@ -850,12 +870,20 @@ impl ConvergentLoopDriver {
     }
 
     /// Dispatch implement with feedback from previous round.
+    /// Writes the feedback JSON to the worktree before dispatching.
     async fn dispatch_implement_with_feedback(
         &self,
         record: &mut LoopRecord,
-        _feedback: &FeedbackFile,
+        feedback: &FeedbackFile,
         feedback_path: &str,
     ) -> Result<LoopState> {
+        // Write feedback file to the branch worktree so the agent can read it
+        let feedback_json = serde_json::to_string_pretty(feedback)
+            .map_err(|e| crate::error::NemoError::Internal(format!("Failed to serialize feedback: {e}")))?;
+        self.git
+            .write_file(&record.branch, feedback_path, &feedback_json)
+            .await?;
+
         record.state = LoopState::Implementing;
         record.sub_state = Some(SubState::Dispatched);
         record.retry_count = 0;
@@ -888,7 +916,16 @@ impl ConvergentLoopDriver {
     }
 
     /// Re-dispatch the current stage (after retry or resume).
+    /// Deletes the old K8s Job first to avoid AlreadyExists on deterministic names.
     async fn redispatch_current_stage(&self, record: &LoopRecord) -> Result<LoopState> {
+        // Clean up the old job before creating a new one with the same name
+        if let Some(ref old_job) = record.active_job_name {
+            let _ = self
+                .dispatcher
+                .delete_job(old_job, &self.config.cluster.jobs_namespace)
+                .await;
+        }
+
         let mut updated = record.clone();
         updated.sub_state = Some(SubState::Dispatched);
 

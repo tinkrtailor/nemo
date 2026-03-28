@@ -23,8 +23,14 @@ pub trait GitOperations: Send + Sync + 'static {
     /// Detect if a branch has diverged from the expected SHA.
     async fn has_diverged(&self, branch: &str, expected_sha: &str) -> Result<bool>;
 
+    /// Write a file to the worktree for a branch and commit it.
+    async fn write_file(&self, branch: &str, path: &str, content: &str) -> Result<()>;
+
     /// Delete a branch (cleanup on failure).
     async fn delete_branch(&self, branch: &str) -> Result<()>;
+
+    /// Check if CI checks have passed on a branch/PR. Returns true if all checks pass.
+    async fn ci_passed(&self, branch: &str) -> Result<bool>;
 
     /// Create a pull request. Returns the PR URL.
     async fn create_pr(&self, branch: &str, title: &str, body: &str) -> Result<String>;
@@ -113,9 +119,67 @@ pub mod bare {
             }
         }
 
+        async fn write_file(&self, branch: &str, path: &str, content: &str) -> Result<()> {
+            // Create a temporary worktree, write the file, commit, and clean up
+            let worktree_dir = format!("/tmp/nemo-wt-{}", uuid::Uuid::new_v4());
+            self.run_git(&["worktree", "add", &worktree_dir, branch])
+                .await
+                .map_err(|e| crate::error::NemoError::Git(format!(
+                    "Failed to create worktree for {branch}: {e}"
+                )))?;
+
+            // Write the file
+            let file_path = std::path::Path::new(&worktree_dir).join(path);
+            if let Some(parent) = file_path.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    crate::error::NemoError::Git(format!("Failed to create dirs: {e}"))
+                })?;
+            }
+            tokio::fs::write(&file_path, content).await.map_err(|e| {
+                crate::error::NemoError::Git(format!("Failed to write file: {e}"))
+            })?;
+
+            // Stage, commit, and clean up worktree
+            let add = Command::new("git")
+                .args(["add", path])
+                .current_dir(&worktree_dir)
+                .output()
+                .await;
+            if let Err(e) = add {
+                let _ = self.run_git(&["worktree", "remove", "--force", &worktree_dir]).await;
+                return Err(crate::error::NemoError::Git(format!("git add failed: {e}")));
+            }
+
+            let commit = Command::new("git")
+                .args(["commit", "-m", &format!("chore(agent): add {path}")])
+                .current_dir(&worktree_dir)
+                .output()
+                .await;
+            if let Err(e) = commit {
+                let _ = self.run_git(&["worktree", "remove", "--force", &worktree_dir]).await;
+                return Err(crate::error::NemoError::Git(format!("git commit failed: {e}")));
+            }
+
+            // Clean up worktree
+            let _ = self.run_git(&["worktree", "remove", "--force", &worktree_dir]).await;
+            Ok(())
+        }
+
         async fn delete_branch(&self, branch: &str) -> Result<()> {
             let _ = self.run_git(&["branch", "-D", branch]).await;
             Ok(())
+        }
+
+        async fn ci_passed(&self, branch: &str) -> Result<bool> {
+            let output = Command::new("gh")
+                .args(["pr", "checks", branch, "--required"])
+                .current_dir(&self.repo_path)
+                .output()
+                .await
+                .map_err(|e| crate::error::NemoError::Git(format!("Failed to run gh: {e}")))?;
+
+            // Exit code 0 means all required checks passed
+            Ok(output.status.success())
         }
 
         async fn create_pr(&self, branch: &str, title: &str, body: &str) -> Result<String> {
@@ -249,10 +313,20 @@ pub mod mock {
             }
         }
 
+        async fn write_file(&self, _branch: &str, path: &str, content: &str) -> Result<()> {
+            let mut files = self.files.write().await;
+            files.insert(path.to_string(), content.to_string());
+            Ok(())
+        }
+
         async fn delete_branch(&self, branch: &str) -> Result<()> {
             let mut branches = self.branches.write().await;
             branches.remove(branch);
             Ok(())
+        }
+
+        async fn ci_passed(&self, _branch: &str) -> Result<bool> {
+            Ok(true)
         }
 
         async fn create_pr(&self, branch: &str, _title: &str, _body: &str) -> Result<String> {

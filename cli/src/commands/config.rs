@@ -10,7 +10,12 @@ pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
             "engineer" => println!("{}", config.engineer),
             "api_key" => {
                 if let Some(key) = &config.api_key {
-                    println!("{key}");
+                    // Mask sensitive value: show first 4 and last 4 chars
+                    if key.len() > 12 {
+                        println!("{}...{}", &key[..4], &key[key.len()-4..]);
+                    } else {
+                        println!("****");
+                    }
                 } else {
                     println!("(not set)");
                 }
@@ -37,7 +42,11 @@ pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
         }
 
         crate::config::save_config(&config)?;
-        println!("Set {key} = {value}");
+        if key == "api_key" {
+            println!("Set {key} = ****");
+        } else {
+            println!("Set {key} = {value}");
+        }
         return Ok(());
     }
 

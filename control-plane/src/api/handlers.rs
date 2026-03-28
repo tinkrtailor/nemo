@@ -53,24 +53,25 @@ pub async fn start(
         hex::encode(hasher.finalize())[..8].to_string()
     };
 
-    let kind = if req.harden || req.harden_only {
-        LoopKind::Harden
-    } else {
-        LoopKind::Implement
-    };
-
-    // Determine max rounds from config
-    let max_rounds = if req.harden || req.harden_only {
-        state.config.limits.max_rounds_harden as i32
-    } else {
-        state.config.limits.max_rounds_implement as i32
-    };
-
+    // Compute effective flags first so max_rounds uses the right values
     // If ship_mode with require_harden and no --harden, auto-add harden (FR-20)
     let effective_harden = req.harden || (req.ship_mode && state.config.ship.require_harden);
 
     // ship --harden implies auto_approve (FR-20: zero human gates)
     let effective_auto_approve = req.auto_approve || req.ship_mode;
+
+    let kind = if effective_harden || req.harden_only {
+        LoopKind::Harden
+    } else {
+        LoopKind::Implement
+    };
+
+    // Determine max rounds from config (uses effective_harden, not raw req.harden)
+    let max_rounds = if effective_harden || req.harden_only {
+        state.config.limits.max_rounds_harden as i32
+    } else {
+        state.config.limits.max_rounds_implement as i32
+    };
 
     let record = LoopRecord {
         id: loop_id,
@@ -365,9 +366,13 @@ pub async fn upsert_credentials(
     State(state): State<AppState>,
     Json(req): Json<CredentialRequest>,
 ) -> Result<impl IntoResponse, NemoError> {
+    if req.engineer.is_empty() {
+        return Err(NemoError::Internal("engineer field is required".to_string()));
+    }
+
     let cred = crate::types::EngineerCredential {
         id: Uuid::new_v4(),
-        engineer: req.engineer.unwrap_or_default(),
+        engineer: req.engineer,
         provider: req.provider,
         credential_ref: req.credential_ref,
         valid: req.valid,

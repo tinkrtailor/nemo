@@ -11,7 +11,7 @@ use nemo_control_plane::config::NemoConfig;
 use nemo_control_plane::git::GitOperations;
 use nemo_control_plane::k8s::client::KubeJobDispatcher;
 use nemo_control_plane::k8s::JobDispatcher;
-use nemo_control_plane::loop_engine::{ConvergentLoopDriver, Reconciler};
+use nemo_control_plane::loop_engine::{watcher::JobWatcher, ConvergentLoopDriver, Reconciler};
 use nemo_control_plane::state::postgres::PgStateStore;
 use nemo_control_plane::state::StateStore;
 
@@ -83,12 +83,21 @@ async fn main() -> anyhow::Result<()> {
         driver,
         store.clone(),
         Duration::from_secs(config.cluster.reconcile_interval_secs),
-        wake,
+        wake.clone(),
     );
 
     let reconciler_rx = shutdown_rx.clone();
     let reconciler_handle = tokio::spawn(async move {
         reconciler.run(reconciler_rx).await;
+    });
+
+    // Start Job watcher (wakes reconciler on K8s Job status changes)
+    let watcher_client = kube::Client::try_default().await?;
+    let job_watcher = JobWatcher::new(wake);
+    let watcher_namespace = config.cluster.jobs_namespace.clone();
+    let watcher_rx = shutdown_rx.clone();
+    let watcher_handle = tokio::spawn(async move {
+        job_watcher.run(watcher_client, &watcher_namespace, watcher_rx).await;
     });
 
     // Start API server
@@ -118,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
     shutdown_tx.send(true)?;
 
     // Wait for tasks to finish
-    let _ = tokio::join!(reconciler_handle, server_handle);
+    let _ = tokio::join!(reconciler_handle, server_handle, watcher_handle);
 
     tracing::info!("Nemo control plane shut down");
     Ok(())
