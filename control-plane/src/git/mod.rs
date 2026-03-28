@@ -234,6 +234,12 @@ pub mod bare {
         }
 
         async fn remove_path(&self, branch: &str, path: &str) -> Result<()> {
+            // Check if path exists in the branch before creating a worktree
+            if self.run_git(&["cat-file", "-e", &format!("{branch}:{path}")]).await.is_err() {
+                // Path doesn't exist in the branch — nothing to remove
+                return Ok(());
+            }
+
             let worktree_dir = format!("/tmp/nemo-wt-{}", uuid::Uuid::new_v4());
             self.run_git(&["worktree", "add", &worktree_dir, branch])
                 .await
@@ -241,9 +247,9 @@ pub mod bare {
                     "Failed to create worktree for {branch}: {e}"
                 )))?;
 
-            // git rm -rf the path (ignore errors if path doesn't exist)
+            // git rm -rf the path
             let rm = Command::new("git")
-                .args(["rm", "-rf", "--ignore-unmatch", path])
+                .args(["rm", "-rf", path])
                 .current_dir(&worktree_dir)
                 .output()
                 .await;
@@ -251,12 +257,12 @@ pub mod bare {
             if let Ok(ref output) = rm
                 && output.status.success()
             {
+                // Only commit if git rm actually staged changes
                 let _ = Command::new("git")
                     .args([
                         "-c", "user.name=nemo-control-plane",
                         "-c", "user.email=nemo@nemo.dev",
                         "commit", "-m", &format!("chore(agent): remove {path} artifacts"),
-                        "--allow-empty",
                     ])
                     .current_dir(&worktree_dir)
                     .output()

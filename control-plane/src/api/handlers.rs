@@ -41,16 +41,6 @@ pub async fn start(
     };
     let branch = generate_branch_name(&req.engineer, &req.spec_path, &spec_content);
 
-    // Check for active loop on this branch (early check; DB unique index is the real guard)
-    if state.store.has_active_loop_for_branch(&branch).await? {
-        return Err(NemoError::ActiveLoopConflict {
-            branch: branch.clone(),
-        });
-    }
-
-    // Create branch in git before any DB writes (Finding #11)
-    let branch_sha = state.git.create_branch(&branch).await?;
-
     let loop_id = Uuid::new_v4();
     let now = chrono::Utc::now();
     let spec_content_hash = {
@@ -80,6 +70,9 @@ pub async fn start(
         state.config.limits.max_rounds_implement as i32
     };
 
+    // DB insert FIRST — DB is the source of truth; git follows.
+    // The partial unique index on (branch, active state) prevents duplicates
+    // atomically, so concurrent /start requests are serialized here.
     let record = LoopRecord {
         id: loop_id,
         engineer: req.engineer.clone(),
@@ -101,7 +94,7 @@ pub async fn start(
         paused_from_state: None,
         reauth_from_state: None,
         failure_reason: None,
-        current_sha: Some(branch_sha),
+        current_sha: None, // Set after git branch creation below
         session_id: None,
         active_job_name: None,
         retry_count: 0,
@@ -115,21 +108,40 @@ pub async fn start(
         updated_at: now,
     };
 
-    // Create loop; the DB unique index on (branch, active state) prevents duplicates
-    // even under concurrent requests. Clean up git branch on DB failure (N1).
     match state.store.create_loop(&record).await {
         Ok(_) => {}
         Err(NemoError::Database(ref e)) if is_unique_violation(e) => {
-            let _ = state.git.delete_branch(&branch).await;
             return Err(NemoError::ActiveLoopConflict {
                 branch: branch.clone(),
             });
         }
+        Err(e) => return Err(e),
+    }
+
+    // DB insert succeeded — we own this branch name. Now create the git branch.
+    // If git fails, mark the loop as FAILED (DB record exists, preventing retries
+    // from a concurrent request).
+    let branch_sha = match state.git.create_branch(&branch).await {
+        Ok(sha) => sha,
         Err(e) => {
-            let _ = state.git.delete_branch(&branch).await;
+            // Mark loop as failed so it doesn't block future attempts
+            let mut failed = record.clone();
+            failed.state = LoopState::Failed;
+            failed.failure_reason = Some(format!("Git branch creation failed: {e}"));
+            let _ = state.store.update_loop(&failed).await;
             return Err(e);
         }
-    }
+    };
+
+    // Update current_sha now that we have the branch
+    state
+        .store
+        .update_loop_state(loop_id, LoopState::Pending, None)
+        .await?;
+    // Persist the SHA via a targeted update
+    let mut with_sha = record.clone();
+    with_sha.current_sha = Some(branch_sha);
+    state.store.update_loop(&with_sha).await?;
 
     tracing::info!(
         loop_id = %loop_id,
@@ -404,10 +416,12 @@ pub async fn upsert_credentials(
     Ok((StatusCode::OK, Json(serde_json::json!({"status": "ok"}))))
 }
 
-/// Check if a sqlx error is a unique constraint violation (Postgres code 23505).
+/// Check if a sqlx error is a unique constraint violation.
 fn is_unique_violation(e: &sqlx::Error) -> bool {
     match e {
-        sqlx::Error::Database(db_err) => db_err.code().as_deref() == Some("23505"),
+        sqlx::Error::Database(db_err) => {
+            db_err.kind() == sqlx::error::ErrorKind::UniqueViolation
+        }
         _ => false,
     }
 }

@@ -107,6 +107,36 @@ pub mod memory {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
+    /// Simulates a Postgres unique constraint violation for MemoryStateStore.
+    #[derive(Debug)]
+    struct MemoryUniqueViolation;
+
+    impl std::fmt::Display for MemoryUniqueViolation {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "unique constraint violation")
+        }
+    }
+
+    impl std::error::Error for MemoryUniqueViolation {}
+
+    impl sqlx::error::DatabaseError for MemoryUniqueViolation {
+        fn message(&self) -> &str {
+            "unique constraint violation"
+        }
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::UniqueViolation
+        }
+    }
+
     #[derive(Debug, Clone, Default)]
     pub struct MemoryStateStore {
         loops: Arc<RwLock<HashMap<Uuid, LoopRecord>>>,
@@ -126,6 +156,15 @@ pub mod memory {
     impl StateStore for MemoryStateStore {
         async fn create_loop(&self, record: &LoopRecord) -> Result<LoopRecord> {
             let mut loops = self.loops.write().await;
+            // Enforce unique active branch constraint (mirrors Postgres partial unique index)
+            let has_active = loops.values().any(|l| {
+                l.branch == record.branch && !l.state.is_terminal()
+            });
+            if has_active {
+                return Err(crate::error::NemoError::Database(
+                    sqlx::Error::Database(Box::new(MemoryUniqueViolation)),
+                ));
+            }
             loops.insert(record.id, record.clone());
             Ok(record.clone())
         }
