@@ -72,7 +72,7 @@ Runtime infrastructure for Nemo agent jobs: the container image agents execute i
 
 - FR-29: Jobs shall have `activeDeadlineSeconds: 900` (15 min) as a watchdog. The control plane may override this per stage.
 - FR-30: The sidecar shall write a readiness file to `/tmp/shared/ready` (shared emptyDir volume). The agent entrypoint polls this file (100ms interval, 30s timeout). `shareProcessNamespace` shall NOT be used (it leaks `/proc` across containers).
-- FR-31: Job names shall follow the pattern `nemo-{loop_id_short}-{stage}-r{round}` where `loop_id_short` is the first 8 characters of the loop ID, to stay under the K8s 63-character name limit (e.g., `nemo-a3f2b1c9-implement-r2`)
+- FR-31: Job names shall follow the pattern `nemo-{loop_id_short}-{stage}-r{round}-t{attempt}` where `loop_id_short` is the first 8 characters of the loop ID and `attempt` is the retry attempt number (starting at 1), to stay under the K8s 63-character name limit (e.g., `nemo-a3f2b1c9-implement-r2-t1`)
 - FR-32: Jobs shall have labels: `nemo.dev/loop-id`, `nemo.dev/stage`, `nemo.dev/engineer`, `nemo.dev/round` for control plane queries
 
 #### Prompt Templates
@@ -301,7 +301,7 @@ The control plane owns the full lifecycle of git worktrees. Before creating a K8
 
 ### Session Continuation Flow (Round > 1)
 
-1. Control plane sets `SESSION_ID` to the session ID from the previous round's `result.json`
+1. Control plane sets `SESSION_ID` to the session ID from the previous round's `NEMO_RESULT:` output (parsed from pod logs)
 2. Control plane writes the feedback file (validated against FR-40b schema) to the session PVC and sets `FEEDBACK_PATH` to its path
 3. Entrypoint detects `$SESSION_ID` is set, passes `--resume $SESSION_ID` (claude) or `-s $SESSION_ID` (opencode)
 4. The session PVC persists session state across Job instances for the same loop
@@ -339,7 +339,7 @@ The control plane owns the full lifecycle of git worktrees. Before creating a K8
 | Error | Detection | Response | Recovery |
 |-------|-----------|----------|----------|
 | Sidecar crash mid-job | Agent gets connection refused on proxy ports; liveness probe fails | Agent entrypoint detects localhost connection failures and exits with code 111 (sidecar failure) | Control plane sees exit code 111, retries job (new pod, fresh sidecar) |
-| Malformed result.json | Control plane JSON parse fails | Log raw output, mark job ERRORED | Control plane retries once. If still malformed, loop FAILED. |
+| Malformed NEMO_RESULT line | Control plane JSON parse fails on `NEMO_RESULT:` prefix line | Log raw output, mark job ERRORED | Control plane retries up to 2 times (matching Lane A's malformed verdict retry policy). If still malformed after 2 retries, loop FAILED. |
 | Terraform apply partial failure | Terraform exits non-zero with state file | Resources may be partially created | `terraform apply` is idempotent; re-run. `terraform destroy` to clean up. |
 | k3s API unreachable from control plane | Job creation fails with connection error | Control plane retries with 10s backoff, max 3 attempts | If persistent, alert (k3s down or network issue) |
 | Postgres PVC full | Postgres pod restarts with disk pressure | Control plane health check detects DB connection failure | Manual: expand PVC or clean old data |
@@ -371,7 +371,7 @@ The control plane owns the full lifecycle of git worktrees. Before creating a K8
 - [ ] Auth sidecar git push proxy successfully pushes a commit using mounted SSH key
 - [ ] Egress logger logs all outbound connections with timestamp, host, method, bytes in JSON-lines format to stdout
 - [ ] Agent container has no access to files under `/secrets/` (volume not mounted)
-- [ ] K8s Job with both containers starts, agent waits for sidecar readiness, executes, writes result.json, and exits cleanly
+- [ ] K8s Job with both containers starts, agent waits for sidecar readiness, executes, emits `NEMO_RESULT:` line to stdout, and exits cleanly
 - [ ] Session continuation works: round 2 job with SESSION_ID resumes prior session state from PVC
 - [ ] Prompt template variable injection produces correct prompts for all four stages
 - [ ] Repo-side `.nemo/prompts/implement.md` overrides the default template when present

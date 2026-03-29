@@ -45,7 +45,7 @@ The API server and loop engine are separate k3s Deployments. They share a Postgr
 ### Functional Requirements
 
 - FR-1: The system shall provide a `ConvergentLoopDriver` that accepts a `LoopKind` enum (Harden or Implement) and dispatches stages accordingly
-- FR-2: The system shall transition loops through states: PENDING -> HARDENING -> AWAITING_APPROVAL -> IMPLEMENTING -> TESTING -> REVIEWING -> CONVERGED | FAILED | CANCELLED, with PAUSED reachable from any active sub-state and AWAITING_REAUTH reachable from any state where a job is active (DISPATCHED or RUNNING)
+- FR-2: The system shall transition loops through states: PENDING -> HARDENING -> AWAITING_APPROVAL -> IMPLEMENTING -> TESTING -> REVIEWING -> CONVERGED | FAILED | CANCELLED, with `paused_remote_ahead` and `paused_force_deviated` reachable from any active sub-state, and AWAITING_REAUTH reachable from any state where a job is active (DISPATCHED or RUNNING). Terminal states: CONVERGED, FAILED, CANCELLED, HARDENED, SHIPPED.
 - FR-3: The system shall gate implementation behind AWAITING_APPROVAL, requiring explicit `POST /approve/:id` (opt-out via `--auto-approve` on start)
 - FR-4: The system shall feed test failures back to the implement stage as structured feedback including at minimum: service name, test command, exit code, stdout (last 10KB), stderr (last 10KB)
 - FR-5: The system shall create branches named `agent/{engineer}/{spec-slug}-{short-hash}` (short-hash = first 8 chars of SHA-256 of the original submitted spec content, making the branch name stable across harden rounds; supersedes design doc's loop-ID-based naming)
@@ -196,7 +196,7 @@ Uses `LoopKind::Harden` with two alternating stages:
 | Stage | Model | Input | Output |
 |-------|-------|-------|--------|
 | SpecAudit | reviewer (default: openai) | spec file path, branch | `AuditVerdict { clean: bool, issues: Vec<Issue> }` |
-| SpecRevise | implementor (default: claude) | spec + audit issues | `ReviseOutput { updated_spec_path: String, sha: String }` |
+| SpecRevise | implementor (default: claude) | spec + audit issues | `ReviseOutput { revised_spec_path: String, new_sha: String }` |
 
 Convergence: `AuditVerdict.clean == true`. Max rounds from `nemo.toml` `limits.max_rounds_harden` (default: 10).
 
@@ -208,13 +208,13 @@ Uses `LoopKind::Implement` with three stages per round:
 
 | Stage | Model | Input | Output |
 |-------|-------|-------|--------|
-| Implement | implementor (default: claude) | spec + feedback file (if round > 1) | `ImplOutput { sha: String }` |
-| Test | none (runs test commands) | affected_services (computed by control plane from git diff, see Lane C FR-42a) | `TestOutput { passed: bool, failures: Vec<TestFailure> }` |
+| Implement | implementor (default: claude) | spec + feedback file (if round > 1) | `ImplOutput { new_sha: String }` |
+| Test | none (runs test commands) | affected_services (computed by control plane from git diff, see Lane C FR-42a) | `TestOutput { all_passed: bool, services: Vec<ServiceTestResult>, ci_status: String }` |
 | Review | reviewer (default: openai) | spec + branch diff | `ReviewVerdict` (see schema below) |
 
-If Test fails: loop feeds `TestFailure` items back as feedback to next Implement round (no Review dispatched).
+If Test fails: loop feeds `services` test results back as feedback to next Implement round (no Review dispatched).
 If Review returns `clean: false`: loop feeds `verdict.issues` back as feedback to next Implement round.
-Convergence: `ReviewVerdict.clean == true` AND `TestOutput.passed == true`. Max rounds from `nemo.toml` `limits.max_rounds_implement` (default: 15).
+Convergence: `ReviewVerdict.clean == true` AND `TestOutput.all_passed == true`. Max rounds from `nemo.toml` `limits.max_rounds_implement` (default: 15).
 
 ### nemo ship — Post-Convergence Flow
 
@@ -327,11 +327,18 @@ Sub-states (apply to HARDENING, IMPLEMENTING, TESTING, REVIEWING):
   (Job created)  (Job active) (Job succeeded/failed)
 
 Special states:
-  PAUSED: entered when branch divergence is detected from any active sub-state
-    (DISPATCHED or RUNNING). If divergence is detected while DISPATCHED, the
-    pending Job is cancelled before transitioning.
-    PAUSED ---> {previous stage}/DISPATCHED  (on `nemo resume`, same round)
-    PAUSED ---> CANCELLED                    (on `nemo cancel`)
+  paused_remote_ahead: entered when engineer pushed to branch (fast-forward possible),
+    detected from any active sub-state (DISPATCHED or RUNNING). If divergence is
+    detected while DISPATCHED, the pending Job is cancelled before transitioning.
+    paused_remote_ahead ---> {previous stage}/DISPATCHED  (on `nemo resume`, fast-forwards to remote SHA, same round)
+    paused_remote_ahead ---> CANCELLED                    (on `nemo cancel`)
+
+  paused_force_deviated: entered when branch histories diverged (force push),
+    detected from any active sub-state (DISPATCHED or RUNNING). If divergence is
+    detected while DISPATCHED, the pending Job is cancelled before transitioning.
+    paused_force_deviated ---> {previous stage}/DISPATCHED  (on `nemo resume --force`, resets to remote SHA, same round)
+    paused_force_deviated ---> CANCELLED                    (on `nemo cancel`)
+    Note: `nemo resume` without `--force` is rejected with an explanation of data loss.
 
   AWAITING_REAUTH: entered when agent credentials expire mid-job, only from
     states where a job is active (DISPATCHED or RUNNING). Not reachable from
@@ -345,7 +352,8 @@ Special states:
 Special transitions:
   ANY active state ---> FAILED           (on unrecoverable error)
   ANY active state ---> CANCELLED        (on cancel)
-  ANY active sub-state (DISPATCHED/RUNNING) ---> PAUSED  (on branch divergence; cancel pending Job if DISPATCHED)
+  ANY active sub-state (DISPATCHED/RUNNING) ---> paused_remote_ahead  (on RemoteAhead divergence; cancel pending Job if DISPATCHED)
+  ANY active sub-state (DISPATCHED/RUNNING) ---> paused_force_deviated  (on ForceDeviated divergence; cancel pending Job if DISPATCHED)
   ANY active sub-state (DISPATCHED/RUNNING) ---> AWAITING_REAUTH  (on expired credentials; not from AWAITING_APPROVAL)
 ```
 
@@ -354,7 +362,7 @@ Special transitions:
 **Startup:**
 1. Connect to Postgres (sqlx pool, run migrations)
 2. Initialize kube-rs client (in-cluster config)
-3. Load all loops with state not in (CONVERGED, FAILED, CANCELLED) from DB
+3. Load all loops with state not in (CONVERGED, FAILED, CANCELLED, HARDENED, SHIPPED) from DB
 4. Start reconciliation loop (tick every loop, 5s interval)
 5. Start K8s Job watcher (kube-rs `watcher()` on Jobs with label `app=nemo`)
 
@@ -380,16 +388,18 @@ Special transitions:
 - All timeouts configurable in `nemo.toml` under `[timeouts]`
 
 **Retry model:**
-- Jobs table has `retry_count` (int, default 0) and `max_retries` (int, default 2) fields.
-- On job failure (OOM, timeout, eviction): retry up to `max_retries` times with backoff (30s, 120s). Third failure marks the loop FAILED.
-- On verdict parse failure: retry the review/audit job up to 2 times (same backoff).
+- `loops.stage_retry_count` (int, default 0): resets to 0 on each stage transition. This is the per-stage retry budget for infrastructure failures (OOM, timeout, eviction). Max retries from config (default 2).
+- `jobs.attempt` (int, default 1): per-dispatch attempt number within the same stage+round. Increments on retry.
+- Job name format: `nemo-{loop_id_short}-{stage}-r{round}-t{attempt}` (e.g., `nemo-a3f2b1c9-implement-r2-t1`).
+- On job failure (OOM, timeout, eviction): increment `stage_retry_count`, create a new job with incremented `attempt`, backoff (30s, 120s). When `stage_retry_count` exceeds the configured max (default 2), mark loop FAILED.
+- On verdict parse failure: retry the review/audit job up to 2 times (same backoff), tracked via `stage_retry_count`.
 - Retries do NOT increment the round counter. Backoff is per-retry, not per-round.
 - After exhausting retries, mark loop FAILED with reason describing the failure mode.
 
 **Verdict evaluation (FR-9):**
 - After Review or Audit job completes, read pod logs (via kube-rs pod/log API), find the line starting with `NEMO_RESULT:`, strip the prefix, and parse the JSON. The `data.verdict` field contains the review/audit verdict (see Lane C FR-13 for the full result envelope contract).
-- If the `NEMO_RESULT:` line is missing or the JSON is malformed: increment `retry_count` on the job, re-dispatch the same stage (same inputs)
-- If `retry_count >= max_retries`: mark loop FAILED with reason "Malformed verdict after {max_retries} retries"
+- If the `NEMO_RESULT:` line is missing or the JSON is malformed: increment `loops.stage_retry_count`, re-dispatch the same stage with a new job (incremented `attempt`)
+- If `stage_retry_count` exceeds the configured max retries (default 2): mark loop FAILED with reason "Malformed NEMO_RESULT line after {stage_retry_count} retries"
 
 ### API Server Binary
 
@@ -511,16 +521,23 @@ Error (409) if loop is not in AWAITING_APPROVAL state.
 
 #### `POST /resume/:id`
 
-Resume a loop in PAUSED or AWAITING_REAUTH state. Sets `resume_requested = true` in Postgres. The loop engine reads the flag on the next reconciliation tick and re-dispatches the previously interrupted stage.
+Resume a loop in `paused_remote_ahead`, `paused_force_deviated`, or AWAITING_REAUTH state. Accepts an optional `--force` query parameter. Sets `resume_requested = true` in Postgres. The loop engine reads the flag on the next reconciliation tick and re-dispatches the previously interrupted stage.
+
+- For `paused_remote_ahead`: fast-forwards to remote SHA (no work lost), re-dispatches current stage.
+- For `paused_force_deviated`: requires `?force=true`. Without it, returns 400 with an explanation of which commits will be discarded. With `force=true`, resets to remote SHA and re-dispatches.
+- For AWAITING_REAUTH: re-dispatches the failed job after credential refresh.
+
+Request: `POST /resume/:id?force=true`
 
 Response (200):
 ```json
-{ "loop_id": "a1b2c3d4-...", "state": "PAUSED", "resume_requested": true }
+{ "loop_id": "a1b2c3d4-...", "state": "paused_remote_ahead", "resume_requested": true }
 ```
 
 The response returns the current state. The transition back to the active stage happens asynchronously via the loop engine.
 
-Error (409) if loop is not in PAUSED or AWAITING_REAUTH state.
+Error (409) if loop is not in `paused_remote_ahead`, `paused_force_deviated`, or AWAITING_REAUTH state.
+Error (400) if loop is in `paused_force_deviated` and `force=true` is not provided.
 
 #### `GET /inspect/:user/:branch`
 
@@ -536,16 +553,16 @@ Response (200):
   "rounds": [
     {
       "round": 1,
-      "implement": { "sha": "abc123", "duration_s": 120 },
+      "implement": { "new_sha": "abc123", "duration_s": 120 },
       "affected_services": ["api"],
-      "test": { "passed": false, "failures": ["api::invoice::test_cancel FAILED"] },
+      "test": { "all_passed": false, "services": [{"name": "api", "test_command": "cargo test -p api", "exit_code": 1, "stdout": "...", "stderr": "..."}], "ci_status": "failed" },
       "review": null
     },
     {
       "round": 2,
-      "implement": { "sha": "def456", "duration_s": 95 },
+      "implement": { "new_sha": "def456", "duration_s": 95 },
       "affected_services": ["api"],
-      "test": { "passed": true },
+      "test": { "all_passed": true, "services": [{"name": "api", "test_command": "cargo test -p api", "exit_code": 0, "stdout": "...", "stderr": ""}], "ci_status": "passed" },
       "review": { "clean": false, "issues": 2, "summary": "Missing null check..." }
     }
   ]
@@ -606,7 +623,8 @@ UTILITY COMMANDS:
 
   inspect <user>/<branch>   Show detailed loop state, round history, and verdicts
 
-  resume <loop-id>          Resume a PAUSED or AWAITING_REAUTH loop
+  resume <loop-id>          Resume a paused_remote_ahead, paused_force_deviated, or AWAITING_REAUTH loop
+    --force                 Required for paused_force_deviated (discards agent commits)
 
   init                      Scan monorepo, generate nemo.toml
     --force                 Overwrite existing nemo.toml
@@ -758,13 +776,14 @@ The implement agent receives both the spec path and the feedback file path. The 
 | Scenario | Expected Behavior |
 |----------|-------------------|
 | Submit spec that maps to an already-active branch | 409 Conflict: "Active loop exists for branch agent/alice/foo-abcd1234" |
-| Engineer pushes manually to a loop's branch | Loop engine detects SHA mismatch on next dispatch. Transitions to PAUSED, notifies engineer: "Branch diverged. Resume or cancel?" |
+| Engineer pushes manually to a loop's branch (fast-forward) | Loop engine detects SHA mismatch on next dispatch. Transitions to `paused_remote_ahead`, notifies engineer: "Engineer pushed new commits. `nemo resume <loop-id>` to fast-forward or `nemo cancel <loop-id>`." |
+| Engineer force-pushes to a loop's branch | Loop engine detects diverged histories. Transitions to `paused_force_deviated`, notifies engineer: "Branch histories diverged. `nemo resume --force <loop-id>` (discards agent work) or `nemo cancel <loop-id>`." |
 | Two submits for the same spec by different engineers | Allowed: different branches (agent/alice/... vs agent/bob/...) |
 | Cancel during AWAITING_APPROVAL | Immediate transition to CANCELLED (no Job to delete) |
 | Approve a loop not in AWAITING_APPROVAL | 409: "Loop is in {current_state}, not AWAITING_APPROVAL" |
 | `--auto-approve` with `--harden` | Hardening runs, then skips AWAITING_APPROVAL, implementation starts immediately |
 | Loop engine crashes mid-tick | Postgres transaction uncommitted; on restart, loop resumes from last committed state. Jobs are idempotent (start from pinned SHA). |
-| K8s Job OOM-killed | Retry per unified retry model: up to `max_retries` (default 2) with backoff (30s, 120s). Retries do not increment round counter. Third failure -> FAILED. See `docs/design.md` SS Failure Handling. |
+| K8s Job OOM-killed | Retry per unified retry model: increment `stage_retry_count`, new job with incremented `attempt`, backoff (30s, 120s). Retries do not increment round counter. When `stage_retry_count` exceeds configured max (default 2) -> FAILED. See `docs/design.md` SS Failure Handling. |
 | Agent produces no output files | Treat as job failure. Retry per OOM logic. |
 | Credentials expire mid-job | Job exits with auth error code. Loop transitions to AWAITING_REAUTH. `nemo auth` re-pushes creds, engine resumes. |
 | Max rounds exceeded | Create PR with status NEEDS_HUMAN_REVIEW and remaining issues attached. State -> FAILED with reason "Max rounds exceeded". |
