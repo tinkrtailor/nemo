@@ -1,7 +1,11 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{LoopFlag, StateStore};
@@ -14,11 +18,17 @@ use crate::types::{
 #[derive(Debug, Clone)]
 pub struct PgStateStore {
     pool: PgPool,
+    /// Dedicated connections holding session-scoped advisory locks.
+    /// Keyed by advisory lock key (derived from loop UUID).
+    lock_conns: Arc<Mutex<HashMap<i64, PoolConnection<Postgres>>>>,
 }
 
 impl PgStateStore {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            lock_conns: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -589,21 +599,38 @@ impl StateStore for PgStateStore {
     }
 
     async fn try_advisory_lock(&self, loop_id: uuid::Uuid) -> Result<bool> {
-        // Use pg_try_advisory_xact_lock: transaction-scoped, auto-releases when
-        // the transaction ends. No explicit unlock needed, no cross-connection issues.
-        // We run it inside a short transaction that commits immediately — the lock
-        // is held only for the duration of this call, which is enough to prevent
-        // two reconciler instances from starting the same loop's tick concurrently.
+        // Acquire a DEDICATED connection from the pool and hold it for the lock
+        // duration. pg_try_advisory_lock is session-scoped, so the lock persists
+        // as long as we keep this specific connection. advisory_unlock() will
+        // unlock on the SAME connection and return it to the pool.
         let key = i64::from_be_bytes(loop_id.as_bytes()[..8].try_into().unwrap());
-        let row: (bool,) = sqlx::query_as("SELECT pg_try_advisory_xact_lock($1)")
+        let mut conn = self.pool.acquire().await?;
+        let row: (bool,) = sqlx::query_as("SELECT pg_try_advisory_lock($1)")
             .bind(key)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *conn)
             .await?;
-        Ok(row.0)
+        if row.0 {
+            // Lock acquired — hold the connection
+            let mut locks = self.lock_conns.lock().await;
+            locks.insert(key, conn);
+            Ok(true)
+        } else {
+            // Lock not acquired — return connection to pool immediately
+            Ok(false)
+        }
     }
 
-    async fn advisory_unlock(&self, _loop_id: uuid::Uuid) -> Result<()> {
-        // No-op: pg_try_advisory_xact_lock auto-releases when the transaction ends.
+    async fn advisory_unlock(&self, loop_id: uuid::Uuid) -> Result<()> {
+        let key = i64::from_be_bytes(loop_id.as_bytes()[..8].try_into().unwrap());
+        let mut locks = self.lock_conns.lock().await;
+        if let Some(mut conn) = locks.remove(&key) {
+            // Unlock on the SAME connection that acquired the lock
+            let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(key)
+                .execute(&mut *conn)
+                .await;
+            // Connection is returned to the pool when dropped
+        }
         Ok(())
     }
 }

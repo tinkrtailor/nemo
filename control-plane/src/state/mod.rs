@@ -97,10 +97,12 @@ pub trait StateStore: Send + Sync + 'static {
     async fn create_merge_event(&self, event: &MergeEvent) -> Result<()>;
 
     /// Try to acquire a per-loop advisory lock (for reconciler coordination).
-    /// Returns true if the lock was acquired, false if held by another session.
+    /// Returns `Some(guard_id)` if acquired, `None` if held by another session.
+    /// The lock is session-scoped on a dedicated connection held internally.
+    /// Call `advisory_unlock` with the same loop_id when done.
     async fn try_advisory_lock(&self, loop_id: Uuid) -> Result<bool>;
 
-    /// Release a per-loop advisory lock.
+    /// Release a per-loop advisory lock and return its dedicated connection to the pool.
     async fn advisory_unlock(&self, loop_id: Uuid) -> Result<()>;
 }
 
