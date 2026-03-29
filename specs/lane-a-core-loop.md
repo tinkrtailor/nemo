@@ -88,6 +88,10 @@ The API server and loop engine are separate k3s Deployments. They share a Postgr
 
 ## Behavior
 
+### Stage Name Mapping
+
+Job names, API query parameters, log labels, and prompt template filenames use **short stage names**: `implement`, `test`, `review`, `audit`, `revise`. The Postgres `loop_stage` enum stores **full names**: `implementing`, `testing`, `reviewing`, `spec_audit`, `spec_revise`. Mapping: `implement` <-> `implementing`, `test` <-> `testing`, `review` <-> `reviewing`. Harden stages use the same name in both contexts (`spec_audit`, `spec_revise`) since they have no short/long ambiguity.
+
 ### ConvergentLoop Trait
 
 ```rust

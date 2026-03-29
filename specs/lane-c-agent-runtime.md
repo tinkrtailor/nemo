@@ -52,6 +52,10 @@ Runtime infrastructure for Nemo agent jobs: the container image agents execute i
 - FR-22: On startup, the sidecar shall wait until all three ports are listening, then write a readiness file to `/tmp/shared/ready` (shared emptyDir volume) AND expose a K8s readiness probe on `:9093/healthz` (for kubelet) AND expose a K8s liveness probe on `:9093/healthz` (same endpoint, different K8s probe config with `initialDelaySeconds: 5, periodSeconds: 10`). The readiness file is the mechanism the agent entrypoint polls; the HTTP probes are for K8s. If the sidecar dies mid-job, the agent will encounter connection refused on localhost proxy ports; the entrypoint shall detect this and exit with code 111 (sidecar connection failure) so the control plane can distinguish sidecar crashes from agent failures.
 - FR-23: On SIGTERM, the sidecar shall drain active connections (5s grace) then exit
 
+#### Stage Name Mapping
+
+Job names, API query parameters, log labels, and prompt template filenames use **short stage names**: `implement`, `test`, `review`, `audit`, `revise`. The Postgres `loop_stage` enum stores **full names**: `implementing`, `testing`, `reviewing`, `spec_audit`, `spec_revise`. Mapping: `implement` <-> `implementing`, `test` <-> `testing`, `review` <-> `reviewing`. Harden stages use the same name in both contexts (`spec_audit`, `spec_revise`) since they have no short/long ambiguity.
+
 #### K8s Job Template
 
 - FR-24: Each agent job shall be a K8s Job with `restartPolicy: Never` and two containers: `agent` and `auth-sidecar`. If the `nemo-registry-creds` Secret exists (created by Terraform when `image_pull_secret_dockerconfigjson` is provided, see FR-52), the Job template shall include `imagePullSecrets: [{ name: nemo-registry-creds }]`. Otherwise, no `imagePullSecrets` (public images or pre-pulled).
@@ -84,42 +88,28 @@ Runtime infrastructure for Nemo agent jobs: the container image agents execute i
 - FR-37: `spec-audit.md` template shall include: role definition (spec auditor), spec contents (injected), instruction to check for: ambiguity, missing edge cases, untestable requirements, unresolved dependencies, feasibility concerns, contradiction with existing codebase patterns
 - FR-38: `spec-revise.md` template shall include: role definition (spec author/reviser), spec contents (injected), audit findings (injected), instruction to revise the spec addressing each finding without removing existing valid requirements
 - FR-39: Templates shall use `{{PLACEHOLDER}}` syntax for variable injection: `{{SPEC}}`, `{{DIFF}}`, `{{FEEDBACK}}`, `{{BRANCH}}`, `{{SHA}}`, `{{VERDICT_SCHEMA}}`, `{{AFFECTED_SERVICES}}`
-- FR-40: The review verdict JSON schema (embedded in `review.md` and `spec-audit.md`) shall match the schema defined in the design doc: `{ clean: bool, confidence: float, issues: [{ severity, file, line, description, suggestion }], summary: string, token_usage: { input, output } }`
-- FR-40b: The feedback file is a first-class contract between stages. The control plane SHALL validate feedback files before dispatching the next stage. Feedback file JSON schema:
+- FR-40: The review verdict JSON schema (embedded in `review.md` and `spec-audit.md`) shall match the schema defined in Lane A (Review Verdict Schema / Audit Verdict Schema sections): `{ clean: bool, confidence: float, issues: [{ severity, category?, file, line, description, suggestion }], summary: string, token_usage: { input, output } }`. The `category` field on each issue is optional (not all reviewers produce categories); when present it is one of `correctness`, `security`, `performance`, `style` (for reviews) or `completeness`, `clarity`, `correctness`, `consistency` (for audits), matching Lane A's verdict schemas.
+- FR-40b: The feedback file is a first-class contract between stages. The control plane SHALL validate feedback files before dispatching the next stage. **The feedback file schema is defined in Lane A (Feedback File Schema section) and is the single source of truth.** The format is `{ round, source, issues|failures }` where `source` is `"review"`, `"spec_audit"`, or `"test"`. When source is `"review"` or `"spec_audit"`, the file contains an `issues` array (from the verdict). When source is `"test"`, the file contains a `failures` array (from test results). Example (review feedback):
 
   ```json
   {
-    "type": "object",
-    "required": ["source_stage", "loop_id", "round", "content"],
-    "properties": {
-      "source_stage": { "type": "string", "enum": ["review", "spec_audit", "test"] },
-      "loop_id": { "type": "string" },
-      "round": { "type": "integer" },
-      "content": {
-        "oneOf": [
-          { "$ref": "#/definitions/review_feedback" },
-          { "$ref": "#/definitions/test_feedback" }
-        ]
-      }
-    },
-    "definitions": {
-      "review_feedback": {
-        "type": "object",
-        "required": ["verdict", "issues"],
-        "properties": {
-          "verdict": { "type": "object", "description": "Full verdict per FR-40" },
-          "issues": { "type": "array", "items": { "type": "object" } }
-        }
-      },
-      "test_feedback": {
-        "type": "object",
-        "required": ["services", "all_passed"],
-        "properties": {
-          "services": { "type": "array" },
-          "all_passed": { "type": "boolean" }
-        }
-      }
-    }
+    "round": 2,
+    "source": "review",
+    "issues": [
+      { "severity": "high", "category": "correctness", "file": "api/src/invoice.rs", "line": 42, "description": "...", "suggestion": "..." }
+    ]
+  }
+  ```
+
+  Example (test feedback):
+
+  ```json
+  {
+    "round": 2,
+    "source": "test",
+    "failures": [
+      { "service": "api", "test_command": "cargo test -p api", "test_name": "...", "exit_code": 101, "stdout": "...", "stderr": "..." }
+    ]
   }
   ```
 
@@ -319,13 +309,13 @@ The control plane owns the full lifecycle of git worktrees. Before creating a K8
 |----------|-------------------|
 | Sidecar fails to start within 30s | Agent entrypoint exits 1 with error "sidecar readiness timeout". Job fails. Control plane retries per failure handling policy. |
 | Model API returns 429 (rate limit) | Sidecar passes the 429 through. CLI tool handles retry internally (both claude-code and opencode have built-in retry). |
-| Model API returns 401 (bad credentials) | Sidecar passes the 401 through. CLI tool exits non-zero. Job fails. Control plane marks loop FAILED, notifies engineer to run `nemo auth`. |
+| Model API returns 401 (bad credentials) | Sidecar passes the 401 through. CLI tool exits non-zero (exit code 42 for auth failure). Job fails. Control plane detects 401 / exit code 42 and transitions loop to AWAITING_REAUTH (not FAILED), preserving the current stage in `reauth_from_state`. Engineer runs `nemo auth` to refresh credentials, then loop resumes from where it left off. |
 | SSH key rejected on git push | Git push proxy returns the SSH error. Entrypoint logs the error, exits non-zero. Control plane marks loop FAILED with "git auth failure". |
 | Agent container OOM-killed | K8s marks container as OOMKilled. Job fails. Control plane retries with backoff (30s, 120s). On 3rd failure, loop FAILED. |
 | Egress logger port conflict | Sidecar logs error and exits. Pod restart backoff applies. Should not happen in practice (ports are hardcoded localhost-only). |
 | Session PVC full | CLI tool fails to write session state. Job exits non-zero. Control plane should alert engineer. Manual cleanup required for V1. |
 | Worktree volume not mounted (bare repo PVC missing) | Agent entrypoint checks for `/work` mount, exits 1 with "worktree volume not found". Job fails immediately. |
-| Job exceeds activeDeadlineSeconds | K8s terminates the pod. Control plane detects DeadlineExceeded condition, treats as timeout, retries once per design doc. |
+| Job exceeds activeDeadlineSeconds | K8s terminates the pod. Control plane detects DeadlineExceeded condition, treats as timeout. Deadline-exceeded jobs retry per the unified per-stage retry budget (default 2 retries), matching Lane A's retry model. When retries are exhausted, loop transitions to FAILED. |
 | Template variable not set (e.g., missing SPEC_PATH) | Entrypoint validates all required env vars on startup, exits 1 with list of missing vars. Fail-fast before invoking any CLI tool. |
 | Repo .nemo/prompts/ has partial overrides | Entrypoint loads per-template: if `.nemo/prompts/implement.md` exists, use it; otherwise fall back to default. Each template resolved independently. |
 | Terraform apply with existing server | Hetzner provider detects existing server by name, updates in place or recreates if server_type changed. Standard Terraform behavior. |
