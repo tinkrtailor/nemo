@@ -773,11 +773,10 @@ Engineer                API Server          Postgres            Loop Engine     
   |     Claude Max auth)      |        |  K8s Secrets (per engineer):              |
   |                           |        |  +-------------------------------------+  |
   |  OpenAI auth tokens       |        |  | Secret: nemo-creds-alice            |  |
-  |    (Pro subscription)     |        |  |   model-credentials:                |  |
-  |                           |        |  |     anthropic-key: sk-ant-...       |  |
-  |  SSH private key          |        |  |     openai-key: sk-...             |  |
-  |    (for git push)         |        |  |   OR session tokens:               |  |
-  |                           |        |  |     claude-session: {...}           |  |
+  |    (Pro subscription)     |        |  |   (one secret per engineer, keys   |  |
+  |                           |        |  |    named by provider)              |  |
+  |  SSH private key          |        |  |   claude: <~/.claude/ session data>|  |
+  |    (for git push)         |        |  |   openai: <opencode auth data>     |  |
   +------------+--------------+        |  |                                     |  |
                |                       |  | Secret: nemo-ssh-alice              |  |
                |                       |  |   ssh-key: -----BEGIN OPENSSH...   |  |

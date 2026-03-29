@@ -403,7 +403,7 @@ Special transitions:
 - spec-audit: 15 min (default)
 - spec-revise: 15 min (default)
 - Watchdog: no-output timeout of 15 min (kills job if no stdout/stderr for 15 min)
-- All timeouts configurable in `nemo.toml` under `[timeouts]`
+- All timeouts configurable in `nemo.toml` under `[timeouts]` (see Lane B `TimeoutsConfig` struct)
 
 **Retry model:**
 - `loops.stage_retry_count` (int, default 0): resets to 0 on each stage transition. This is the per-stage retry budget for infrastructure failures (OOM, timeout, eviction). Max retries from config (default 2).
@@ -566,15 +566,20 @@ Request:
 {
   "engineer": "alice",
   "provider": "claude",
-  "credential_ref": "nemo-creds-alice-claude",
+  "credential_data": "base64-encoded-credential-content...",
   "valid": true
 }
 ```
 
 - `engineer` (string, required): engineer name. Must not be empty.
-- `provider` (string, required): credential provider (`"claude"`, `"openai"`, etc.).
-- `credential_ref` (string, required): K8s Secret name or reference where the actual credential is stored.
+- `provider` (string, required): credential provider. Must be `"claude"` or `"openai"`.
+- `credential_data` (string, required): the actual credential content, base64-encoded. For `claude`, this is the `~/.claude/` session data. For `openai`, this is the opencode auth data.
 - `valid` (bool, required): whether the credential is currently valid.
+
+Behavior:
+- The API server base64-decodes `credential_data`.
+- Creates or updates the K8s Secret named `nemo-creds-{engineer}` (one secret per engineer, see Lane B/C credential layout) with a key matching the `provider` value (e.g., key `claude` or key `openai`) containing the decoded credential data.
+- Upserts the `engineer_credentials` table row with `credential_ref = "nemo-creds-{engineer}"`.
 
 Response (200):
 ```json
@@ -586,14 +591,14 @@ Response (200):
 }
 ```
 
-Behavior:
+Additional behavior:
 - Requires valid API key (same auth as all other endpoints).
 - Upserts into `engineer_credentials` table (unique on `(engineer_id, provider)` per Lane B FR-4b).
-- Also creates/updates the corresponding K8s Secret in the `nemo-jobs` namespace via the API server's ServiceAccount (see Lane C FR-46b RBAC).
-- Returns 400 if `engineer` is empty.
+- Returns 400 if `engineer` is empty or `credential_data` is not valid base64.
 - Returns 401 if not authenticated.
 
 Error (400): `{ "error": "engineer must not be empty" }`
+Error (400): `{ "error": "credential_data is not valid base64" }`
 Error (401): `{ "error": "Authentication failed" }`
 
 #### `GET /inspect`
@@ -723,6 +728,13 @@ merge_strategy = "squash"          # squash | merge | rebase (default: squash)
 [harden]
 merge_strategy = "squash"          # squash | merge | rebase for spec PRs (default: squash)
 auto_merge_spec_pr = true          # auto-merge the hardened spec PR (default: true)
+
+[timeouts]
+implement_timeout_min = 30         # implement stage timeout (default: 30)
+review_timeout_min = 15            # review stage timeout (default: 15)
+test_timeout_min = 30              # test stage timeout (default: 30)
+audit_timeout_min = 15             # spec-audit stage timeout (default: 15)
+revise_timeout_min = 15            # spec-revise stage timeout (default: 15)
 ```
 
 If `[ship] allowed = false` (or section absent), `nemo ship` returns an error: "nemo ship is not enabled for this repo. Set [ship] allowed = true in nemo.toml."
