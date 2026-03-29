@@ -32,4 +32,10 @@ You are an expert software implementer. Your job is to implement the specificati
 
 ## Output
 
-When finished, commit your changes and output nothing special — the entrypoint captures your output and wraps it in the NEMO_RESULT envelope automatically.
+When finished, commit your changes. As your very last message, output a single JSON object on one line:
+
+```json
+{"session_id": "<your-session-id>", "new_sha": "<head-commit-sha>"}
+```
+
+The entrypoint captures this and wraps it automatically. The `session_id` enables session resumption across rounds.

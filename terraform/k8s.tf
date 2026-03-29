@@ -183,13 +183,26 @@ resource "kubernetes_config_map" "cluster_config" {
   }
 }
 
-# FR-51b: SSH known hosts ConfigMap
+# FR-51b: SSH known hosts ConfigMap (in nemo-system for repo-init)
 resource "kubernetes_config_map" "ssh_known_hosts" {
   depends_on = [kubernetes_namespace.system]
 
   metadata {
     name      = "nemo-ssh-known-hosts"
     namespace = "nemo-system"
+  }
+  data = {
+    known_hosts = var.ssh_known_hosts
+  }
+}
+
+# SSH known hosts ConfigMap in nemo-jobs for agent job pods
+resource "kubernetes_config_map" "ssh_known_hosts_jobs" {
+  depends_on = [kubernetes_namespace.jobs]
+
+  metadata {
+    name      = "nemo-ssh-known-hosts"
+    namespace = "nemo-jobs"
   }
   data = {
     known_hosts = var.ssh_known_hosts

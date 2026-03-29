@@ -49,6 +49,10 @@ pub trait GitOperations: Send + Sync + 'static {
     /// Creates the worktree if it doesn't exist. Used before job dispatch so the
     /// agent pod can mount the worktree via subPath.
     async fn ensure_worktree(&self, branch: &str, worktree_path: &str) -> Result<()>;
+
+    /// List files changed on a branch relative to origin/main.
+    /// Used by the TEST stage to determine affected services (FR-42a).
+    async fn changed_files(&self, branch: &str) -> Result<Vec<String>>;
 }
 
 /// Real git operations on a bare repository.
@@ -583,6 +587,17 @@ pub mod bare {
                 })?;
             Ok(())
         }
+
+        async fn changed_files(&self, branch: &str) -> Result<Vec<String>> {
+            // git diff --name-only origin/main...<branch>
+            match self
+                .run_git(&["diff", "--name-only", &format!("origin/main...{branch}")])
+                .await
+            {
+                Ok(output) => Ok(output.lines().map(|l| l.to_string()).collect()),
+                Err(_) => Ok(vec![]), // Can't determine diff — caller tests all services
+            }
+        }
     }
 }
 
@@ -707,6 +722,10 @@ pub mod mock {
 
         async fn ensure_worktree(&self, _branch: &str, _worktree_path: &str) -> Result<()> {
             Ok(())
+        }
+
+        async fn changed_files(&self, _branch: &str) -> Result<Vec<String>> {
+            Ok(vec![])
         }
     }
 }

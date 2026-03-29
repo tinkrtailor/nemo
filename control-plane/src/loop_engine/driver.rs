@@ -503,20 +503,44 @@ impl ConvergentLoopDriver {
         let mut ctx = self.build_context(record).await?;
 
         // Inject affected_services for the TEST stage (FR-42a).
-        // V1: test all configured services. A future version can narrow this
-        // via git diff analysis against the changed file paths.
-        let service_names: Vec<String> = self.config.services.keys().cloned().collect();
+        // Compute from git diff: only services whose path prefix matches changed files.
+        let diff_files = self
+            .git
+            .changed_files(&record.branch)
+            .await
+            .unwrap_or_default();
+
+        let affected: Vec<String> = if diff_files.is_empty() {
+            // Can't determine diff — test all services
+            self.config.services.keys().cloned().collect()
+        } else {
+            self.config
+                .services
+                .iter()
+                .filter(|(_, svc)| diff_files.iter().any(|f| f.starts_with(&svc.path)))
+                .map(|(name, _)| name.clone())
+                .collect()
+        };
+
+        // If no services matched, still test all (safety net)
+        let service_names = if affected.is_empty() {
+            self.config.services.keys().cloned().collect()
+        } else {
+            affected
+        };
+
         let services_json =
             serde_json::to_string(&service_names).unwrap_or_else(|_| "[]".to_string());
         ctx.credentials
             .push(("affected_services".to_string(), services_json));
 
-        // Inject service_tags for JVM resource escalation (FR-28)
+        // Inject service_tags for JVM resource escalation (FR-28) — only from affected services
         let all_tags: Vec<String> = self
             .config
             .services
-            .values()
-            .flat_map(|s| s.tags.iter().cloned())
+            .iter()
+            .filter(|(name, _)| service_names.contains(name))
+            .flat_map(|(_, s)| s.tags.iter().cloned())
             .collect();
         if !all_tags.is_empty() {
             let tags_json = serde_json::to_string(&all_tags).unwrap_or_else(|_| "[]".to_string());

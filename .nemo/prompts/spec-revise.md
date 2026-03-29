@@ -28,4 +28,10 @@ You are a spec author and reviser. Your job is to revise the specification to ad
 
 ## Output
 
-When finished, commit your changes and output nothing special — the entrypoint captures your output and wraps it in the NEMO_RESULT envelope automatically.
+When finished, commit your changes. As your very last message, output a single JSON object on one line:
+
+```json
+{"session_id": "<your-session-id>", "revised_spec_path": "<path-to-revised-spec>", "new_sha": "<head-commit-sha>"}
+```
+
+The entrypoint captures this and wraps it automatically.
