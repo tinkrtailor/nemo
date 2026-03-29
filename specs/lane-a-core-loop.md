@@ -92,6 +92,8 @@ The API server and loop engine are separate k3s Deployments. They share a Postgr
 
 Job names, API query parameters, log labels, and prompt template filenames use **short stage names**: `implement`, `test`, `review`, `audit`, `revise`. The Postgres `loop_stage` enum stores **full names**: `implementing`, `testing`, `reviewing`, `spec_audit`, `spec_revise`. Mapping: `implement` <-> `implementing`, `test` <-> `testing`, `review` <-> `reviewing`. Harden stages use the same name in both contexts (`spec_audit`, `spec_revise`) since they have no short/long ambiguity.
 
+**Prompt template filenames on disk** (canonical, see Lane C FR-33-39): `implement.md`, `test.md`, `review.md`, `spec-audit.md`, `spec-revise.md`. Config references use short names; filenames use hyphenated form for harden stages.
+
 ### ConvergentLoop Trait
 
 ```rust
@@ -545,7 +547,11 @@ Error (400) if loop is in `paused_force_deviated` and `force=true` is not provid
 
 #### `GET /inspect/:user/:branch`
 
-View detailed state of a loop by engineer and branch name. Returns the full loop record including all round history, verdicts, and feedback files.
+View detailed state of a loop by engineer and branch name. Returns the **most recent** loop for that branch (active preferred, then most recent terminal by `created_at DESC`). This handles resubmitted branches where multiple loops may share the same branch name.
+
+Query parameters: `?all=true` (optional) returns ALL loops for that branch, ordered by `created_at DESC`.
+
+The underlying query uses `get_loop_by_branch_any()` (see Lane B) which orders by `created_at DESC LIMIT 1` by default, or returns all rows when `all=true`.
 
 Response (200):
 ```json
@@ -671,7 +677,7 @@ If `require_harden = true` and the engineer runs `nemo ship spec.md` without `--
 
 ### Review Verdict Schema
 
-Written by the review agent to `.agent/review-verdict.json` in the worktree:
+Emitted by the review agent to stdout via `NEMO_RESULT:` prefix (see Lane C FR-13). The control plane captures the verdict from pod logs. The review agent does NOT write to the worktree (it is mounted read-only).
 
 ```json
 {
@@ -695,7 +701,7 @@ Written by the review agent to `.agent/review-verdict.json` in the worktree:
 Fields:
 - `clean` (bool, required): `true` means zero issues. This is the convergence signal.
 - `confidence` (f64, 0.0-1.0, optional): Informational in V1. Used by V2 judge for multi-reviewer scoring. Omit or null if the model does not provide it.
-- `issues` (array, required): Empty array when clean. Each issue has `severity` (critical/high/medium/low), `category` (correctness/security/performance/style), `file`, `line` (nullable), `description`, `suggestion`.
+- `issues` (array, required): Empty array when clean. Each issue has `severity` (critical/high/medium/low), `category` (optional; one of correctness/security/performance/style), `file`, `line` (nullable), `description`, `suggestion`.
 - `summary` (string, required): One-sentence overview for display in `nemo status`.
 - `token_usage` (object, required): `input` and `output` token counts.
 
@@ -703,7 +709,7 @@ Validation: the loop engine validates this schema via serde deserialization. If 
 
 ### Audit Verdict Schema
 
-Written by the audit agent to `.agent/audit-verdict.json` in the worktree:
+Emitted by the audit agent to stdout via `NEMO_RESULT:` prefix (see Lane C FR-13). The control plane captures the verdict from pod logs. The audit agent does NOT write to the worktree (it is mounted read-only).
 
 ```json
 {
@@ -727,7 +733,7 @@ Written by the audit agent to `.agent/audit-verdict.json` in the worktree:
 Fields:
 - `clean` (bool, required): `true` means zero issues. This is the convergence signal for the harden loop.
 - `confidence` (f64, 0.0-1.0, optional): Informational in V1.
-- `issues` (array, required): Empty array when clean. Each issue has `severity` (critical/high/medium/low), `category` (completeness/clarity/correctness/consistency), `description`, `suggestion`. `file` (string, optional) and `line` (int, optional) may reference spec locations but are not required for spec-level audits.
+- `issues` (array, required): Empty array when clean. Each issue has `severity` (critical/high/medium/low), `category` (optional; one of completeness/clarity/correctness/consistency), `description`, `suggestion`. `file` (string, optional) and `line` (int, optional) may reference spec locations but are not required for spec-level audits.
 - `summary` (string, required): One-sentence overview.
 - `token_usage` (object, required): `input` and `output` token counts.
 
@@ -735,7 +741,7 @@ Validation: same FR-9 retry logic as ReviewVerdict.
 
 ### Feedback File Schema
 
-Written by the loop engine to `.agent/review-feedback-round-{N}.json` in the worktree before dispatching the next Implement job:
+Written by the loop engine to `$FEEDBACK_PATH` on the session PVC (not the worktree) before dispatching the next Implement job. The feedback file path is stored in `loops.feedback_path` and passed as the `FEEDBACK_PATH` environment variable to the next job.
 
 ```json
 {

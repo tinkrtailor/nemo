@@ -561,6 +561,51 @@ Good criteria are specific, testable, and independent:
 
 ---
 
+## Multi-Spec Consistency
+
+When a system is defined across multiple specs, cross-spec consistency becomes the dominant source of implementation bugs. These lessons were learned during spec hardening of a multi-lane system.
+
+### 1. Shared contracts must be defined once
+
+When multiple specs share a data structure (state enum, output schema, verdict format, job naming), define it in ONE spec and have others reference it. Don't copy the definition -- reference it. Example: "See Lane A SS Review Verdict Schema for the canonical definition."
+
+If you duplicate a definition, it will drift. When it drifts, the implementer builds to whichever copy they find first, and the integration fails.
+
+### 2. Cross-spec review is mandatory
+
+After writing related specs, do a cross-spec consistency review. Check: do all specs agree on field names, enum values, error handling paths, and data flow boundaries? A checklist:
+
+- Field names match exactly (not `affected_services` in one spec and `services` in another)
+- Enum values are identical strings (not `implementing` vs `implement` vs `impl`)
+- Error handling paths converge to the same terminal states
+- Data flow inputs/outputs match at every boundary
+
+### 3. Stage boundaries are contracts
+
+The input/output format between stages (implement -> test -> review) is a contract. Define it once with exact field names, types, and examples. Every spec that touches a stage boundary must reference the same contract.
+
+If Lane A says the implement stage outputs `{ new_sha, token_usage }` and Lane C says it outputs `{ sha, tokens }`, the integration fails silently.
+
+### 4. Mount modes constrain outputs
+
+If a stage mounts the worktree read-only, it cannot write output files to the worktree. Output must go to stdout or a separate writable volume. Check mount modes against output requirements for every stage.
+
+Example mistake: spec says "review agent writes verdict to `.agent/review-verdict.json` in the worktree" but the review stage mounts the worktree read-only. The actual output contract is stdout via a prefix line.
+
+### 5. Naming conventions must be explicit
+
+If the DB stores `implementing` but the API uses `implement` and the job name uses `impl`, state the mapping once and reference it everywhere. Create a "Stage Name Mapping" section that is identical across all specs (or defined in one and referenced by others).
+
+Without an explicit mapping table, each spec invents its own convention and they diverge.
+
+### 6. Retry/error models must be unified
+
+One retry model, one error classification, shared across all specs. If Spec A says "2 retries" and Spec C says "1 retry", the implementer can't build it. Define the retry budget, backoff intervals, and failure classification in one place. Other specs reference it.
+
+This applies to all cross-cutting concerns: timeouts, retry counts, error codes, log formats, and credential handling.
+
+---
+
 ## Common Mistakes
 
 ### 1. Too Vague

@@ -56,6 +56,8 @@ Runtime infrastructure for Nemo agent jobs: the container image agents execute i
 
 Job names, API query parameters, log labels, and prompt template filenames use **short stage names**: `implement`, `test`, `review`, `audit`, `revise`. The Postgres `loop_stage` enum stores **full names**: `implementing`, `testing`, `reviewing`, `spec_audit`, `spec_revise`. Mapping: `implement` <-> `implementing`, `test` <-> `testing`, `review` <-> `reviewing`. Harden stages use the same name in both contexts (`spec_audit`, `spec_revise`) since they have no short/long ambiguity.
 
+**Prompt template filenames on disk** (canonical): `implement.md`, `test.md`, `review.md`, `spec-audit.md`, `spec-revise.md`. Config references use short names; filenames use hyphenated form for harden stages.
+
 #### K8s Job Template
 
 - FR-24: Each agent job shall be a K8s Job with `restartPolicy: Never` and two containers: `agent` and `auth-sidecar`. If the `nemo-registry-creds` Secret exists (created by Terraform when `image_pull_secret_dockerconfigjson` is provided, see FR-52), the Job template shall include `imagePullSecrets: [{ name: nemo-registry-creds }]`. Otherwise, no `imagePullSecrets` (public images or pre-pulled).
@@ -170,7 +172,7 @@ Job names, API query parameters, log labels, and prompt template filenames use *
   | `v1/PersistentVolumeClaims` | get, list | Access bare repo and session PVCs |
 
   The API server ServiceAccount needs only Secrets (create, update, get) in `nemo-jobs` for `nemo auth` credential writes.
-- FR-47: The module shall create a 100Gi PVC for the shared bare repo. An init Job (`nemo-repo-init`) shall run before the fetch CronJob is enabled. The init Job:
+- FR-47: The module shall create a 100Gi PVC for the shared bare repo. An init Job (`nemo-repo-init`) shall run before any optional fetch CronJob is enabled. The init Job:
 
   ```yaml
   apiVersion: batch/v1
@@ -230,7 +232,7 @@ Job names, API query parameters, log labels, and prompt template filenames use *
 
   Terraform also creates a ConfigMap `nemo-cluster-config` with keys: `git_repo_url`, `domain`. This ConfigMap is referenced by Jobs and CronJobs via `valueFrom.configMapKeyRef` instead of Terraform string interpolation in YAML values.
 
-  The fetch CronJob (`git fetch --all` every 60 seconds) is deployed alongside but only runs after the init Job succeeds (the CronJob `suspend: true` until init completes; Terraform uses `depends_on`). The CronJob is OPTIONAL background freshness only. The control plane's `prepare_worktree()` does the authoritative fetch per-job before creating the worktree.
+  OPTIONAL background fetch CronJob for cache warmth. The authoritative fetch happens per-job via control plane's `prepare_worktree()`. The CronJob is a performance optimization, not a correctness requirement. If deployed, it runs `git fetch --all` every 60 seconds alongside the init Job (CronJob `suspend: true` until init completes; Terraform uses `depends_on`).
 
 - FR-48: The module shall configure nginx-ingress with Let's Encrypt TLS via cert-manager. Prerequisites: the user must pre-create a DNS A record pointing `domain` to the server IP. Terraform inputs for TLS: `acme_email` (required), `ingress_class` (default `nginx`). cert-manager uses HTTP-01 challenge by default (requires port 80 open). The ClusterIssuer resource is created by Terraform.
 - FR-49: The module shall create a K8s Namespace `nemo-system` for control plane components and `nemo-jobs` for agent jobs
@@ -267,7 +269,7 @@ Job names, API query parameters, log labels, and prompt template filenames use *
 - NFR-7: Model API proxy shall not buffer request/response bodies (stream through) to support streaming model responses
 - NFR-8: All sidecar logs shall be structured JSON (parseable by k3s log collection)
 - NFR-9: Terraform state shall be stored locally (no remote backend for V1). The `kubeconfig` output shall be marked sensitive.
-- NFR-10: The git fetch CronJob shall not block worktree creation (fetch operates on the bare repo; worktree ops take the control plane mutex, not a filesystem lock on the fetch process)
+- NFR-10: If the optional git fetch CronJob is deployed, it shall not block worktree creation (fetch operates on the bare repo; worktree ops take the control plane mutex, not a filesystem lock on the fetch process)
 
 ## Behavior
 
@@ -384,7 +386,7 @@ The control plane owns the full lifecycle of git worktrees. Before creating a K8
 - [ ] Agent exits with code 111 when sidecar proxy connection fails
 - [ ] Feedback file validates against the JSON schema (FR-40b) before the control plane dispatches next stage
 - [ ] `NEMO_RESULT:` prefix on stdout result line is correctly parsed by control plane
-- [ ] Init Job (`nemo-repo-init`) creates bare repo, configures remote, fetches, before CronJob runs
+- [ ] Init Job (`nemo-repo-init`) creates bare repo, configures remote, fetches. Optional CronJob (if deployed) runs only after init completes.
 - [ ] Integration tests for git module: branch create from correct ref, push before PR, worktree cleanup, concurrent worktree operations against a real git repo
 - [ ] Default implement.md template contains the mock/placeholder prohibition directive
 - [ ] Postgres backup written to /data/backups/ on host, files older than 7 days cleaned up

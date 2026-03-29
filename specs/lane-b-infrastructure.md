@@ -66,6 +66,8 @@ Postgres schema, git operations, and config loading for the Nemo control plane. 
 
 Job names, API query parameters, log labels, and prompt template filenames use **short stage names**: `implement`, `test`, `review`, `audit`, `revise`. The Postgres `loop_stage` enum stores **full names**: `implementing`, `testing`, `reviewing`, `spec_audit`, `spec_revise`. Mapping: `implement` <-> `implementing`, `test` <-> `testing`, `review` <-> `reviewing`. Harden stages use the same name in both contexts (`spec_audit`, `spec_revise`) since they have no short/long ambiguity.
 
+**Prompt template filenames on disk** (canonical, see Lane C FR-33-39): `implement.md`, `test.md`, `review.md`, `spec-audit.md`, `spec-revise.md`. Config references use short names; filenames use hyphenated form for harden stages.
+
 ### Postgres Schema Detail
 
 ```sql
@@ -552,6 +554,26 @@ SELECT COUNT(*) FROM jobs WHERE status IN ('pending', 'running') AS active_count
 ```
 
 This replaces the old `SELECT COUNT(*) ... FOR UPDATE` approach which required a dedicated "dispatch lock" row. The advisory lock is simpler and prevents TOCTOU races between counting and inserting.
+
+### Branch Lookup for Inspect (Lane A `/inspect` endpoint)
+
+The `/inspect/:user/:branch` endpoint needs to find loops by branch name. Since branches can be resubmitted after terminal states, multiple loops may share the same branch.
+
+```sql
+-- get_loop_by_branch_any(): returns the most recent loop for a branch.
+-- Active loops are preferred; if none active, returns the most recent terminal loop.
+SELECT * FROM loops
+WHERE branch = $1
+ORDER BY
+  CASE WHEN state NOT IN ('converged', 'hardened', 'shipped', 'failed', 'cancelled') THEN 0 ELSE 1 END,
+  created_at DESC
+LIMIT 1;
+
+-- With ?all=true: returns ALL loops for a branch, ordered by created_at DESC.
+SELECT * FROM loops
+WHERE branch = $1
+ORDER BY created_at DESC;
+```
 
 ### Persist-Then-Dispatch Pattern (Lane A learning)
 
