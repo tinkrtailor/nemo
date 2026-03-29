@@ -9,6 +9,7 @@ use crate::client::NemoClient;
 pub async fn run(
     client: &NemoClient,
     engineer: &str,
+    email: &str,
     claude: bool,
     openai: bool,
     ssh: bool,
@@ -123,7 +124,12 @@ pub async fn run(
 
         // Register credentials with the control plane
         match client
-            .register_credentials(engineer, provider, &content)
+            .register_credentials(
+                engineer,
+                provider,
+                &content,
+                if email.is_empty() { None } else { Some(email) },
+            )
             .await
         {
             Ok(()) => {

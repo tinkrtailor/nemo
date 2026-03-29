@@ -1,15 +1,12 @@
-# Adversarial Review: Round 19 (OpenCode GPT-5.4, read-only)
+Checking the current Lane C state and looking for any remaining diffs or review targets.
+I found only one tracked modification on this branch: `.agent/review-feedback-round-18.md`. Reading the Lane C spec and the current feedback file to determine whether there are any unresolved implementation issues.
+I’ve got two candidate remaining issues from the last round. Verifying them directly in the current code before deciding whether Lane C is converged.
+I confirmed both prior candidate issues still reproduce. I’m doing one quick pass over the Lane C diff surface to see whether there’s anything else newly introduced before I call the round.
+One more thing is suspicious in the runtime contract: initial jobs may still get `SHA=""`. I’m checking whether loop creation seeds `current_sha` before `build_context()` runs.
+1. High: Claude implement/revise auth is still wired against the wrong contract, so real Lane C agent jobs cannot authenticate as specified. `build_agent_mounts()` never mounts the engineer’s `claude` secret into `/work/home/.claude/` for implement/revise pods (`control-plane/src/k8s/job_builder.rs:71`, `control-plane/src/k8s/job_builder.rs:377`), while the entrypoint launches `claude` directly for those stages (`images/base/nemo-agent-entry:157`). The API also rewrites uploaded `claude` credentials to the secret key `anthropic` and strips JSON down to a raw API key (`control-plane/src/api/handlers.rs:424`), but the spec requires a `claude` key containing the mounted `~/.claude/` session directory and explicitly says Claude auth is not proxied via `ANTHROPIC_BASE_URL` (`specs/lane-c-agent-runtime.md:40`, `specs/lane-c-agent-runtime.md:55`, `specs/lane-c-agent-runtime.md:77`). As shipped, `nemo auth` can succeed while implement/revise pods still lack usable Claude auth.
 
-5 findings. Recurring patterns: create-before-persist, error swallowing, Job name collision.
+2. Medium: Engineer email is still fabricated instead of coming from persisted engineer identity, so job commits do not satisfy the required attribution flow. The CLI config still has no identity/email fields (`cli/src/config.rs:7`), `POST /credentials` still accepts no email/name payload (`control-plane/src/types/api.rs:141`), and the loop driver still hardcodes `format!("{}@nemo.dev", record.engineer)` when building job context (`control-plane/src/loop_engine/driver.rs:1281`). That contradicts the spec requirement that `nemo auth` upsert name + email from `~/.nemo/config.toml` and that Lane C read the real email from the engineers table for `GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_EMAIL` (`specs/lane-c-agent-runtime.md:79`, `specs/lane-b-infrastructure.md:617`).
 
-## FINDINGS
+Not `CLEAN`, not `CONVERGED`.
 
-N68. **HIGH** - poll_ci() treats all non-zero gh exit as "keep polling". gh returns non-zero for both pending AND failed checks. Definitively failed PR hangs for 30 min timeout (driver.rs:1107). Fix: parse gh pr checks output. Distinguish "pending" (keep polling) from "failed" (stop, fall back to CONVERGED). Check for "fail" or "error" in output.
-
-N69. **HIGH** - Resume/reauth redispatch recreates same Job name without bumping retry_count. Async deletion + recreate = AlreadyExists. Loops stuck unable to resume (driver.rs:975, job_builder.rs:22). Fix: always increment retry_count on resume/reauth redispatch, not just on failure retries.
-
-N70. **MEDIUM** - remove_path() swallows git rm and commit failures, returns Ok(()). .agent/ cleanup silently fails, artifacts leak into PRs (git/mod.rs:236). Fix: propagate errors from git rm and git commit. If cleanup fails, log error but still create PR (don't block convergence on cleanup failure).
-
-N71. **HIGH** - Driver creates K8s Job BEFORE persisting active_job_name and round state. If DB write fails after job creation, loop looks undispatched, launches duplicate/orphaned jobs on retry. Pattern appears at driver.rs:100, 439, 865, 912, 957. Fix: persist state FIRST (active_job_name set, round created), THEN create the K8s Job. If K8s create fails, clear the state. DB is source of truth.
-
-N72. **MEDIUM** - Harden-only with auto_merge=false ends in CONVERGED not HARDENED. Breaks the harden-only contract (driver.rs:317). Fix: harden-only should ALWAYS end in HARDENED regardless of auto_merge. The PR is the spec deliverable. Whether it's merged or not is separate from whether hardening converged.
+Assumption: ignored local untracked `.claude/.sandbox-claude.json` and the modified `.agent/review-feedback-round-18.md` review artifact.

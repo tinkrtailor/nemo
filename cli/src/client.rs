@@ -92,14 +92,18 @@ impl NemoClient {
         &self,
         engineer: &str,
         provider: &str,
-        cred_path: &str,
+        cred_content: &str,
+        email: Option<&str>,
     ) -> Result<()> {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "engineer": engineer,
             "provider": provider,
-            "credential_ref": cred_path,
+            "credential_ref": cred_content,
             "valid": true,
         });
+        if let Some(e) = email {
+            body["email"] = serde_json::json!(e);
+        }
         let _: serde_json::Value = self.post("/credentials", &body).await?;
         Ok(())
     }

@@ -309,7 +309,15 @@ async fn main() -> anyhow::Result<()> {
             openai,
             ssh,
         } => {
-            commands::auth::run(&http_client, &eng_config.engineer, claude, openai, ssh).await?;
+            commands::auth::run(
+                &http_client,
+                &eng_config.engineer,
+                &eng_config.email,
+                claude,
+                openai,
+                ssh,
+            )
+            .await?;
         }
         Commands::Config { set, get } => {
             commands::config::run(set, get)?;

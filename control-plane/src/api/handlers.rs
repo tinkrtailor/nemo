@@ -421,19 +421,20 @@ pub async fn upsert_credentials(
         ));
     }
 
-    // Map provider name to K8s Secret key
-    let secret_key = match req.provider.as_str() {
-        "claude" | "anthropic" => "anthropic",
-        "openai" => "openai",
-        "ssh" => "ssh",
-        other => other,
-    };
+    // K8s Secret key = provider name (claude, anthropic, openai, ssh).
+    // "claude" = session dir for implement/revise agent mount.
+    // "anthropic" = API key for sidecar proxy.
+    let secret_key = req.provider.as_str();
 
-    // Extract raw API key from credential content.
-    // CLI may send JSON files (e.g. {"api_key":"sk-..."}) or raw key strings.
-    // The sidecar reads mounted files as raw API keys, so extract the key value.
+    // Process credential content based on provider type.
+    // "claude" = session directory content, stored as-is (not an API key).
+    // "anthropic"/"openai" = API keys, extracted from JSON if needed.
+    // "ssh" = PEM key, stored as-is.
     let raw_content = req.credential_ref.trim().to_string();
-    let api_key = if raw_content.starts_with('{') {
+    let api_key = if secret_key == "claude" || secret_key == "ssh" {
+        // Store verbatim — not an API key
+        raw_content
+    } else if raw_content.starts_with('{') {
         // Try to extract api_key / key / apiKey from JSON
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw_content) {
             parsed
@@ -527,6 +528,21 @@ pub async fn upsert_credentials(
         updated_at: chrono::Utc::now(),
     };
     state.store.upsert_credential(&cred).await?;
+
+    // Persist engineer email if provided (used for git commit attribution)
+    if let Some(ref email) = req.email
+        && !email.is_empty()
+    {
+        let email_cred = crate::types::EngineerCredential {
+            id: Uuid::new_v4(),
+            engineer: req.engineer.clone(),
+            provider: "_email".to_string(),
+            credential_ref: email.clone(),
+            valid: true,
+            updated_at: chrono::Utc::now(),
+        };
+        state.store.upsert_credential(&email_cred).await?;
+    }
 
     Ok((StatusCode::OK, Json(serde_json::json!({"status": "ok"}))))
 }

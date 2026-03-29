@@ -54,21 +54,46 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
 
     let parsed_stage = Stage::from_short_name(&stage.name);
     let is_review_or_audit = matches!(parsed_stage, Some(Stage::Review) | Some(Stage::Audit));
+    let is_implement_or_revise =
+        matches!(parsed_stage, Some(Stage::Implement) | Some(Stage::Revise));
     let is_test = matches!(parsed_stage, Some(Stage::Test));
 
     // FR-27: Environment variables on the agent container
     let agent_env = build_agent_env_vars(ctx, stage, is_test);
 
     // Build volumes (FR-25, FR-26, FR-30)
-    let volumes = build_volumes(
+    let mut volumes = build_volumes(
         &cfg.bare_repo_pvc,
         &cfg.sessions_pvc,
         &ctx.engineer,
         &cfg.ssh_known_hosts_configmap,
     );
 
+    // FR-25b: Claude session volume for IMPLEMENT/REVISE stages
+    if is_implement_or_revise {
+        let safe_engineer: String = ctx.engineer.to_lowercase().replace('_', "-");
+        volumes.push(Volume {
+            name: "claude-session".to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(format!("nemo-creds-{safe_engineer}")),
+                items: Some(vec![KeyToPath {
+                    key: "claude".to_string(),
+                    path: ".credentials.json".to_string(),
+                    ..Default::default()
+                }]),
+                optional: Some(true), // May not exist if engineer hasn't run nemo auth --claude
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+
     // Build agent container volume mounts (with subPath for worktree isolation)
-    let agent_mounts = build_agent_mounts(is_review_or_audit, &ctx.worktree_path);
+    let agent_mounts = build_agent_mounts(
+        is_review_or_audit,
+        is_implement_or_revise,
+        &ctx.worktree_path,
+    );
 
     // Build sidecar container volume mounts
     let sidecar_mounts = build_sidecar_mounts();
@@ -371,11 +396,15 @@ fn build_volumes(
     ]
 }
 
-/// Build agent container volume mounts (FR-25).
-/// The worktree is mounted via subPath so the agent only sees its own worktree,
-/// not the shared bare repo. No secrets are ever mounted in the agent container.
-fn build_agent_mounts(is_review_or_audit: bool, worktree_path: &str) -> Vec<VolumeMount> {
-    vec![
+/// Build agent container volume mounts (FR-25, FR-25b).
+/// The worktree is mounted via subPath so the agent only sees its own worktree.
+/// For IMPLEMENT/REVISE, the Claude session dir is mounted read-only.
+fn build_agent_mounts(
+    is_review_or_audit: bool,
+    is_implement_or_revise: bool,
+    worktree_path: &str,
+) -> Vec<VolumeMount> {
+    let mut mounts = vec![
         VolumeMount {
             name: "worktree".to_string(),
             mount_path: "/work".to_string(),
@@ -408,7 +437,19 @@ fn build_agent_mounts(is_review_or_audit: bool, worktree_path: &str) -> Vec<Volu
             mount_path: "/work/home".to_string(),
             ..Default::default()
         },
-    ]
+    ];
+
+    // FR-25b: Mount Claude session directory for IMPLEMENT/REVISE stages
+    if is_implement_or_revise {
+        mounts.push(VolumeMount {
+            name: "claude-session".to_string(),
+            mount_path: "/work/home/.claude".to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+    }
+
+    mounts
 }
 
 /// Build sidecar container volume mounts (FR-26).
@@ -848,18 +889,38 @@ mod tests {
     }
 
     #[test]
-    fn test_build_job_no_secrets_in_agent() {
-        // Finding 3: No credentials mounted in untrusted agent container
+    #[test]
+    fn test_build_job_implement_has_claude_session() {
+        // FR-25b: Claude session mounted for implement stage
         let ctx = test_ctx();
         let stage = test_stage(); // implement
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let mounts = agent.volume_mounts.as_ref().unwrap();
-        // No /secrets, no claude-session, no model-credentials
-        assert!(!mounts.iter().any(|m| m.mount_path.contains("secret")
-            || m.mount_path.contains("claude")
-            || m.mount_path.contains("credential")));
+        let claude_mount = mounts.iter().find(|m| m.mount_path == "/work/home/.claude");
+        assert!(claude_mount.is_some(), "Claude session should be mounted for implement");
+        assert_eq!(claude_mount.unwrap().read_only, Some(true));
+        // No /secrets or model-credentials in agent
+        assert!(!mounts
+            .iter()
+            .any(|m| m.mount_path.contains("/secrets") || m.mount_path.contains("credential")));
+    }
+
+    #[test]
+    fn test_build_job_review_no_claude_session() {
+        // Claude session NOT mounted for review stage
+        let ctx = test_ctx();
+        let stage = StageConfig {
+            name: "review".to_string(),
+            timeout: Duration::from_secs(900),
+            ..Default::default()
+        };
+        let cfg = test_cfg();
+        let job = build_job(&ctx, &stage, &cfg);
+        let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let mounts = agent.volume_mounts.as_ref().unwrap();
+        assert!(mounts.iter().all(|m| m.mount_path != "/work/home/.claude"));
     }
 
     #[test]
@@ -1001,7 +1062,7 @@ mod tests {
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let volumes = job.spec.unwrap().template.spec.unwrap().volumes.unwrap();
-        // worktree, sessions, output, shared, tmpdir, home, model-credentials, ssh-key, ssh-known-hosts
-        assert_eq!(volumes.len(), 9);
+        // worktree, sessions, output, shared, tmpdir, home, model-credentials, ssh-key, ssh-known-hosts, claude-session (implement stage)
+        assert_eq!(volumes.len(), 10);
     }
 }

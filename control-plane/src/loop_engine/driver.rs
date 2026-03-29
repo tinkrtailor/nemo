@@ -1278,10 +1278,14 @@ impl ConvergentLoopDriver {
             .map(|c| (c.provider, c.credential_ref))
             .collect();
 
-        // Engineer email from the engineers table (populated by `nemo auth`).
-        // When the engineers table is available (Lane B), look up the actual email.
-        // For now, derive from engineer name as a fallback.
-        let engineer_email = format!("{}@nemo.dev", record.engineer);
+        // Engineer email: look up from stored credentials (provider="_email"),
+        // fall back to {engineer}@nemo.dev if not set.
+        let all_creds = self.store.get_credentials(&record.engineer).await?;
+        let engineer_email = all_creds
+            .iter()
+            .find(|c| c.provider == "_email" && c.valid)
+            .map(|c| c.credential_ref.clone())
+            .unwrap_or_else(|| format!("{}@nemo.dev", record.engineer));
 
         // Derive worktree sub-path from branch name.
         // Use "wt/" prefix (not "worktrees/") to avoid colliding with git's

@@ -9,6 +9,8 @@ pub struct EngineerConfig {
     pub server_url: String,
     #[serde(default)]
     pub engineer: String,
+    #[serde(default)]
+    pub email: String,
     pub api_key: Option<String>,
 }
 
@@ -21,6 +23,7 @@ impl Default for EngineerConfig {
         Self {
             server_url: default_server_url(),
             engineer: String::new(),
+            email: String::new(),
             api_key: None,
         }
     }

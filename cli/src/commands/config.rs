@@ -26,6 +26,7 @@ pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
         match key.as_str() {
             "server_url" => println!("{}", config.server_url),
             "engineer" => println!("{}", config.engineer),
+            "email" => println!("{}", config.email),
             "api_key" => {
                 if let Some(key) = &config.api_key {
                     // Mask sensitive value using chars() to handle non-ASCII safely
@@ -58,6 +59,7 @@ pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
         match key {
             "server_url" => config.server_url = value.to_string(),
             "engineer" => config.engineer = value.to_string(),
+            "email" => config.email = value.to_string(),
             "api_key" => {
                 // Reject empty API keys — they break all authenticated requests
                 if value.is_empty() {
@@ -82,6 +84,14 @@ pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
     println!("Nemo CLI Configuration (~/.nemo/config.toml)");
     println!("  server_url: {}", config.server_url);
     println!("  engineer:   {}", config.engineer);
+    println!(
+        "  email:      {}",
+        if config.email.is_empty() {
+            "(not set)"
+        } else {
+            &config.email
+        }
+    );
     println!(
         "  api_key:    {}",
         if config.api_key.is_some() {
