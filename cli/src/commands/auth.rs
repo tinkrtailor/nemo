@@ -85,6 +85,10 @@ pub async fn run(
                 "ssh" => eprintln!("  Run: ssh-keygen -t ed25519"),
                 _ => {}
             }
+            // If the provider was explicitly requested (not default "all"), treat as error
+            if claude || openai || ssh {
+                any_error = true;
+            }
             continue;
         }
 

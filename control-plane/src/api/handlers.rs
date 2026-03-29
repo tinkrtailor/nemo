@@ -31,7 +31,7 @@ pub async fn start(
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        return Err(NemoError::Internal(
+        return Err(NemoError::BadRequest(
             "engineer must be non-empty and contain only alphanumeric, hyphen, or underscore characters".to_string(),
         ));
     }
@@ -408,7 +408,7 @@ pub async fn upsert_credentials(
     Json(req): Json<CredentialRequest>,
 ) -> Result<impl IntoResponse, NemoError> {
     if req.engineer.is_empty() {
-        return Err(NemoError::Internal(
+        return Err(NemoError::BadRequest(
             "engineer field is required".to_string(),
         ));
     }
@@ -447,7 +447,9 @@ pub async fn upsert_credentials(
     // Write K8s Secret FIRST, then Postgres metadata.
     // This ensures jobs never mount stale secrets when Postgres says creds are valid.
     if let Some(ref kube_client) = state.kube_client {
-        let secret_name = format!("nemo-creds-{}", req.engineer);
+        // Normalize engineer name for K8s: lowercase, replace _ with -
+        let safe_engineer: String = req.engineer.to_lowercase().replace('_', "-");
+        let secret_name = format!("nemo-creds-{safe_engineer}");
         let namespace = &state.config.cluster.jobs_namespace;
         let secrets_api: kube::Api<k8s_openapi::api::core::v1::Secret> =
             kube::Api::namespaced(kube_client.clone(), namespace);

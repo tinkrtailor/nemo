@@ -2,7 +2,10 @@ use anyhow::Result;
 
 /// Edit ~/.nemo/config.toml.
 pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
-    let config = crate::config::load_config()?;
+    // For --set, try loading existing config but fall back to defaults if
+    // the file is malformed. This ensures `nemo config --set` can repair a
+    // broken config file.
+    let config = crate::config::load_config().unwrap_or_default();
 
     if let Some(key) = get {
         match key.as_str() {
@@ -40,16 +43,23 @@ pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
         match key {
             "server_url" => config.server_url = value.to_string(),
             "engineer" => config.engineer = value.to_string(),
-            "api_key" => config.api_key = Some(value.to_string()),
+            "api_key" => {
+                // Reject empty API keys — they break all authenticated requests
+                if value.is_empty() {
+                    config.api_key = None;
+                    println!("Cleared api_key");
+                } else {
+                    config.api_key = Some(value.to_string());
+                    println!("Set {key} = ****");
+                }
+                crate::config::save_config(&config)?;
+                return Ok(());
+            }
             _ => anyhow::bail!("Unknown config key: {key}"),
         }
 
         crate::config::save_config(&config)?;
-        if key == "api_key" {
-            println!("Set {key} = ****");
-        } else {
-            println!("Set {key} = {value}");
-        }
+        println!("Set {key} = {value}");
         return Ok(());
     }
 

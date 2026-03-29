@@ -39,15 +39,10 @@ pub struct JobBuildConfig {
 /// Labels: `nemo.dev/loop-id`, `nemo.dev/stage`, `nemo.dev/engineer`, `nemo.dev/round` (FR-32)
 pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -> Job {
     let short_id = &ctx.loop_id.to_string()[..8];
-    // FR-31: Include retry count in name to avoid AlreadyExists on redispatch
-    let job_name = if ctx.retry_count > 0 {
-        format!(
-            "nemo-{short_id}-{}-r{}-t{}",
-            stage.name, ctx.round, ctx.retry_count
-        )
-    } else {
-        format!("nemo-{short_id}-{}-r{}-t1", stage.name, ctx.round)
-    };
+    // FR-31: Include attempt number in name to avoid AlreadyExists on redispatch.
+    // Attempt = retry_count + 1 (first dispatch is attempt 1, first retry is attempt 2).
+    let attempt = ctx.retry_count + 1;
+    let job_name = format!("nemo-{short_id}-{}-r{}-t{attempt}", stage.name, ctx.round);
 
     // FR-32: Labels for control plane queries
     let mut labels = BTreeMap::new();
@@ -287,6 +282,9 @@ fn build_volumes(
     engineer: &str,
     ssh_known_hosts_configmap: &str,
 ) -> Vec<Volume> {
+    // Normalize engineer name for K8s Secret references (lowercase, _ -> -)
+    let safe_engineer: String = engineer.to_lowercase().replace('_', "-");
+    let engineer = &safe_engineer;
     vec![
         // Worktree volume from bare repo PVC (mounted via subPath per job)
         Volume {
@@ -590,7 +588,8 @@ mod tests {
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let name = job.metadata.name.unwrap();
-        assert_eq!(name, "nemo-a1b2c3d4-implement-r2-t3");
+        // retry_count=3 -> attempt=4
+        assert_eq!(name, "nemo-a1b2c3d4-implement-r2-t4");
     }
 
     #[test]

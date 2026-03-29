@@ -53,6 +53,9 @@ pub enum NemoError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    #[error("Bad request: {0}")]
+    BadRequest(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -90,7 +93,7 @@ impl NemoError {
                 StatusCode::CONFLICT
             }
             Self::AuthenticationFailed | Self::UnknownEngineer => StatusCode::UNAUTHORIZED,
-            Self::ShipNotEnabled => StatusCode::BAD_REQUEST,
+            Self::ShipNotEnabled | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Database(_) | Self::ClusterUnavailable | Self::Kube(_) => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
