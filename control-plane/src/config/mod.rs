@@ -45,13 +45,11 @@ impl NemoConfig {
         let candidates: Vec<String> = if let Ok(explicit) = std::env::var("NEMO_CONFIG_PATH") {
             vec![explicit]
         } else {
-            vec![
-                "./nemo.toml".to_string(),
-                "/etc/nemo/nemo.toml".to_string(),
-            ]
+            vec!["./nemo.toml".to_string(), "/etc/nemo/nemo.toml".to_string()]
         };
 
-        let path = candidates.iter()
+        let path = candidates
+            .iter()
             .map(std::path::PathBuf::from)
             .find(|p| p.exists());
 
@@ -135,7 +133,6 @@ fn default_max_rounds_auto_merge() -> u32 {
 fn default_merge_strategy() -> String {
     "squash".to_string()
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LimitsConfig {
@@ -290,6 +287,9 @@ pub struct ClusterConfig {
     /// Git repository URL (SSH format, used for sidecar git proxy host restriction).
     #[serde(default)]
     pub git_repo_url: String,
+    /// ConfigMap name containing SSH known_hosts for sidecar host key verification.
+    #[serde(default = "default_ssh_known_hosts_configmap")]
+    pub ssh_known_hosts_configmap: String,
     /// API server bind address.
     #[serde(default = "default_bind_addr")]
     pub bind_addr: String,
@@ -316,6 +316,7 @@ impl Default for ClusterConfig {
             sessions_pvc: default_sessions_pvc(),
             image_pull_secret: None,
             git_repo_url: String::new(),
+            ssh_known_hosts_configmap: default_ssh_known_hosts_configmap(),
             bind_addr: default_bind_addr(),
             port: default_port(),
             max_connections: default_max_connections(),
@@ -341,6 +342,9 @@ fn default_bare_repo_pvc() -> String {
 }
 fn default_sidecar_image() -> String {
     "nemo-sidecar:latest".to_string()
+}
+fn default_ssh_known_hosts_configmap() -> String {
+    "nemo-ssh-known-hosts".to_string()
 }
 fn default_sessions_pvc() -> String {
     "nemo-sessions".to_string()

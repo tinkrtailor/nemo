@@ -1,10 +1,9 @@
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::batch::v1::JobSpec;
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvVar, KeyToPath, LocalObjectReference,
-    PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec, Probe, ResourceRequirements,
-    SecretVolumeSource, SecurityContext, Volume, VolumeMount,
-    HTTPGetAction,
+    Capabilities, ConfigMapVolumeSource, Container, EmptyDirVolumeSource, EnvVar, HTTPGetAction,
+    KeyToPath, LocalObjectReference, PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec,
+    Probe, ResourceRequirements, SecretVolumeSource, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -25,6 +24,8 @@ pub struct JobBuildConfig {
     pub image_pull_secret: Option<String>,
     /// Git repository URL passed to the sidecar for SSH proxy host restriction (FR-18).
     pub git_repo_url: String,
+    /// ConfigMap name containing SSH known_hosts for sidecar host key verification.
+    pub ssh_known_hosts_configmap: String,
 }
 
 /// Build a K8s Job spec for a given stage.
@@ -36,11 +37,7 @@ pub struct JobBuildConfig {
 ///
 /// Job naming: `nemo-{loop_id_short}-{stage}-r{round}-t{attempt}` (FR-31)
 /// Labels: `nemo.dev/loop-id`, `nemo.dev/stage`, `nemo.dev/engineer`, `nemo.dev/round` (FR-32)
-pub fn build_job(
-    ctx: &LoopContext,
-    stage: &StageConfig,
-    cfg: &JobBuildConfig,
-) -> Job {
+pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -> Job {
     let short_id = &ctx.loop_id.to_string()[..8];
     // FR-31: Include retry count in name to avoid AlreadyExists on redispatch
     let job_name = if ctx.retry_count > 0 {
@@ -49,10 +46,7 @@ pub fn build_job(
             stage.name, ctx.round, ctx.retry_count
         )
     } else {
-        format!(
-            "nemo-{short_id}-{}-r{}-t1",
-            stage.name, ctx.round
-        )
+        format!("nemo-{short_id}-{}-r{}-t1", stage.name, ctx.round)
     };
 
     // FR-32: Labels for control plane queries
@@ -64,30 +58,31 @@ pub fn build_job(
     labels.insert("nemo.dev/engineer".to_string(), ctx.engineer.clone());
 
     let parsed_stage = Stage::from_short_name(&stage.name);
-    let is_review_or_audit = matches!(
-        parsed_stage,
-        Some(Stage::Review) | Some(Stage::Audit)
-    );
-    let is_implement_or_revise = matches!(
-        parsed_stage,
-        Some(Stage::Implement) | Some(Stage::Revise)
-    );
+    let is_review_or_audit = matches!(parsed_stage, Some(Stage::Review) | Some(Stage::Audit));
     let is_test = matches!(parsed_stage, Some(Stage::Test));
 
     // FR-27: Environment variables on the agent container
     let agent_env = build_agent_env_vars(ctx, stage, is_test);
 
     // Build volumes (FR-25, FR-26, FR-30)
-    let volumes = build_volumes(&cfg.bare_repo_pvc, &cfg.sessions_pvc, &ctx.engineer, is_implement_or_revise);
+    let volumes = build_volumes(
+        &cfg.bare_repo_pvc,
+        &cfg.sessions_pvc,
+        &ctx.engineer,
+        &cfg.ssh_known_hosts_configmap,
+    );
 
-    // Build agent container volume mounts
-    let agent_mounts = build_agent_mounts(is_review_or_audit, is_implement_or_revise);
+    // Build agent container volume mounts (with subPath for worktree isolation)
+    let agent_mounts = build_agent_mounts(is_review_or_audit, &ctx.worktree_path);
 
     // Build sidecar container volume mounts
     let sidecar_mounts = build_sidecar_mounts();
 
     // FR-28: Resource limits per stage (with JVM tag support for TEST)
-    let has_jvm_tag = ctx.credentials.iter().any(|(k, v)| k == "service_tags" && v.contains("jvm"));
+    let has_jvm_tag = ctx
+        .credentials
+        .iter()
+        .any(|(k, v)| k == "service_tags" && v.contains("jvm"));
     let (agent_resources, sidecar_resources) = resource_limits(&stage.name, is_test, has_jvm_tag);
 
     // FR-25: Agent security context
@@ -170,11 +165,10 @@ pub fn build_job(
     };
 
     // FR-24: imagePullSecrets if configured
-    let image_pull_secrets = cfg.image_pull_secret.as_ref().map(|name| {
-        vec![LocalObjectReference {
-            name: name.clone(),
-        }]
-    });
+    let image_pull_secrets = cfg
+        .image_pull_secret
+        .as_ref()
+        .map(|name| vec![LocalObjectReference { name: name.clone() }]);
 
     Job {
         metadata: ObjectMeta {
@@ -300,10 +294,10 @@ fn build_volumes(
     bare_repo_pvc: &str,
     sessions_pvc: &str,
     engineer: &str,
-    is_implement_or_revise: bool,
+    ssh_known_hosts_configmap: &str,
 ) -> Vec<Volume> {
-    let mut volumes = vec![
-        // Worktree volume from bare repo PVC
+    vec![
+        // Worktree volume from bare repo PVC (mounted via subPath per job)
         Volume {
             name: "worktree".to_string(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
@@ -345,7 +339,7 @@ fn build_volumes(
             empty_dir: Some(EmptyDirVolumeSource::default()),
             ..Default::default()
         },
-        // FR-26: Model credentials Secret for sidecar
+        // FR-26: Model credentials Secret for sidecar only (never mounted in agent)
         Volume {
             name: "model-credentials".to_string(),
             secret: Some(SecretVolumeSource {
@@ -359,7 +353,7 @@ fn build_volumes(
             }),
             ..Default::default()
         },
-        // FR-26: SSH key Secret for sidecar
+        // FR-26: SSH key Secret for sidecar only
         Volume {
             name: "ssh-key".to_string(),
             secret: Some(SecretVolumeSource {
@@ -374,34 +368,27 @@ fn build_volumes(
             }),
             ..Default::default()
         },
-    ];
-
-    // FR-25b: Claude session directory for IMPLEMENT/REVISE stages
-    if is_implement_or_revise {
-        volumes.push(Volume {
-            name: "claude-session".to_string(),
-            secret: Some(SecretVolumeSource {
-                secret_name: Some(format!("nemo-creds-{engineer}")),
-                items: Some(vec![KeyToPath {
-                    key: "claude".to_string(),
-                    path: "claude-session".to_string(),
-                    ..Default::default()
-                }]),
+        // SSH known_hosts ConfigMap for sidecar host key verification (Finding 7)
+        Volume {
+            name: "ssh-known-hosts".to_string(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: ssh_known_hosts_configmap.to_string(),
                 ..Default::default()
             }),
             ..Default::default()
-        });
-    }
-
-    volumes
+        },
+    ]
 }
 
-/// Build agent container volume mounts (FR-25, FR-25b).
-fn build_agent_mounts(is_review_or_audit: bool, is_implement_or_revise: bool) -> Vec<VolumeMount> {
-    let mut mounts = vec![
+/// Build agent container volume mounts (FR-25).
+/// The worktree is mounted via subPath so the agent only sees its own worktree,
+/// not the shared bare repo. No secrets are ever mounted in the agent container.
+fn build_agent_mounts(is_review_or_audit: bool, worktree_path: &str) -> Vec<VolumeMount> {
+    vec![
         VolumeMount {
             name: "worktree".to_string(),
             mount_path: "/work".to_string(),
+            sub_path: Some(worktree_path.to_string()),
             read_only: Some(is_review_or_audit), // FR-6: Read-only for REVIEW/AUDIT
             ..Default::default()
         },
@@ -430,19 +417,7 @@ fn build_agent_mounts(is_review_or_audit: bool, is_implement_or_revise: bool) ->
             mount_path: "/work/home".to_string(),
             ..Default::default()
         },
-    ];
-
-    // FR-25b: Mount claude session directory for IMPLEMENT/REVISE
-    if is_implement_or_revise {
-        mounts.push(VolumeMount {
-            name: "claude-session".to_string(),
-            mount_path: "/work/home/.claude".to_string(),
-            read_only: Some(true),
-            ..Default::default()
-        });
-    }
-
-    mounts
+    ]
 }
 
 /// Build sidecar container volume mounts (FR-26).
@@ -457,6 +432,12 @@ fn build_sidecar_mounts() -> Vec<VolumeMount> {
         VolumeMount {
             name: "ssh-key".to_string(),
             mount_path: "/secrets/ssh-key".to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        },
+        VolumeMount {
+            name: "ssh-known-hosts".to_string(),
+            mount_path: "/secrets/ssh-known-hosts".to_string(),
             read_only: Some(true),
             ..Default::default()
         },
@@ -476,16 +457,16 @@ sysctl -w net.ipv6.conf.all.disable_ipv6=1
 sysctl -w net.ipv6.conf.default.disable_ipv6=1
 sysctl -w net.ipv6.conf.lo.disable_ipv6=1
 
-# IPv4: defense-in-depth rules
+# IPv4: strict egress enforcement for agent UID 1000
 # Allow loopback (agent -> sidecar on localhost)
 iptables -A OUTPUT -o lo -j ACCEPT
-# Allow established connections
+# Allow established connections (return traffic for accepted connections)
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-# Allow TCP from UID 1000 (agent) - HTTP_PROXY handles logging, not iptables
-iptables -A OUTPUT -p tcp -m owner --uid-owner 1000 -j ACCEPT
-# Drop all non-TCP egress from UID 1000 (no UDP/ICMP exfiltration)
-iptables -A OUTPUT -p udp -m owner --uid-owner 1000 -j DROP
-iptables -A OUTPUT -p icmp -m owner --uid-owner 1000 -j DROP"#;
+# Allow sidecar (UID 65534) full outbound access to reach upstream APIs
+iptables -A OUTPUT -m owner --uid-owner 65534 -j ACCEPT
+# Agent UID 1000: ONLY allow connections to sidecar ports on loopback
+# (already covered by -o lo above). Drop everything else from UID 1000.
+iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP"#;
 
     Container {
         name: "init-iptables".to_string(),
@@ -504,11 +485,15 @@ iptables -A OUTPUT -p icmp -m owner --uid-owner 1000 -j DROP"#;
 }
 
 /// FR-28: Resource limits per job type.
-fn resource_limits(stage_name: &str, _is_test: bool, has_jvm_tag: bool) -> (ResourceRequirements, ResourceRequirements) {
+fn resource_limits(
+    stage_name: &str,
+    _is_test: bool,
+    has_jvm_tag: bool,
+) -> (ResourceRequirements, ResourceRequirements) {
     let (cpu_req, cpu_lim, mem_req, mem_lim) = match (stage_name, has_jvm_tag) {
-        ("test", true) => ("1000m", "2000m", "2Gi", "6Gi"),  // TEST (jvm tag)
-        ("test", false) => ("500m", "1000m", "1Gi", "3Gi"),  // TEST (default)
-        _ => ("250m", "500m", "1Gi", "2Gi"),                  // IMPLEMENT/REVIEW/AUDIT/REVISE
+        ("test", true) => ("1000m", "2000m", "2Gi", "6Gi"), // TEST (jvm tag)
+        ("test", false) => ("500m", "1000m", "1Gi", "3Gi"), // TEST (default)
+        _ => ("250m", "500m", "1Gi", "2Gi"),                // IMPLEMENT/REVIEW/AUDIT/REVISE
     };
 
     let agent = ResourceRequirements {
@@ -565,6 +550,7 @@ mod tests {
             retry_count: 0,
             session_id: Some("session-123".to_string()),
             feedback_path: Some(".agent/review-feedback-round-1.json".to_string()),
+            worktree_path: "worktrees/agent-alice-invoice-cancel-a1b2c3d4".to_string(),
             credentials: vec![],
         }
     }
@@ -588,6 +574,7 @@ mod tests {
             sessions_pvc: "nemo-sessions".to_string(),
             image_pull_secret: None,
             git_repo_url: "git@github.com:test-org/test-repo.git".to_string(),
+            ssh_known_hosts_configmap: "nemo-ssh-known-hosts".to_string(),
         }
     }
 
@@ -658,7 +645,12 @@ mod tests {
             .capabilities
             .as_ref()
             .unwrap();
-        assert!(caps.add.as_ref().unwrap().contains(&"NET_ADMIN".to_string()));
+        assert!(
+            caps.add
+                .as_ref()
+                .unwrap()
+                .contains(&"NET_ADMIN".to_string())
+        );
     }
 
     #[test]
@@ -806,7 +798,10 @@ mod tests {
         let env = sidecar.env.as_ref().unwrap();
         let git_url = env.iter().find(|e| e.name == "GIT_REPO_URL").unwrap();
         // FR-18: Sidecar gets the actual git repo URL, not branch
-        assert_eq!(git_url.value.as_deref(), Some("git@github.com:test-org/test-repo.git"));
+        assert_eq!(
+            git_url.value.as_deref(),
+            Some("git@github.com:test-org/test-repo.git")
+        );
     }
 
     #[test]
@@ -818,7 +813,10 @@ mod tests {
         let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let env = agent.env.as_ref().unwrap();
         let author_email = env.iter().find(|e| e.name == "GIT_AUTHOR_EMAIL").unwrap();
-        let committer_email = env.iter().find(|e| e.name == "GIT_COMMITTER_EMAIL").unwrap();
+        let committer_email = env
+            .iter()
+            .find(|e| e.name == "GIT_COMMITTER_EMAIL")
+            .unwrap();
         // FR-27: Email comes from engineers table, not hardcoded
         assert_eq!(author_email.value.as_deref(), Some("alice@example.com"));
         assert_eq!(committer_email.value.as_deref(), Some("alice@example.com"));
@@ -855,34 +853,34 @@ mod tests {
     }
 
     #[test]
-    fn test_build_job_implement_has_claude_session() {
+    fn test_build_job_no_secrets_in_agent() {
+        // Finding 3: No credentials mounted in untrusted agent container
         let ctx = test_ctx();
         let stage = test_stage(); // implement
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let mounts = agent.volume_mounts.as_ref().unwrap();
-        // FR-25b: Claude session dir mounted for IMPLEMENT
-        let claude_mount = mounts.iter().find(|m| m.mount_path == "/work/home/.claude");
-        assert!(claude_mount.is_some());
-        assert_eq!(claude_mount.unwrap().read_only, Some(true));
+        // No /secrets, no claude-session, no model-credentials
+        assert!(!mounts.iter().any(|m| m.mount_path.contains("secret")
+            || m.mount_path.contains("claude")
+            || m.mount_path.contains("credential")));
     }
 
     #[test]
-    fn test_build_job_review_no_claude_session() {
+    fn test_build_job_worktree_subpath() {
+        // Finding 5: Worktree mounted via subPath, not bare repo root
         let ctx = test_ctx();
-        let stage = StageConfig {
-            name: "review".to_string(),
-            timeout: Duration::from_secs(900),
-            ..Default::default()
-        };
+        let stage = test_stage();
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let mounts = agent.volume_mounts.as_ref().unwrap();
-        // FR-25b: No claude session dir for REVIEW
-        let claude_mount = mounts.iter().find(|m| m.mount_path == "/work/home/.claude");
-        assert!(claude_mount.is_none());
+        let worktree_mount = mounts.iter().find(|m| m.mount_path == "/work").unwrap();
+        assert_eq!(
+            worktree_mount.sub_path.as_deref(),
+            Some("worktrees/agent-alice-invoice-cancel-a1b2c3d4")
+        );
     }
 
     #[test]
@@ -895,18 +893,24 @@ mod tests {
 
         // Sidecar has secret mounts
         let sidecar_mounts = pod_spec.containers[1].volume_mounts.as_ref().unwrap();
-        assert!(sidecar_mounts
-            .iter()
-            .any(|m| m.mount_path == "/secrets/model-credentials"));
-        assert!(sidecar_mounts
-            .iter()
-            .any(|m| m.mount_path == "/secrets/ssh-key"));
+        assert!(
+            sidecar_mounts
+                .iter()
+                .any(|m| m.mount_path == "/secrets/model-credentials")
+        );
+        assert!(
+            sidecar_mounts
+                .iter()
+                .any(|m| m.mount_path == "/secrets/ssh-key")
+        );
 
         // Agent does NOT have /secrets/ mounts (FR-26)
         let agent_mounts = pod_spec.containers[0].volume_mounts.as_ref().unwrap();
-        assert!(!agent_mounts
-            .iter()
-            .any(|m| m.mount_path.starts_with("/secrets")));
+        assert!(
+            !agent_mounts
+                .iter()
+                .any(|m| m.mount_path.starts_with("/secrets"))
+        );
     }
 
     #[test]
@@ -998,26 +1002,11 @@ mod tests {
     #[test]
     fn test_build_job_volumes_count() {
         let ctx = test_ctx();
-        let stage = test_stage(); // implement -> has claude-session volume
+        let stage = test_stage();
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let volumes = job.spec.unwrap().template.spec.unwrap().volumes.unwrap();
-        // worktree, sessions, output, shared, tmpdir, home, model-credentials, ssh-key, claude-session
+        // worktree, sessions, output, shared, tmpdir, home, model-credentials, ssh-key, ssh-known-hosts
         assert_eq!(volumes.len(), 9);
-    }
-
-    #[test]
-    fn test_build_job_review_volumes_count() {
-        let ctx = test_ctx();
-        let stage = StageConfig {
-            name: "review".to_string(),
-            timeout: Duration::from_secs(900),
-            ..Default::default()
-        };
-        let cfg = test_cfg();
-        let job = build_job(&ctx, &stage, &cfg);
-        let volumes = job.spec.unwrap().template.spec.unwrap().volumes.unwrap();
-        // No claude-session volume for review
-        assert_eq!(volumes.len(), 8);
     }
 }

@@ -47,6 +47,7 @@ impl ConvergentLoopDriver {
             sessions_pvc: self.config.cluster.sessions_pvc.clone(),
             image_pull_secret: self.config.cluster.image_pull_secret.clone(),
             git_repo_url: self.config.cluster.git_repo_url.clone(),
+            ssh_known_hosts_configmap: self.config.cluster.ssh_known_hosts_configmap.clone(),
         }
     }
 
@@ -63,7 +64,10 @@ impl ConvergentLoopDriver {
         // Terminal states: clear stale flags and return (never transition out)
         if record.state.is_terminal() {
             if record.cancel_requested {
-                let _ = self.store.set_loop_flag(record.id, crate::state::LoopFlag::Cancel, false).await;
+                let _ = self
+                    .store
+                    .set_loop_flag(record.id, crate::state::LoopFlag::Cancel, false)
+                    .await;
             }
             return Ok(record.state);
         }
@@ -103,12 +107,9 @@ impl ConvergentLoopDriver {
 
             let stage_config = self.audit_stage_config();
             let ctx = self.build_context(&updated).await?;
-            let job = job_builder::build_job(
-                &ctx,
-                &stage_config,
-                &self.job_build_config(),
-            );
-            self.persist_then_dispatch(&mut updated, "audit", &job).await?;
+            let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+            self.persist_then_dispatch(&mut updated, "audit", &job)
+                .await?;
 
             tracing::info!(loop_id = %record.id, "Transitioned PENDING -> HARDENING/DISPATCHED");
             Ok(LoopState::Hardening)
@@ -260,10 +261,7 @@ impl ConvergentLoopDriver {
         let verdict_path = self.verdict_path_for_stage(record).await;
 
         // Read verdict JSON from git
-        let git_ref = record
-            .current_sha
-            .as_deref()
-            .unwrap_or(&record.branch);
+        let git_ref = record.current_sha.as_deref().unwrap_or(&record.branch);
         let verdict_json = match self.git.read_file(&verdict_path, git_ref).await {
             Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
                 Ok(v) => Some(v),
@@ -335,9 +333,7 @@ impl ConvergentLoopDriver {
         //
         // We determine which sub-stage just completed by checking the round record.
         let rounds = self.store.get_rounds(record.id).await?;
-        let last_round = rounds
-            .iter()
-            .rfind(|r| r.round == record.round);
+        let last_round = rounds.iter().rfind(|r| r.round == record.round);
 
         let stage_name = last_round.map(|r| r.stage.as_str()).unwrap_or("audit");
 
@@ -354,8 +350,8 @@ impl ConvergentLoopDriver {
                         if record.harden_only {
                             // Clean up .agent/ artifacts before PR creation
                             if let Err(e) = self.git.remove_path(&record.branch, ".agent").await {
-                    tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
-                }
+                                tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
+                            }
 
                             // Harden only: create spec PR, merge it, terminal HARDENED (FR-23)
                             let pr_title = format!(
@@ -375,10 +371,7 @@ impl ConvergentLoopDriver {
                             if self.config.harden.auto_merge_spec_pr {
                                 let merge_sha = self
                                     .git
-                                    .merge_pr(
-                                        &record.branch,
-                                        &self.config.harden.merge_strategy,
-                                    )
+                                    .merge_pr(&record.branch, &self.config.harden.merge_strategy)
                                     .await?;
                                 record.merge_sha = Some(merge_sha);
                                 record.merged_at = Some(chrono::Utc::now());
@@ -386,8 +379,7 @@ impl ConvergentLoopDriver {
                                 record.state = LoopState::Hardened;
                                 record.sub_state = None;
                                 record.active_job_name = None;
-                                record.hardened_spec_path =
-                                    Some(record.spec_path.clone());
+                                record.hardened_spec_path = Some(record.spec_path.clone());
                                 self.store.update_loop(record).await?;
                                 tracing::info!(loop_id = %record.id, "Harden loop HARDENED (spec PR merged)");
                                 Ok(LoopState::Hardened)
@@ -397,8 +389,7 @@ impl ConvergentLoopDriver {
                                 record.state = LoopState::Hardened;
                                 record.sub_state = None;
                                 record.active_job_name = None;
-                                record.hardened_spec_path =
-                                    Some(record.spec_path.clone());
+                                record.hardened_spec_path = Some(record.spec_path.clone());
                                 self.store.update_loop(record).await?;
                                 tracing::info!(loop_id = %record.id, "Harden loop HARDENED (spec PR created, human merge required)");
                                 Ok(LoopState::Hardened)
@@ -447,8 +438,10 @@ impl ConvergentLoopDriver {
                 if record.round >= record.max_rounds {
                     record.state = LoopState::Failed;
                     record.sub_state = None;
-                    record.failure_reason =
-                        Some(format!("Max harden rounds ({}) exceeded", record.max_rounds));
+                    record.failure_reason = Some(format!(
+                        "Max harden rounds ({}) exceeded",
+                        record.max_rounds
+                    ));
                     record.active_job_name = None;
                     self.store.update_loop(record).await?;
                     return Ok(LoopState::Failed);
@@ -469,11 +462,7 @@ impl ConvergentLoopDriver {
 
         let stage_config = self.test_stage_config();
         let ctx = self.build_context(record).await?;
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.job_build_config(),
-        );
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "test", &job).await?;
 
         tracing::info!(loop_id = %record.id, round = record.round, "IMPLEMENTING -> TESTING/DISPATCHED");
@@ -519,10 +508,7 @@ impl ConvergentLoopDriver {
                 };
 
                 record.round += 1;
-                let feedback_path = format!(
-                    ".agent/test-feedback-round-{}.json",
-                    record.round - 1
-                );
+                let feedback_path = format!(".agent/test-feedback-round-{}.json", record.round - 1);
                 self.dispatch_implement_with_feedback(record, &feedback, &feedback_path)
                     .await
             }
@@ -553,11 +539,8 @@ impl ConvergentLoopDriver {
                         tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
                     }
 
-                    let pr_title = format!(
-                        "feat(agent): {} for {}",
-                        record.spec_path,
-                        record.engineer,
-                    );
+                    let pr_title =
+                        format!("feat(agent): {} for {}", record.spec_path, record.engineer,);
                     let pr_body = format!(
                         "Automated convergence loop completed in {} round(s).\n\nSpec: {}\nBranch: {}",
                         record.round, record.spec_path, record.branch,
@@ -694,10 +677,8 @@ impl ConvergentLoopDriver {
                 };
 
                 record.round += 1;
-                let feedback_path = format!(
-                    ".agent/review-feedback-round-{}.json",
-                    record.round - 1
-                );
+                let feedback_path =
+                    format!(".agent/review-feedback-round-{}.json", record.round - 1);
                 self.dispatch_implement_with_feedback(record, &feedback, &feedback_path)
                     .await
             }
@@ -781,7 +762,10 @@ impl ConvergentLoopDriver {
     async fn handle_cancel(&self, record: &LoopRecord) -> Result<LoopState> {
         // Delete active job if any (log failure but proceed — orphan cleanup handles stragglers)
         if let Some(ref job_name) = record.active_job_name
-            && let Err(e) = self.dispatcher.delete_job(job_name, &self.config.cluster.jobs_namespace).await
+            && let Err(e) = self
+                .dispatcher
+                .delete_job(job_name, &self.config.cluster.jobs_namespace)
+                .await
         {
             tracing::warn!(loop_id = %record.id, job = job_name, error = %e, "Failed to delete job during cancel");
         }
@@ -807,7 +791,10 @@ impl ConvergentLoopDriver {
         let mut updated = record.clone();
 
         if let Some(ref job_name) = record.active_job_name
-            && let Err(e) = self.dispatcher.delete_job(job_name, &self.config.cluster.jobs_namespace).await
+            && let Err(e) = self
+                .dispatcher
+                .delete_job(job_name, &self.config.cluster.jobs_namespace)
+                .await
         {
             tracing::warn!(loop_id = %record.id, job = job_name, error = %e, "Failed to delete job during auth expiry");
         }
@@ -832,7 +819,10 @@ impl ConvergentLoopDriver {
         // Detect credential expiry (FR-10): transition to AWAITING_REAUTH
         if is_auth_error(reason) && record.state.is_active_stage() {
             if let Some(ref job_name) = record.active_job_name
-                && let Err(e) = self.dispatcher.delete_job(job_name, &self.config.cluster.jobs_namespace).await
+                && let Err(e) = self
+                    .dispatcher
+                    .delete_job(job_name, &self.config.cluster.jobs_namespace)
+                    .await
             {
                 tracing::warn!(loop_id = %record.id, job = job_name, error = %e, "Failed to delete job during reauth");
             }
@@ -864,10 +854,8 @@ impl ConvergentLoopDriver {
             // Exhausted retries: fail the loop
             updated.state = LoopState::Failed;
             updated.sub_state = None;
-            updated.failure_reason = Some(format!(
-                "{reason} (after {} retries)",
-                updated.retry_count
-            ));
+            updated.failure_reason =
+                Some(format!("{reason} (after {} retries)", updated.retry_count));
             updated.active_job_name = None;
             self.store.update_loop(&updated).await?;
 
@@ -913,12 +901,9 @@ impl ConvergentLoopDriver {
 
         let stage_config = self.implement_stage_config(record);
         let ctx = self.build_context(&updated).await?;
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.job_build_config(),
-        );
-        self.persist_then_dispatch(&mut updated, "implement", &job).await?;
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+        self.persist_then_dispatch(&mut updated, "implement", &job)
+            .await?;
 
         tracing::info!(loop_id = %record.id, round = updated.round, "Started IMPLEMENTING/DISPATCHED");
         Ok(LoopState::Implementing)
@@ -932,11 +917,7 @@ impl ConvergentLoopDriver {
 
         let stage_config = self.audit_stage_config();
         let ctx = self.build_context(record).await?;
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.job_build_config(),
-        );
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "audit", &job).await?;
 
         Ok(LoopState::Hardening)
@@ -949,11 +930,7 @@ impl ConvergentLoopDriver {
 
         let stage_config = self.revise_stage_config(record);
         let ctx = self.build_context(record).await?;
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.job_build_config(),
-        );
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "revise", &job).await?;
 
         Ok(LoopState::Hardening)
@@ -967,11 +944,7 @@ impl ConvergentLoopDriver {
 
         let stage_config = self.review_stage_config(record);
         let ctx = self.build_context(record).await?;
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.job_build_config(),
-        );
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "review", &job).await?;
 
         tracing::info!(loop_id = %record.id, round = record.round, "TESTING -> REVIEWING/DISPATCHED");
@@ -987,8 +960,9 @@ impl ConvergentLoopDriver {
         feedback_path: &str,
     ) -> Result<LoopState> {
         // Write feedback file to the branch worktree so the agent can read it
-        let feedback_json = serde_json::to_string_pretty(feedback)
-            .map_err(|e| crate::error::NemoError::Internal(format!("Failed to serialize feedback: {e}")))?;
+        let feedback_json = serde_json::to_string_pretty(feedback).map_err(|e| {
+            crate::error::NemoError::Internal(format!("Failed to serialize feedback: {e}"))
+        })?;
         self.git
             .write_file(&record.branch, feedback_path, &feedback_json)
             .await?;
@@ -1006,12 +980,9 @@ impl ConvergentLoopDriver {
         let mut ctx = self.build_context(record).await?;
         ctx.feedback_path = Some(feedback_path.to_string());
 
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.job_build_config(),
-        );
-        self.persist_then_dispatch(record, "implement", &job).await?;
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+        self.persist_then_dispatch(record, "implement", &job)
+            .await?;
 
         tracing::info!(
             loop_id = %record.id,
@@ -1073,11 +1044,7 @@ impl ConvergentLoopDriver {
             });
         }
 
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.job_build_config(),
-        );
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
 
         // Persist state FIRST, then create K8s Job
         let job_name = job
@@ -1189,6 +1156,11 @@ impl ConvergentLoopDriver {
         // For now, derive from engineer name as a fallback.
         let engineer_email = format!("{}@nemo.dev", record.engineer);
 
+        // Derive worktree sub-path from branch name.
+        // The git module creates worktrees under worktrees/<branch-safe-name>.
+        let worktree_dir = record.branch.replace('/', "-");
+        let worktree_path = format!("worktrees/{worktree_dir}");
+
         Ok(LoopContext {
             loop_id: record.id,
             engineer: record.engineer.clone(),
@@ -1201,6 +1173,7 @@ impl ConvergentLoopDriver {
             retry_count: record.retry_count as u32,
             session_id: record.session_id.clone(),
             feedback_path,
+            worktree_path,
             credentials,
         })
     }
@@ -1782,7 +1755,12 @@ mod tests {
 
         let updated = store.get_loop(record.id).await.unwrap().unwrap();
         assert_eq!(updated.state, LoopState::Converged);
-        assert!(updated.failure_reason.unwrap().contains("above auto-merge threshold"));
+        assert!(
+            updated
+                .failure_reason
+                .unwrap()
+                .contains("above auto-merge threshold")
+        );
     }
 
     #[tokio::test]
@@ -1850,9 +1828,18 @@ mod tests {
         // Verify round record was updated with output
         let rounds = store.get_rounds(record.id).await.unwrap();
         let updated_round = rounds.iter().find(|r| r.id == round_id).unwrap();
-        assert!(updated_round.output.is_some(), "Round output should be populated after ingestion");
-        assert!(updated_round.completed_at.is_some(), "completed_at should be set");
-        assert!(updated_round.duration_secs.is_some(), "duration_secs should be set");
+        assert!(
+            updated_round.output.is_some(),
+            "Round output should be populated after ingestion"
+        );
+        assert!(
+            updated_round.completed_at.is_some(),
+            "completed_at should be set"
+        );
+        assert!(
+            updated_round.duration_secs.is_some(),
+            "duration_secs should be set"
+        );
 
         // Verify current_sha was set
         let updated_loop = store.get_loop(record.id).await.unwrap().unwrap();

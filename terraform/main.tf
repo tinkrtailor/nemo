@@ -30,7 +30,7 @@ resource "null_resource" "k3s_install" {
     type        = "ssh"
     host        = hcloud_server.nemo.ipv4_address
     user        = "root"
-    private_key = file("~/.ssh/id_ed25519")
+    private_key = file(pathexpand(var.ssh_private_key_path))
   }
 
   provisioner "remote-exec" {
@@ -59,7 +59,7 @@ resource "null_resource" "kubeconfig" {
     type        = "ssh"
     host        = hcloud_server.nemo.ipv4_address
     user        = "root"
-    private_key = file("~/.ssh/id_ed25519")
+    private_key = file(pathexpand(var.ssh_private_key_path))
   }
 
   provisioner "local-exec" {

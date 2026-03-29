@@ -19,7 +19,10 @@ pub async fn run(client: &NemoClient, loop_id: &str) -> Result<()> {
         println!("  State: {}", resp.state);
         println!("  Implementation will start on next reconciliation tick.");
     } else {
-        println!("Loop {} is in state {} (approve not applicable)", resp.loop_id, resp.state);
+        println!(
+            "Loop {} is in state {} (approve not applicable)",
+            resp.loop_id, resp.state
+        );
     }
     Ok(())
 }

@@ -89,7 +89,12 @@ impl NemoClient {
     }
 
     /// Register credentials with the control plane.
-    pub async fn register_credentials(&self, engineer: &str, provider: &str, cred_path: &str) -> Result<()> {
+    pub async fn register_credentials(
+        &self,
+        engineer: &str,
+        provider: &str,
+        cred_path: &str,
+    ) -> Result<()> {
         let body = serde_json::json!({
             "engineer": engineer,
             "provider": provider,

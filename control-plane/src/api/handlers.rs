@@ -1,7 +1,7 @@
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use uuid::Uuid;
 
 use super::AppState;
@@ -11,7 +11,7 @@ use crate::types::api::{
     ApproveResponse, CancelResponse, CredentialRequest, InspectResponse, LogsQuery, LoopSummary,
     ResumeResponse, RoundSummary, StartRequest, StartResponse, StatusQuery, StatusResponse,
 };
-use crate::types::{generate_branch_name, LoopKind, LoopRecord, LoopState};
+use crate::types::{LoopKind, LoopRecord, LoopState, generate_branch_name};
 
 /// Query parameters for GET /inspect
 #[derive(Debug, serde::Deserialize)]
@@ -54,7 +54,8 @@ pub async fn start(
 
     // Compute effective flags first so max_rounds uses the right values
     // harden_only implies harden; ship_mode with require_harden also implies harden (FR-20)
-    let effective_harden = req.harden || req.harden_only || (req.ship_mode && state.config.ship.require_harden);
+    let effective_harden =
+        req.harden || req.harden_only || (req.ship_mode && state.config.ship.require_harden);
 
     // ship --harden implies auto_approve (FR-20: zero human gates)
     let effective_auto_approve = req.auto_approve || req.ship_mode;
@@ -100,8 +101,14 @@ pub async fn start(
         session_id: None,
         active_job_name: None,
         retry_count: 0,
-        model_implementor: req.model_overrides.as_ref().and_then(|m| m.implementor.clone()),
-        model_reviewer: req.model_overrides.as_ref().and_then(|m| m.reviewer.clone()),
+        model_implementor: req
+            .model_overrides
+            .as_ref()
+            .and_then(|m| m.implementor.clone()),
+        model_reviewer: req
+            .model_overrides
+            .as_ref()
+            .and_then(|m| m.reviewer.clone()),
         merge_sha: None,
         merged_at: None,
         hardened_spec_path: None,
@@ -125,7 +132,10 @@ pub async fn start(
     let branch_sha = match state.git.create_branch(&branch).await {
         Ok(sha) => sha,
         Err(e) => {
-            let _ = state.store.update_loop_state(loop_id, LoopState::Failed, None).await;
+            let _ = state
+                .store
+                .update_loop_state(loop_id, LoopState::Failed, None)
+                .await;
             return Err(e);
         }
     };
@@ -164,7 +174,11 @@ pub async fn status(
     let show_all = query.all.unwrap_or(false);
     let loops = state
         .store
-        .get_loops_for_engineer(query.engineer.as_deref(), query.team.unwrap_or(false), show_all)
+        .get_loops_for_engineer(
+            query.engineer.as_deref(),
+            query.team.unwrap_or(false),
+            show_all,
+        )
         .await?;
 
     let summaries = loops
@@ -382,7 +396,9 @@ pub async fn upsert_credentials(
     Json(req): Json<CredentialRequest>,
 ) -> Result<impl IntoResponse, NemoError> {
     if req.engineer.is_empty() {
-        return Err(NemoError::Internal("engineer field is required".to_string()));
+        return Err(NemoError::Internal(
+            "engineer field is required".to_string(),
+        ));
     }
 
     let cred = crate::types::EngineerCredential {
@@ -402,9 +418,7 @@ pub async fn upsert_credentials(
 /// Check if a sqlx error is a unique constraint violation.
 fn is_unique_violation(e: &sqlx::Error) -> bool {
     match e {
-        sqlx::Error::Database(db_err) => {
-            db_err.kind() == sqlx::error::ErrorKind::UniqueViolation
-        }
+        sqlx::Error::Database(db_err) => db_err.kind() == sqlx::error::ErrorKind::UniqueViolation,
         _ => false,
     }
 }
@@ -415,12 +429,12 @@ mod tests {
     use crate::api::AppState;
     use crate::config::NemoConfig;
     use crate::git::mock::MockGitOperations;
-    use crate::state::memory::MemoryStateStore;
     use crate::state::StateStore;
+    use crate::state::memory::MemoryStateStore;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{self, Request};
     use axum::response::Response;
-    use axum::Router;
     use std::sync::Arc;
     use tower::ServiceExt;
 

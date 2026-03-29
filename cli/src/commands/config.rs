@@ -14,7 +14,7 @@ pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
                     let chars: Vec<char> = key.chars().collect();
                     if chars.len() > 12 {
                         let prefix: String = chars[..4].iter().collect();
-                        let suffix: String = chars[chars.len()-4..].iter().collect();
+                        let suffix: String = chars[chars.len() - 4..].iter().collect();
                         println!("{prefix}...{suffix}");
                     } else {
                         println!("****");

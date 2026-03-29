@@ -4,9 +4,9 @@ pub mod sse;
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::middleware;
 use axum::routing::{delete, get, post};
-use axum::Router;
 
 use crate::config::NemoConfig;
 use crate::git::GitOperations;

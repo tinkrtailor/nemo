@@ -3,19 +3,18 @@
 # FR-4 through FR-13: Stage dispatch, environment setup, result output.
 set -euo pipefail
 
-# --- FR-30: Wait for sidecar readiness ---
+# --- FR-30: Wait for sidecar readiness (Finding 10: integer arithmetic, no bc) ---
 READY_FILE="/tmp/shared/ready"
 TIMEOUT=30
-INTERVAL=0.1
-elapsed=0
+ELAPSED=0
 
 while [ ! -f "$READY_FILE" ]; do
-    elapsed=$(echo "$elapsed + $INTERVAL" | bc)
-    if (( $(echo "$elapsed >= $TIMEOUT" | bc -l) )); then
+    ELAPSED=$((ELAPSED + 1))
+    if [ "$ELAPSED" -ge "$((TIMEOUT * 10))" ]; then
         echo "NEMO_ERROR: sidecar: readiness timeout after ${TIMEOUT}s" >&2
         exit 1
     fi
-    sleep "$INTERVAL"
+    sleep 0.1
 done
 
 # --- Validate required environment variables (Edge Case: Template variable not set) ---
@@ -32,7 +31,7 @@ if [ -n "$missing" ]; then
 fi
 
 # --- Check worktree mount (Edge Case: Worktree volume not mounted) ---
-if [ ! -d "/work" ] || [ ! -f "/work/.git" ] && [ ! -d "/work/.git" ]; then
+if [ ! -d "/work" ] || { [ ! -f "/work/.git" ] && [ ! -d "/work/.git" ]; }; then
     echo "NEMO_ERROR: entrypoint: worktree volume not found at /work" >&2
     exit 1
 fi
@@ -104,6 +103,55 @@ check_sidecar() {
     fi
 }
 
+# --- Helper: run CLI as child process, extract result, emit NEMO_RESULT: ---
+# Finding 1: exec replaces the process, preventing NEMO_RESULT emission.
+# Instead, run as child, capture output, extract final assistant payload.
+run_and_emit_result() {
+    local stage_name="$1"
+    shift
+    local cli_stdout="/tmp/cli-stdout-$$"
+    local cli_stderr="/tmp/cli-stderr-$$"
+    local exit_code=0
+
+    # Run CLI, capturing stdout and stderr separately
+    set +e
+    "$@" > "$cli_stdout" 2>"$cli_stderr"
+    exit_code=$?
+    set -e
+
+    if [ "$exit_code" -ne 0 ]; then
+        local stderr_tail
+        stderr_tail=$(tail -c 5000 "$cli_stderr" 2>/dev/null || echo "")
+        # Build a failure result envelope
+        local result
+        result=$(jq -n \
+            --arg stage "$stage_name" \
+            --argjson exit_code "$exit_code" \
+            --arg stderr "$stderr_tail" \
+            '{stage: $stage, data: {exit_code: $exit_code, error: $stderr}}')
+        echo "$result" > /output/result.json
+        echo "NEMO_RESULT:$result"
+        exit "$exit_code"
+    fi
+
+    # For stream-json output (claude), extract the final result message
+    # For json output (opencode), the whole stdout is the result
+    local result_data
+    if [ "$stage_name" = "implement" ] || [ "$stage_name" = "revise" ]; then
+        # Claude stream-json: last assistant message is the result
+        result_data=$(jq -s '[.[] | select(.type == "assistant")] | last // empty' "$cli_stdout" 2>/dev/null || cat "$cli_stdout")
+    else
+        # OpenCode json: entire output is structured
+        result_data=$(cat "$cli_stdout")
+    fi
+
+    local result
+    result=$(jq -n --arg stage "$stage_name" --argjson data "$result_data" '{stage: $stage, data: $data}' 2>/dev/null || \
+        jq -n --arg stage "$stage_name" --arg data "$result_data" '{stage: $stage, data: $data}')
+    echo "$result" > /output/result.json
+    echo "NEMO_RESULT:$result"
+}
+
 # --- FR-4: Stage dispatch ---
 case "$STAGE" in
     implement|revise)
@@ -112,7 +160,7 @@ case "$STAGE" in
         if [ -n "${SESSION_ID:-}" ]; then
             CLAUDE_ARGS+=(--resume "$SESSION_ID")
         fi
-        exec claude "${CLAUDE_ARGS[@]}"
+        run_and_emit_result "$STAGE" claude "${CLAUDE_ARGS[@]}"
         ;;
 
     review|audit)
@@ -123,7 +171,7 @@ case "$STAGE" in
         if [ -n "${SESSION_ID:-}" ]; then
             OPENCODE_ARGS+=(-s "$SESSION_ID")
         fi
-        exec opencode "${OPENCODE_ARGS[@]}"
+        run_and_emit_result "$STAGE" opencode "${OPENCODE_ARGS[@]}"
         ;;
 
     test)
@@ -157,25 +205,33 @@ case "$STAGE" in
                 continue
             fi
 
-            # FR-42c: Run test, capture output
+            # FR-42c: Run test, capture stdout and stderr separately (Finding 11)
+            STDOUT_FILE="/tmp/test-stdout-$$-$svc"
+            STDERR_FILE="/tmp/test-stderr-$$-$svc"
             set +e
-            TEST_OUTPUT=$(cd /work && eval "$cmd" 2>&1)
+            (cd /work && eval "$cmd") > "$STDOUT_FILE" 2>"$STDERR_FILE"
             TEST_EXIT=$?
             set -e
 
-            STDOUT_PART=$(echo "$TEST_OUTPUT" | head -c 10000)
+            STDOUT_PART=$(head -c 10000 "$STDOUT_FILE" 2>/dev/null || echo "")
+            STDERR_PART=$(head -c 5000 "$STDERR_FILE" 2>/dev/null || echo "")
 
             RESULTS=$(echo "$RESULTS" | jq \
                 --arg name "$svc" \
                 --arg cmd "$cmd" \
                 --argjson exit "$TEST_EXIT" \
                 --arg stdout "$STDOUT_PART" \
-                --arg stderr "" \
+                --arg stderr "$STDERR_PART" \
                 '. + [{"name": $name, "test_command": $cmd, "exit_code": $exit, "stdout": $stdout, "stderr": $stderr}]')
 
             if [ "$TEST_EXIT" -ne 0 ]; then
                 ALL_PASSED=false
-                if [ "$CI_STATUS" = "passed" ]; then
+                # Finding 11: Distinguish infra failures (command not found, signal)
+                # from test failures. Exit codes 126 (not executable), 127 (not found),
+                # and >= 128 (killed by signal) indicate infra issues.
+                if [ "$TEST_EXIT" -ge 126 ]; then
+                    CI_STATUS="unknown"
+                elif [ "$CI_STATUS" = "passed" ]; then
                     CI_STATUS="failed"
                 fi
             fi

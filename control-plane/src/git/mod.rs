@@ -64,7 +64,10 @@ pub mod bare {
             }
         }
 
-        async fn run_git(&self, args: &[&str]) -> std::result::Result<String, crate::error::NemoError> {
+        async fn run_git(
+            &self,
+            args: &[&str],
+        ) -> std::result::Result<String, crate::error::NemoError> {
             let output = Command::new("git")
                 .args(args)
                 .current_dir(&self.repo_path)
@@ -83,16 +86,21 @@ pub mod bare {
 
     impl BareRepoGitOperations {
         /// Inner write_file logic; caller handles worktree cleanup.
-        async fn write_file_in_worktree(&self, worktree_dir: &str, path: &str, content: &str) -> Result<()> {
+        async fn write_file_in_worktree(
+            &self,
+            worktree_dir: &str,
+            path: &str,
+            content: &str,
+        ) -> Result<()> {
             let file_path = std::path::Path::new(worktree_dir).join(path);
             if let Some(parent) = file_path.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
                     crate::error::NemoError::Git(format!("Failed to create dirs: {e}"))
                 })?;
             }
-            tokio::fs::write(&file_path, content).await.map_err(|e| {
-                crate::error::NemoError::Git(format!("Failed to write file: {e}"))
-            })?;
+            tokio::fs::write(&file_path, content)
+                .await
+                .map_err(|e| crate::error::NemoError::Git(format!("Failed to write file: {e}")))?;
 
             let add = Command::new("git")
                 .args(["add", path])
@@ -102,22 +110,32 @@ pub mod bare {
                 .map_err(|e| crate::error::NemoError::Git(format!("git add spawn failed: {e}")))?;
             if !add.status.success() {
                 let stderr = String::from_utf8_lossy(&add.stderr).trim().to_string();
-                return Err(crate::error::NemoError::Git(format!("git add failed: {stderr}")));
+                return Err(crate::error::NemoError::Git(format!(
+                    "git add failed: {stderr}"
+                )));
             }
 
             let commit = Command::new("git")
                 .args([
-                    "-c", "user.name=nemo-control-plane",
-                    "-c", "user.email=nemo@nemo.dev",
-                    "commit", "-m", &format!("chore(agent): add {path}"),
+                    "-c",
+                    "user.name=nemo-control-plane",
+                    "-c",
+                    "user.email=nemo@nemo.dev",
+                    "commit",
+                    "-m",
+                    &format!("chore(agent): add {path}"),
                 ])
                 .current_dir(worktree_dir)
                 .output()
                 .await
-                .map_err(|e| crate::error::NemoError::Git(format!("git commit spawn failed: {e}")))?;
+                .map_err(|e| {
+                    crate::error::NemoError::Git(format!("git commit spawn failed: {e}"))
+                })?;
             if !commit.status.success() {
                 let stderr = String::from_utf8_lossy(&commit.stderr).trim().to_string();
-                return Err(crate::error::NemoError::Git(format!("git commit failed: {stderr}")));
+                return Err(crate::error::NemoError::Git(format!(
+                    "git commit failed: {stderr}"
+                )));
             }
 
             Ok(())
@@ -127,7 +145,10 @@ pub mod bare {
     #[async_trait]
     impl GitOperations for BareRepoGitOperations {
         async fn spec_exists(&self, spec_path: &str) -> Result<bool> {
-            match self.run_git(&["cat-file", "-e", &format!("HEAD:{spec_path}")]).await {
+            match self
+                .run_git(&["cat-file", "-e", &format!("HEAD:{spec_path}")])
+                .await
+            {
                 Ok(_) => Ok(true),
                 Err(_) => Ok(false),
             }
@@ -144,8 +165,9 @@ pub mod bare {
             // Use origin/main (the fetched remote tip) not bare-repo HEAD
             let base_ref = match self.run_git(&["rev-parse", "origin/main"]).await {
                 Ok(sha) => sha,
-                Err(_) => self.run_git(&["rev-parse", "HEAD"]).await
-                    .map_err(|e| crate::error::NemoError::Git(format!("Failed to resolve base ref: {e}")))?,
+                Err(_) => self.run_git(&["rev-parse", "HEAD"]).await.map_err(|e| {
+                    crate::error::NemoError::Git(format!("Failed to resolve base ref: {e}"))
+                })?,
             };
 
             // Try to create the branch
@@ -169,18 +191,22 @@ pub mod bare {
                             let _ = self.run_git(&["push", "origin", "--delete", branch]).await;
                             self.run_git(&["branch", branch, &base_ref])
                                 .await
-                                .map_err(|e| crate::error::NemoError::Git(
-                                    format!("Failed to recreate branch {branch}: {e}")
-                                ))?;
+                                .map_err(|e| {
+                                    crate::error::NemoError::Git(format!(
+                                        "Failed to recreate branch {branch}: {e}"
+                                    ))
+                                })?;
                         }
                         _ => {
                             // No PR — safe to force-reset local and delete stale remote
                             let _ = self.run_git(&["push", "origin", "--delete", branch]).await;
                             self.run_git(&["branch", "-f", branch, &base_ref])
                                 .await
-                                .map_err(|e| crate::error::NemoError::Git(
-                                    format!("Failed to reset existing branch {branch}: {e}")
-                                ))?;
+                                .map_err(|e| {
+                                    crate::error::NemoError::Git(format!(
+                                        "Failed to reset existing branch {branch}: {e}"
+                                    ))
+                                })?;
                         }
                     }
                 }
@@ -211,14 +237,20 @@ pub mod bare {
             let worktree_dir = format!("/tmp/nemo-wt-{}", uuid::Uuid::new_v4());
             self.run_git(&["worktree", "add", &worktree_dir, branch])
                 .await
-                .map_err(|e| crate::error::NemoError::Git(format!(
-                    "Failed to create worktree for {branch}: {e}"
-                )))?;
+                .map_err(|e| {
+                    crate::error::NemoError::Git(format!(
+                        "Failed to create worktree for {branch}: {e}"
+                    ))
+                })?;
 
-            let result = self.write_file_in_worktree(&worktree_dir, path, content).await;
+            let result = self
+                .write_file_in_worktree(&worktree_dir, path, content)
+                .await;
 
             // Always clean up worktree regardless of success/failure
-            let _ = self.run_git(&["worktree", "remove", "--force", &worktree_dir]).await;
+            let _ = self
+                .run_git(&["worktree", "remove", "--force", &worktree_dir])
+                .await;
 
             result
         }
@@ -240,13 +272,19 @@ pub mod bare {
                 return None;
             }
 
-            let state = String::from_utf8_lossy(&output.stdout).trim().to_uppercase();
+            let state = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .to_uppercase();
             if state.is_empty() { None } else { Some(state) }
         }
 
         async fn remove_path(&self, branch: &str, path: &str) -> Result<()> {
             // Check if path exists in the branch before creating a worktree
-            if self.run_git(&["cat-file", "-e", &format!("{branch}:{path}")]).await.is_err() {
+            if self
+                .run_git(&["cat-file", "-e", &format!("{branch}:{path}")])
+                .await
+                .is_err()
+            {
                 // Path doesn't exist in the branch — nothing to remove
                 return Ok(());
             }
@@ -254,9 +292,11 @@ pub mod bare {
             let worktree_dir = format!("/tmp/nemo-wt-{}", uuid::Uuid::new_v4());
             self.run_git(&["worktree", "add", &worktree_dir, branch])
                 .await
-                .map_err(|e| crate::error::NemoError::Git(format!(
-                    "Failed to create worktree for {branch}: {e}"
-                )))?;
+                .map_err(|e| {
+                    crate::error::NemoError::Git(format!(
+                        "Failed to create worktree for {branch}: {e}"
+                    ))
+                })?;
 
             // git rm -rf the path
             let rm = Command::new("git")
@@ -268,28 +308,44 @@ pub mod bare {
 
             if !rm.status.success() {
                 let stderr = String::from_utf8_lossy(&rm.stderr).trim().to_string();
-                let _ = self.run_git(&["worktree", "remove", "--force", &worktree_dir]).await;
-                return Err(crate::error::NemoError::Git(format!("git rm {path} failed: {stderr}")));
+                let _ = self
+                    .run_git(&["worktree", "remove", "--force", &worktree_dir])
+                    .await;
+                return Err(crate::error::NemoError::Git(format!(
+                    "git rm {path} failed: {stderr}"
+                )));
             }
 
             // Commit the removal
             let commit = Command::new("git")
                 .args([
-                    "-c", "user.name=nemo-control-plane",
-                    "-c", "user.email=nemo@nemo.dev",
-                    "commit", "-m", &format!("chore(agent): remove {path} artifacts"),
+                    "-c",
+                    "user.name=nemo-control-plane",
+                    "-c",
+                    "user.email=nemo@nemo.dev",
+                    "commit",
+                    "-m",
+                    &format!("chore(agent): remove {path} artifacts"),
                 ])
                 .current_dir(&worktree_dir)
                 .output()
                 .await
-                .map_err(|e| crate::error::NemoError::Git(format!("git commit spawn failed: {e}")))?;
+                .map_err(|e| {
+                    crate::error::NemoError::Git(format!("git commit spawn failed: {e}"))
+                })?;
             if !commit.status.success() {
                 let stderr = String::from_utf8_lossy(&commit.stderr).trim().to_string();
-                let _ = self.run_git(&["worktree", "remove", "--force", &worktree_dir]).await;
-                return Err(crate::error::NemoError::Git(format!("git commit failed: {stderr}")));
+                let _ = self
+                    .run_git(&["worktree", "remove", "--force", &worktree_dir])
+                    .await;
+                return Err(crate::error::NemoError::Git(format!(
+                    "git commit failed: {stderr}"
+                )));
             }
 
-            let _ = self.run_git(&["worktree", "remove", "--force", &worktree_dir]).await;
+            let _ = self
+                .run_git(&["worktree", "remove", "--force", &worktree_dir])
+                .await;
             Ok(())
         }
 
@@ -324,11 +380,11 @@ pub mod bare {
             }
 
             // CI results present with failure indicators = definitively failed
-            let has_ci_results = stdout.contains("pass") || stdout.contains("fail")
-                || stdout.contains("pending") || stdout.contains("queued");
-            if has_ci_results
-                && (stdout.contains("fail") || stdout.contains("cancelled"))
-            {
+            let has_ci_results = stdout.contains("pass")
+                || stdout.contains("fail")
+                || stdout.contains("pending")
+                || stdout.contains("queued");
+            if has_ci_results && (stdout.contains("fail") || stdout.contains("cancelled")) {
                 Ok(Some(false))
             } else {
                 // Non-zero without clear CI failure = unknown (transient/pending)
@@ -340,9 +396,9 @@ pub mod bare {
             // Push branch to origin before creating PR
             self.run_git(&["push", "-u", "origin", branch])
                 .await
-                .map_err(|e| crate::error::NemoError::Git(format!(
-                    "Failed to push {branch} to origin: {e}"
-                )))?;
+                .map_err(|e| {
+                    crate::error::NemoError::Git(format!("Failed to push {branch} to origin: {e}"))
+                })?;
 
             // Check if a PR already exists for this branch (idempotent on retry)
             let existing = Command::new("gh")
@@ -360,7 +416,9 @@ pub mod bare {
             }
 
             let output = Command::new("gh")
-                .args(["pr", "create", "--head", branch, "--title", title, "--body", body])
+                .args([
+                    "pr", "create", "--head", branch, "--title", title, "--body", body,
+                ])
                 .current_dir(&self.repo_path)
                 .output()
                 .await
@@ -472,9 +530,10 @@ pub mod mock {
 
         async fn read_file(&self, path: &str, _git_ref: &str) -> Result<String> {
             let files = self.files.read().await;
-            files.get(path).cloned().ok_or_else(|| {
-                crate::error::NemoError::Git(format!("File not found: {path}"))
-            })
+            files
+                .get(path)
+                .cloned()
+                .ok_or_else(|| crate::error::NemoError::Git(format!("File not found: {path}")))
         }
 
         async fn fetch(&self) -> Result<()> {

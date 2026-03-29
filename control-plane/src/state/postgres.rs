@@ -274,12 +274,11 @@ impl StateStore for PgStateStore {
     }
 
     async fn get_loop_by_branch_any(&self, branch: &str) -> Result<Option<LoopRecord>> {
-        let row = sqlx::query(
-            "SELECT * FROM loops WHERE branch = $1 ORDER BY updated_at DESC LIMIT 1",
-        )
-        .bind(branch)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query("SELECT * FROM loops WHERE branch = $1 ORDER BY updated_at DESC LIMIT 1")
+                .bind(branch)
+                .fetch_optional(&self.pool)
+                .await?;
 
         row.as_ref().map(row_to_loop_record).transpose()
     }
@@ -311,18 +310,13 @@ impl StateStore for PgStateStore {
                 let q = format!(
                     "SELECT * FROM loops WHERE engineer = $1{terminal_filter} ORDER BY created_at DESC LIMIT 100"
                 );
-                sqlx::query(&q)
-                    .bind(eng)
-                    .fetch_all(&self.pool)
-                    .await?
+                sqlx::query(&q).bind(eng).fetch_all(&self.pool).await?
             }
             _ => {
                 let q = format!(
                     "SELECT * FROM loops WHERE true{terminal_filter} ORDER BY created_at DESC LIMIT 100"
                 );
-                sqlx::query(&q)
-                    .fetch_all(&self.pool)
-                    .await?
+                sqlx::query(&q).fetch_all(&self.pool).await?
             }
         };
 
@@ -527,11 +521,7 @@ impl StateStore for PgStateStore {
         Ok(rows.iter().map(row_to_log_event).collect())
     }
 
-    async fn get_logs_after(
-        &self,
-        loop_id: Uuid,
-        after: DateTime<Utc>,
-    ) -> Result<Vec<LogEvent>> {
+    async fn get_logs_after(&self, loop_id: Uuid, after: DateTime<Utc>) -> Result<Vec<LogEvent>> {
         let rows = sqlx::query(
             "SELECT * FROM log_events WHERE loop_id = $1 AND timestamp >= $2 ORDER BY timestamp ASC, id ASC",
         )
@@ -544,12 +534,10 @@ impl StateStore for PgStateStore {
     }
 
     async fn get_credentials(&self, engineer: &str) -> Result<Vec<EngineerCredential>> {
-        let rows = sqlx::query(
-            "SELECT * FROM engineer_credentials WHERE engineer = $1",
-        )
-        .bind(engineer)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query("SELECT * FROM engineer_credentials WHERE engineer = $1")
+            .bind(engineer)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(rows.iter().map(row_to_credential).collect())
     }

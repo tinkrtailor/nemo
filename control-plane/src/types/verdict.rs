@@ -311,7 +311,10 @@ mod tests {
     fn test_nemo_result_implement_roundtrip() {
         let data = ImplResultData {
             new_sha: "abc123def456".to_string(),
-            token_usage: TokenUsage { input: 10000, output: 2000 },
+            token_usage: TokenUsage {
+                input: 10000,
+                output: 2000,
+            },
             exit_code: 0,
             session_id: "sess-001".to_string(),
         };
@@ -339,7 +342,10 @@ mod tests {
             }],
             all_passed: true,
             ci_status: CiStatus::Passed,
-            token_usage: TokenUsage { input: 0, output: 0 },
+            token_usage: TokenUsage {
+                input: 0,
+                output: 0,
+            },
         };
         let result = NemoResult {
             stage: "test".to_string(),
@@ -357,7 +363,10 @@ mod tests {
     fn test_nemo_result_review_roundtrip() {
         let data = ReviewResultData {
             verdict: serde_json::json!({"clean": true, "summary": "looks good"}),
-            token_usage: TokenUsage { input: 5000, output: 1000 },
+            token_usage: TokenUsage {
+                input: 5000,
+                output: 1000,
+            },
             exit_code: 0,
             session_id: "sess-review-1".to_string(),
         };
@@ -376,7 +385,10 @@ mod tests {
         let data = ReviseResultData {
             revised_spec_path: "specs/feature/invoice-cancel.md".to_string(),
             new_sha: "def789".to_string(),
-            token_usage: TokenUsage { input: 8000, output: 1500 },
+            token_usage: TokenUsage {
+                input: 8000,
+                output: 1500,
+            },
             exit_code: 0,
             session_id: "sess-revise-1".to_string(),
         };
@@ -387,14 +399,26 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         let parsed: NemoResult = serde_json::from_str(&json).unwrap();
         let revise_data = parsed.as_revise_output().unwrap();
-        assert_eq!(revise_data.revised_spec_path, "specs/feature/invoice-cancel.md");
+        assert_eq!(
+            revise_data.revised_spec_path,
+            "specs/feature/invoice-cancel.md"
+        );
         assert_eq!(revise_data.new_sha, "def789");
     }
 
     #[test]
     fn test_ci_status_serialization() {
-        assert_eq!(serde_json::to_string(&CiStatus::Passed).unwrap(), "\"passed\"");
-        assert_eq!(serde_json::to_string(&CiStatus::Failed).unwrap(), "\"failed\"");
-        assert_eq!(serde_json::to_string(&CiStatus::Unknown).unwrap(), "\"unknown\"");
+        assert_eq!(
+            serde_json::to_string(&CiStatus::Passed).unwrap(),
+            "\"passed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CiStatus::Failed).unwrap(),
+            "\"failed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CiStatus::Unknown).unwrap(),
+            "\"unknown\""
+        );
     }
 }

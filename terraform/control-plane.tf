@@ -46,19 +46,15 @@ resource "kubernetes_deployment" "api_server" {
             container_port = 8080
           }
 
-          # FR-56: Database URL with K8s env var composition
+          # FR-56: Database URL from Secret (Finding 8: K8s does not shell-expand env refs)
           env {
-            name = "POSTGRES_PASSWORD"
+            name = "DATABASE_URL"
             value_from {
               secret_key_ref {
                 name = "nemo-postgres-credentials"
-                key  = "password"
+                key  = "DATABASE_URL"
               }
             }
-          }
-          env {
-            name  = "DATABASE_URL"
-            value = "postgres://nemo:$(POSTGRES_PASSWORD)@nemo-postgres:5432/nemo"
           }
           env {
             name = "NEMO_API_KEY"
@@ -178,17 +174,13 @@ resource "kubernetes_deployment" "loop_engine" {
           args = ["loop-engine"]
 
           env {
-            name = "POSTGRES_PASSWORD"
+            name = "DATABASE_URL"
             value_from {
               secret_key_ref {
                 name = "nemo-postgres-credentials"
-                key  = "password"
+                key  = "DATABASE_URL"
               }
             }
-          }
-          env {
-            name  = "DATABASE_URL"
-            value = "postgres://nemo:$(POSTGRES_PASSWORD)@nemo-postgres:5432/nemo"
           }
           env {
             name = "GIT_HOST_TOKEN"
@@ -242,6 +234,9 @@ resource "kubernetes_job" "repo_init" {
     kubernetes_persistent_volume_claim.bare_repo,
     kubernetes_config_map.cluster_config,
     kubernetes_config_map.ssh_known_hosts,
+    kubernetes_secret.repo_ssh_key,
+    # Finding 12: Wait for ssh-keyscan fallback to complete before fetching
+    null_resource.ssh_keyscan,
   ]
 
   metadata {

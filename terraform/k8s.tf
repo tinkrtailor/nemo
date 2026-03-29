@@ -22,7 +22,7 @@ resource "kubernetes_namespace" "jobs" {
   }
 }
 
-# FR-47: 100Gi PVC for shared bare repo
+# FR-47: 100Gi PVC for shared bare repo (in nemo-system, used by loop engine + repo-init)
 resource "kubernetes_persistent_volume_claim" "bare_repo" {
   depends_on = [kubernetes_namespace.system]
 
@@ -32,6 +32,26 @@ resource "kubernetes_persistent_volume_claim" "bare_repo" {
   }
   spec {
     access_modes = ["ReadWriteOnce"]
+    resources {
+      requests = {
+        storage = "100Gi"
+      }
+    }
+  }
+}
+
+# Finding 4: Separate PVC for agent jobs in nemo-jobs namespace.
+# PVCs are namespaced — jobs in nemo-jobs cannot mount PVCs from nemo-system.
+# The loop engine creates worktrees in nemo-system and the job reads/writes via this PVC.
+resource "kubernetes_persistent_volume_claim" "bare_repo_jobs" {
+  depends_on = [kubernetes_namespace.jobs]
+
+  metadata {
+    name      = "nemo-bare-repo"
+    namespace = "nemo-jobs"
+  }
+  spec {
+    access_modes = ["ReadWriteMany"]
     resources {
       requests = {
         storage = "100Gi"
@@ -58,7 +78,7 @@ resource "kubernetes_persistent_volume_claim" "sessions" {
   }
 }
 
-# FR-56: Postgres credentials Secret
+# FR-56: Postgres credentials Secret (Finding 8: store full DSN, not just password)
 resource "kubernetes_secret" "postgres_credentials" {
   depends_on = [kubernetes_namespace.system]
 
@@ -67,7 +87,8 @@ resource "kubernetes_secret" "postgres_credentials" {
     namespace = "nemo-system"
   }
   data = {
-    password = local.postgres_password
+    password     = local.postgres_password
+    DATABASE_URL = "postgres://nemo:${local.postgres_password}@nemo-postgres:5432/nemo"
   }
 }
 
@@ -140,6 +161,20 @@ resource "null_resource" "ssh_keyscan" {
         --dry-run=client -o yaml | \
         kubectl --kubeconfig ${local.kubeconfig_path} apply -f -
     EOT
+  }
+}
+
+# Finding 9: SSH key Secret for repo-init (and engineer bootstrap).
+# repo_init mounts nemo-repo-ssh-key — this must be created from user input.
+resource "kubernetes_secret" "repo_ssh_key" {
+  depends_on = [kubernetes_namespace.system]
+
+  metadata {
+    name      = "nemo-repo-ssh-key"
+    namespace = "nemo-system"
+  }
+  data = {
+    id_ed25519 = var.repo_ssh_private_key
   }
 }
 

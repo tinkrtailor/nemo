@@ -204,6 +204,10 @@ pub struct LoopContext {
     pub retry_count: u32,
     pub session_id: Option<String>,
     pub feedback_path: Option<String>,
+    /// Worktree sub-path relative to the bare-repo PVC root.
+    /// e.g., "worktrees/agent-alice-invoice-cancel-a1b2c3d4" — mounted via subPath
+    /// so the agent only sees its own worktree, not the shared bare repo.
+    pub worktree_path: String,
     /// Credential references keyed by provider (e.g., "claude" -> credential JSON).
     /// Injected into job pods so agents can authenticate with model APIs.
     #[serde(default)]
@@ -390,7 +394,11 @@ mod tests {
 
     #[test]
     fn test_generate_branch_name() {
-        let branch = generate_branch_name("alice", "specs/feature/invoice-cancel.md", "# Invoice Cancel Spec\n");
+        let branch = generate_branch_name(
+            "alice",
+            "specs/feature/invoice-cancel.md",
+            "# Invoice Cancel Spec\n",
+        );
         assert!(branch.starts_with("agent/alice/invoice-cancel-"));
         assert_eq!(branch.len(), "agent/alice/invoice-cancel-".len() + 8);
     }
@@ -488,7 +496,13 @@ mod tests {
 
     #[test]
     fn test_stage_roundtrip_through_db_name() {
-        for stage in [Stage::Implement, Stage::Test, Stage::Review, Stage::Audit, Stage::Revise] {
+        for stage in [
+            Stage::Implement,
+            Stage::Test,
+            Stage::Review,
+            Stage::Audit,
+            Stage::Revise,
+        ] {
             let db = stage.db_name();
             let parsed = Stage::from_db_name(db).unwrap();
             assert_eq!(parsed, stage);

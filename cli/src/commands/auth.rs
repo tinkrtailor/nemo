@@ -8,9 +8,7 @@ use crate::client::NemoClient;
 /// with the control plane so AWAITING_REAUTH loops can recover via `nemo resume`.
 pub async fn run(client: &NemoClient, engineer: &str, claude: bool, openai: bool) -> Result<()> {
     if engineer.is_empty() {
-        anyhow::bail!(
-            "Engineer name not configured. Run: nemo config --set engineer=<your-name>"
-        );
+        anyhow::bail!("Engineer name not configured. Run: nemo config --set engineer=<your-name>");
     }
 
     let providers: Vec<&str> = match (claude, openai) {
@@ -51,13 +49,18 @@ pub async fn run(client: &NemoClient, engineer: &str, claude: bool, openai: bool
             }
         };
         if serde_json::from_str::<serde_json::Value>(&content).is_err() {
-            eprintln!("Error: {provider} credentials at {cred_path} are not valid JSON (corrupted?)");
+            eprintln!(
+                "Error: {provider} credentials at {cred_path} are not valid JSON (corrupted?)"
+            );
             any_error = true;
             continue;
         }
 
         // Register credentials with the control plane (send content, not path)
-        match client.register_credentials(engineer, provider, &content).await {
+        match client
+            .register_credentials(engineer, provider, &content)
+            .await
+        {
             Ok(()) => {
                 println!("Registered {provider} credentials with control plane");
                 any_registered = true;

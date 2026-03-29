@@ -310,7 +310,7 @@ var allowedGitCommands = map[string]bool{
 	"git-receive-pack": true,
 }
 
-func startGitProxy(ctx context.Context, gitRemoteHost string) error {
+func startGitProxy(ctx context.Context, gitRemoteHost string, allowedRepoPath string) error {
 	// Generate an ephemeral host key for the local SSH server.
 	_, hostPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -346,14 +346,14 @@ func startGitProxy(ctx context.Context, gitRemoteHost string) error {
 				logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("git proxy accept error: %v", err))
 				continue
 			}
-			go handleSSHConnection(conn, config, gitRemoteHost)
+			go handleSSHConnection(conn, config, gitRemoteHost, allowedRepoPath)
 		}
 	}()
 
 	return nil
 }
 
-func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, gitRemoteHost string) {
+func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, gitRemoteHost string, allowedRepoPath string) {
 	defer nConn.Close()
 
 	// Perform SSH handshake with the agent
@@ -379,11 +379,11 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, gitRemoteHost
 			continue
 		}
 
-		go handleSSHSession(channel, requests, gitRemoteHost)
+		go handleSSHSession(channel, requests, gitRemoteHost, allowedRepoPath)
 	}
 }
 
-func handleSSHSession(channel ssh.Channel, requests <-chan *ssh.Request, gitRemoteHost string) {
+func handleSSHSession(channel ssh.Channel, requests <-chan *ssh.Request, gitRemoteHost string, allowedRepoPath string) {
 	defer channel.Close()
 
 	for req := range requests {
@@ -410,6 +410,21 @@ func handleSSHSession(channel ssh.Channel, requests <-chan *ssh.Request, gitRemo
 				req.Reply(false, nil)
 				channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
 				continue
+			}
+
+			// Finding 6: Validate repo path matches configured GIT_REPO_URL
+			if allowedRepoPath != "" && len(cmdParts) == 2 {
+				requestedRepo := strings.Trim(cmdParts[1], "' \"")
+				requestedRepo = strings.TrimPrefix(requestedRepo, "/")
+				normalizedAllowed := strings.TrimPrefix(allowedRepoPath, "/")
+				if requestedRepo != normalizedAllowed {
+					logJSON("NEMO_SIDECAR", "warn", fmt.Sprintf(
+						"rejected git command: repo path %q does not match allowed %q",
+						requestedRepo, normalizedAllowed))
+					req.Reply(false, nil)
+					channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
+					continue
+				}
 			}
 
 			logJSON("NEMO_SIDECAR", "info", fmt.Sprintf("proxying git command: %s to %s", cmdName, gitRemoteHost))
@@ -455,12 +470,43 @@ func proxyGitCommand(channel ssh.Channel, command string, gitRemoteHost string) 
 	}
 
 	// Connect to the real git remote
+	// Finding 7: Use known_hosts file instead of InsecureIgnoreHostKey
+	hostKeyCallback := ssh.InsecureIgnoreHostKey() // fallback if no known_hosts
+	knownHostsPath := "/secrets/ssh-known-hosts/known_hosts"
+	if _, err := os.Stat(knownHostsPath); err == nil {
+		// Parse known_hosts manually for host key verification
+		khData, readErr := os.ReadFile(knownHostsPath)
+		if readErr == nil && len(khData) > 0 {
+			hostKeyCallback = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+				// Parse each line of known_hosts
+				remaining := khData
+				for len(remaining) > 0 {
+					_, hosts, pubKey, _, rest, parseErr := ssh.ParseKnownHosts(remaining)
+					if parseErr != nil {
+						remaining = rest
+						continue
+					}
+					remaining = rest
+					for _, h := range hosts {
+						// Match hostname (with or without port)
+						if h == hostname || h == strings.Split(hostname, ":")[0] {
+							if key.Type() == pubKey.Type() && string(key.Marshal()) == string(pubKey.Marshal()) {
+								return nil
+							}
+						}
+					}
+				}
+				return fmt.Errorf("host key verification failed for %s", hostname)
+			}
+		}
+	}
+
 	clientConfig := &ssh.ClientConfig{
 		User: "git",
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signer),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Known hosts checked at cluster level
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         10 * time.Second,
 	}
 
@@ -500,24 +546,43 @@ func proxyGitCommand(channel ssh.Channel, command string, gitRemoteHost string) 
 	channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{exitCode}))
 }
 
-// Extract git host from a git URL.
-func extractGitHost(gitURL string) string {
+// gitRemoteInfo holds parsed git remote details for SSH proxy validation.
+type gitRemoteInfo struct {
+	host     string
+	repoPath string // e.g., "user/repo.git" or "/user/repo.git"
+}
+
+// extractGitRemote parses host and repo path from a git URL.
+func extractGitRemote(gitURL string) gitRemoteInfo {
 	// Handle SSH-style URLs: git@github.com:user/repo.git
 	if strings.Contains(gitURL, "@") && strings.Contains(gitURL, ":") && !strings.Contains(gitURL, "://") {
 		parts := strings.SplitN(gitURL, "@", 2)
 		if len(parts) == 2 {
-			hostPart := strings.SplitN(parts[1], ":", 2)
-			return hostPart[0]
+			hostAndPath := strings.SplitN(parts[1], ":", 2)
+			host := hostAndPath[0]
+			repoPath := ""
+			if len(hostAndPath) == 2 {
+				repoPath = hostAndPath[1]
+			}
+			return gitRemoteInfo{host: host, repoPath: repoPath}
 		}
 	}
 
 	// Handle HTTPS URLs
 	parsed, err := url.Parse(gitURL)
 	if err == nil && parsed.Host != "" {
-		return parsed.Hostname()
+		return gitRemoteInfo{
+			host:     parsed.Hostname(),
+			repoPath: strings.TrimPrefix(parsed.Path, "/"),
+		}
 	}
 
-	return "github.com" // fallback
+	return gitRemoteInfo{host: "github.com"} // fallback
+}
+
+// extractGitHost returns just the host portion (backward compat).
+func extractGitHost(gitURL string) string {
+	return extractGitRemote(gitURL).host
 }
 
 // --- Structured logging helper (NFR-8) ---
@@ -539,10 +604,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Extract git remote host from environment
+	// Extract git remote host and repo path from environment
 	gitRepoURL := os.Getenv("GIT_REPO_URL")
-	gitHost := extractGitHost(gitRepoURL)
-	logJSON("NEMO_SIDECAR", "info", fmt.Sprintf("git remote host: %s", gitHost))
+	remote := extractGitRemote(gitRepoURL)
+	logJSON("NEMO_SIDECAR", "info", fmt.Sprintf("git remote host: %s, allowed repo: %s", remote.host, remote.repoPath))
 
 	// Start all three servers
 
@@ -576,7 +641,7 @@ func main() {
 	}()
 
 	// FR-18: Git SSH proxy on :9091
-	if err := startGitProxy(ctx, gitHost); err != nil {
+	if err := startGitProxy(ctx, remote.host, remote.repoPath); err != nil {
 		log.Fatalf("git proxy error: %v", err)
 	}
 

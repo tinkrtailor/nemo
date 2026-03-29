@@ -162,13 +162,13 @@ pub mod memory {
         async fn create_loop(&self, record: &LoopRecord) -> Result<LoopRecord> {
             let mut loops = self.loops.write().await;
             // Enforce unique active branch constraint (mirrors Postgres partial unique index)
-            let has_active = loops.values().any(|l| {
-                l.branch == record.branch && !l.state.is_terminal()
-            });
+            let has_active = loops
+                .values()
+                .any(|l| l.branch == record.branch && !l.state.is_terminal());
             if has_active {
-                return Err(crate::error::NemoError::Database(
-                    sqlx::Error::Database(Box::new(MemoryUniqueViolation)),
-                ));
+                return Err(crate::error::NemoError::Database(sqlx::Error::Database(
+                    Box::new(MemoryUniqueViolation),
+                )));
             }
             loops.insert(record.id, record.clone());
             Ok(record.clone())

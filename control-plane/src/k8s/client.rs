@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, DeleteParams, ListParams, PostParams};
 use kube::Client;
+use kube::api::{Api, DeleteParams, ListParams, PostParams};
 
 use super::{JobDispatcher, JobStatus};
 use crate::error::Result;

@@ -38,6 +38,18 @@ variable "git_host_token" {
   sensitive   = true
 }
 
+variable "repo_ssh_private_key" {
+  description = "SSH private key for git repo access (used by repo-init and sidecar). PEM format."
+  type        = string
+  sensitive   = true
+}
+
+variable "ssh_private_key_path" {
+  description = "Path to SSH private key for Hetzner server provisioning"
+  type        = string
+  default     = "~/.ssh/id_ed25519"
+}
+
 # FR-52: Optional input variables
 
 variable "server_type" {
