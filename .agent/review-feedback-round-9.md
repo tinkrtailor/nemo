@@ -1,17 +1,9 @@
-# Adversarial Review: Round 9 (OpenCode GPT-5.4)
+Read all 35 Rust source files under `control-plane/src` and `cli/src`. Read-only result: not CLEAN, not converged.
 
-6 findings.
-
-## FINDINGS
-
-N31. **CRITICAL** - harden_only requests never set record.harden = true, but driver only runs hardening when that flag is true. Harden-only submission skips hardening entirely (handlers.rs:61, driver.rs:80). Fix: set harden = true when harden_only = true in the /start handler.
-
-N32. **HIGH** - Feedback rounds commit a file and advance branch tip, but record.current_sha not refreshed. Next divergence check sees stale SHA and falsely pauses the loop (driver.rs:150, 888). Fix: after write_file commits, update record.current_sha to the new branch tip.
-
-N33. **HIGH** - NemoConfig::load() only checks NEMO_CONFIG_PATH or /etc/nemo/nemo.toml. Repo-local nemo.toml ignored (config/mod.rs:21). Fix: also check ./nemo.toml or load repo config path from a separate mechanism.
-
-N34. **HIGH** - nemo auth exits successfully even when no credential file exists or all uploads fail (auth.rs:22). Fix: check file existence before upload, propagate upload errors, exit non-zero on failure.
-
-N35. **MEDIUM** - Fresh config defaults engineer to empty string. Multiple commands use it without validation (config.rs:23, main.rs:184). Fix: validate engineer is non-empty at CLI startup for commands that need it.
-
-N36. **MEDIUM** - Engineer name interpolated into query string without URL encoding (status.rs:24). Fix: use url::form_urlencoded or percent-encode the value.
+- High — `control-plane/src/k8s/client.rs:123` + `control-plane/src/loop_engine/driver.rs:265` + `control-plane/src/loop_engine/driver.rs:588` + `control-plane/src/loop_engine/driver.rs:765` swallow pod log retrieval errors as empty output, so a job that actually succeeded can be retried or failed as “no output”; this can duplicate implement/review/test runs and duplicate PR/commit attempts.
+- High — `control-plane/src/config/mod.rs:45` treats an explicit `NEMO_CONFIG_PATH` pointing to a missing file the same as “no config found” and silently falls back to defaults, so a bad mount/path typo can boot the control plane against wrong/default settings.
+- High — `control-plane/src/api/auth.rs:12` returns `500` on every authenticated request when `NEMO_API_KEY` is unset, instead of failing fast at startup; bad secret injection becomes total API outage with poor diagnosis.
+- Medium — `control-plane/src/api/auth.rs:22` only accepts exact `Bearer ` casing; valid lowercase `bearer` auth schemes are rejected even though the scheme is case-insensitive per HTTP auth rules.
+- Medium — `control-plane/src/api/handlers.rs:410` derives K8s secret names from `engineer` using only lowercase + `_` replacement, so names with spaces, slashes, or other DNS-invalid chars fail at runtime with server error instead of request validation.
+- Medium — `cli/src/commands/config.rs:5` uses `load_config().unwrap_or_default()` for `--set`, so a malformed existing config gets silently replaced by defaults plus the one edited key, dropping unrelated settings like `server_url` and `api_key`.
+- Medium — `cli/src/config.rs:57` writes `~/.nemo/config.toml` before chmodding it to `0600`, leaving a brief window where a newly created config containing `api_key` can be world-readable under common umasks.

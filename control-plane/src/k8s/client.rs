@@ -136,7 +136,15 @@ impl JobDispatcher for KubeJobDispatcher {
             }
         }
 
-        Ok(String::new())
+        if pod_list.items.is_empty() {
+            // No pods found — job may have been cleaned up already
+            Ok(String::new())
+        } else {
+            // Pods exist but all log retrievals failed
+            Err(crate::error::NemoError::Internal(format!(
+                "Failed to retrieve logs from any pod for job {name}"
+            )))
+        }
     }
 }
 

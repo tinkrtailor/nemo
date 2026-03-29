@@ -407,9 +407,14 @@ pub async fn upsert_credentials(
     State(state): State<AppState>,
     Json(req): Json<CredentialRequest>,
 ) -> Result<impl IntoResponse, NemoError> {
-    if req.engineer.is_empty() {
+    if req.engineer.is_empty()
+        || !req
+            .engineer
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(NemoError::BadRequest(
-            "engineer field is required".to_string(),
+            "engineer must be non-empty and contain only alphanumeric, hyphen, or underscore characters".to_string(),
         ));
     }
 

@@ -2,10 +2,21 @@ use anyhow::Result;
 
 /// Edit ~/.nemo/config.toml.
 pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
-    // For --set, try loading existing config but fall back to defaults if
-    // the file is malformed. This ensures `nemo config --set` can repair a
-    // broken config file.
-    let config = crate::config::load_config().unwrap_or_default();
+    // Try loading existing config. For --set, fall back to defaults with a
+    // warning if the file is malformed, so users can repair with --set.
+    // For --get and display, propagate the error.
+    let config = match crate::config::load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            if set.is_some() {
+                eprintln!("Warning: existing config is malformed ({e}), starting from defaults");
+                eprintln!("Other settings may be lost. Re-set them after this operation.");
+                crate::config::EngineerConfig::default()
+            } else {
+                return Err(e);
+            }
+        }
+    };
 
     if let Some(key) = get {
         match key.as_str() {

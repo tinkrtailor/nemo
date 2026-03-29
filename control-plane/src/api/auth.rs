@@ -20,7 +20,7 @@ pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, S
         .and_then(|v| v.to_str().ok());
 
     match auth_header {
-        Some(header) if header.starts_with("Bearer ") => {
+        Some(header) if header.len() > 7 && header[..7].eq_ignore_ascii_case("bearer ") => {
             let api_key = &header[7..];
             if api_key.is_empty() {
                 return Err(StatusCode::UNAUTHORIZED);

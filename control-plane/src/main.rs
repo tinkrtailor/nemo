@@ -28,6 +28,11 @@ async fn main() -> anyhow::Result<()> {
     let config = NemoConfig::load().map_err(|e| anyhow::anyhow!(e))?;
     let config_arc = Arc::new(config.clone());
 
+    // Fail fast if NEMO_API_KEY is not set — better than 500 on every request
+    if std::env::var("NEMO_API_KEY").is_err() {
+        anyhow::bail!("NEMO_API_KEY environment variable is required");
+    }
+
     // Connect to Postgres and run migrations
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| config.cluster.database_url.clone());

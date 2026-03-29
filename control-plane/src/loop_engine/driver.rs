@@ -262,11 +262,18 @@ impl ConvergentLoopDriver {
         // The entrypoint wraps all stage output with NEMO_RESULT: prefix.
         let job_name = record.active_job_name.as_deref().unwrap_or("unknown");
         let namespace = &self.config.cluster.jobs_namespace;
-        let logs = self
-            .dispatcher
-            .get_job_logs(job_name, namespace)
-            .await
-            .unwrap_or_default();
+        let logs = match self.dispatcher.get_job_logs(job_name, namespace).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(
+                    loop_id = %record.id,
+                    job_name = job_name,
+                    error = %e,
+                    "Failed to retrieve pod logs — cannot determine job output"
+                );
+                return Err(e);
+            }
+        };
 
         let verdict_json = Self::extract_nemo_result(&logs);
         if verdict_json.is_none() {

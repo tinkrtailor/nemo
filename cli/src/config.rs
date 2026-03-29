@@ -49,20 +49,37 @@ pub fn load_config() -> Result<EngineerConfig> {
 }
 
 /// Save the engineer config.
+/// Writes atomically via temp file to avoid a window where the file is world-readable.
 pub fn save_config(config: &EngineerConfig) -> Result<()> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let contents = toml::to_string_pretty(config)?;
-    std::fs::write(&path, contents)?;
 
-    // Restrict permissions to owner-only (0600) since file may contain API keys
+    // Write to a temp file with restricted permissions first, then rename.
+    // This avoids a window where the file exists with default umask permissions.
+    let tmp_path = path.with_extension("toml.tmp");
+
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        file.write_all(contents.as_bytes())?;
     }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&tmp_path, &contents)?;
+    }
+
+    std::fs::rename(&tmp_path, &path)?;
 
     Ok(())
 }
