@@ -203,12 +203,19 @@ pub mod bare {
                                 })?;
                         }
                         _ => {
-                            // PR state unknown (could be transient gh failure) — don't
-                            // force-reset. Just reuse the existing branch as-is.
-                            tracing::info!(
-                                branch = branch,
-                                "Branch exists with unknown PR state, reusing as-is"
-                            );
+                            // No PR found — branch is leftover from a previous terminal
+                            // run. Reset to base so we start clean. (If this was a
+                            // transient gh failure, worst case we lose uncommitted
+                            // branch state — but stale artifacts are worse.)
+                            let _ = self.run_git(&["branch", "-D", branch]).await;
+                            let _ = self.run_git(&["push", "origin", "--delete", branch]).await;
+                            self.run_git(&["branch", branch, &base_ref])
+                                .await
+                                .map_err(|e| {
+                                    crate::error::NemoError::Git(format!(
+                                        "Failed to recreate branch {branch}: {e}"
+                                    ))
+                                })?;
                         }
                     }
                 }

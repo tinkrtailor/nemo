@@ -38,25 +38,35 @@ pub async fn run(
     for provider in &providers {
         let cred_path = match *provider {
             "claude" => {
-                // Claude Code stores API keys, not session files
+                // Claude Code credential paths (checked in priority order)
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
                 let config_dir =
                     std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{home}/.config"));
-                // Try the standard API key location first, fall back to legacy
-                let primary = format!("{config_dir}/claude-code/credentials.json");
-                let legacy = format!("{home}/.claude/credentials.json");
-                if std::path::Path::new(&primary).exists() {
-                    primary
-                } else {
-                    legacy
-                }
+                let candidates = [
+                    format!("{home}/.claude/.credentials.json"), // claude-worktree convention
+                    format!("{config_dir}/claude-code/credentials.json"), // XDG standard
+                    format!("{home}/.claude/credentials.json"),  // legacy
+                ];
+                candidates
+                    .iter()
+                    .find(|p| std::path::Path::new(p).exists())
+                    .cloned()
+                    .unwrap_or_else(|| candidates[0].clone())
             }
             "openai" => {
-                // OpenAI stores API key in environment or config file
+                // OpenCode / OpenAI credential paths (checked in priority order)
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
                 let config_dir =
                     std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{home}/.config"));
-                format!("{config_dir}/openai/credentials.json")
+                let candidates = [
+                    format!("{config_dir}/opencode/credentials.json"), // opencode reviewer auth
+                    format!("{config_dir}/openai/credentials.json"),   // direct OpenAI
+                ];
+                candidates
+                    .iter()
+                    .find(|p| std::path::Path::new(p).exists())
+                    .cloned()
+                    .unwrap_or_else(|| candidates[0].clone())
             }
             "ssh" => {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());

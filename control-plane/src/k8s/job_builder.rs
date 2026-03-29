@@ -342,7 +342,8 @@ fn build_volumes(
             }),
             ..Default::default()
         },
-        // FR-26: SSH key Secret for sidecar only
+        // FR-26: SSH key Secret for sidecar only. Optional so pods start even
+        // if only model creds are registered (no SSH key yet).
         Volume {
             name: "ssh-key".to_string(),
             secret: Some(SecretVolumeSource {
@@ -353,7 +354,7 @@ fn build_volumes(
                     ..Default::default()
                 }]),
                 default_mode: Some(0o600),
-                ..Default::default()
+                optional: Some(true),
             }),
             ..Default::default()
         },
@@ -441,6 +442,9 @@ fn build_sidecar_mounts() -> Vec<VolumeMount> {
 /// FR-41a: Init container for iptables network egress enforcement.
 fn build_init_iptables_container() -> Container {
     let script = r#"set -e
+# Install iptables (not shipped with Alpine by default)
+apk add --no-cache iptables
+
 # IPv6: disable entirely in V1
 sysctl -w net.ipv6.conf.all.disable_ipv6=1
 sysctl -w net.ipv6.conf.default.disable_ipv6=1

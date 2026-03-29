@@ -452,10 +452,15 @@ pub async fn upsert_credentials(
             }
             Err(_) => (std::collections::BTreeMap::new(), None),
         };
-        data.insert(
-            secret_key.to_string(),
-            k8s_openapi::ByteString(api_key.into_bytes()),
-        );
+        if req.valid {
+            data.insert(
+                secret_key.to_string(),
+                k8s_openapi::ByteString(api_key.into_bytes()),
+            );
+        } else {
+            // Invalidated credentials: remove the key so pods can't use stale secrets
+            data.remove(secret_key);
+        }
 
         let secret = k8s_openapi::api::core::v1::Secret {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
