@@ -219,11 +219,14 @@ resource "null_resource" "ssh_keyscan" {
     command = <<-EOT
       GITHOST=$(echo "${var.git_repo_url}" | sed -E 's/.*@([^:]+):.*/\1/' | sed -E 's|https?://([^/]+).*|\1|')
       KNOWN_HOSTS=$(ssh-keyscan "$GITHOST" 2>/dev/null)
-      kubectl --kubeconfig ${local.kubeconfig_path} -n nemo-system \
-        create configmap nemo-ssh-known-hosts \
-        --from-literal="known_hosts=$KNOWN_HOSTS" \
-        --dry-run=client -o yaml | \
-        kubectl --kubeconfig ${local.kubeconfig_path} apply -f -
+      # Update in both namespaces so repo-init (nemo-system) and agent jobs (nemo-jobs) get it
+      for NS in nemo-system nemo-jobs; do
+        kubectl --kubeconfig ${local.kubeconfig_path} -n "$NS" \
+          create configmap nemo-ssh-known-hosts \
+          --from-literal="known_hosts=$KNOWN_HOSTS" \
+          --dry-run=client -o yaml | \
+          kubectl --kubeconfig ${local.kubeconfig_path} apply -f -
+      done
     EOT
   }
 }

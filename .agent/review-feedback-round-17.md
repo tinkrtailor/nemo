@@ -1,11 +1,9 @@
-# Adversarial Review: Round 17 (OpenCode GPT-5.4, read-only)
+Inspecting current Lane C diff and recent commits to review only the changes in scope.
+Worktree is clean aside from an untracked local sandbox file. Reviewing the branch delta from `main` and the latest fix commit for any remaining issues.
+Found one likely regression in the round-16 Terraform fix. Verifying how the jobs namespace consumes `nemo-ssh-known-hosts` before finalizing.
+1. High: the new `nemo-jobs` copy of `nemo-ssh-known-hosts` is never populated by the `ssh-keyscan` fallback, so the exact case this fix was meant to cover still breaks agent pods when `var.ssh_known_hosts` is empty. `terraform/k8s.tf:200` creates the jobs-namespace ConfigMap from `var.ssh_known_hosts`, but `terraform/k8s.tf:213` only runs `kubectl ... -n nemo-system apply -f -`, leaving `nemo-jobs/nemo-ssh-known-hosts` empty. Since job pods mount that ConfigMap for sidecar host-key verification (`control-plane/src/k8s/job_builder.rs:362`), SSH git access from agent jobs still fails in the fallback path.
 
-3 findings.
+Not converged.
 
-## FINDINGS
-
-N59. **HIGH** - PR creation not idempotent. If anything after create_pr() fails, next tick retries gh pr create, gets "PR already exists", treats as retryable error, loops forever (driver.rs:525, git/mod.rs:288, error.rs:66). Fix: check if PR already exists before creating. If it does, retrieve the PR URL and continue. Or: make "PR already exists" a non-retryable success, not an error.
-
-N60. **HIGH** - AWAITING_REAUTH recovery broken. nemo auth stores credentials but resumed jobs never read/mount/inject them into pods. build_job() only passes loop metadata (driver.rs:687, job_builder.rs:36, handlers.rs:397). Fix: build_job must read the engineer's credential_ref from the DB and mount it as a volume/env var in the job pod spec.
-
-N61. **MEDIUM** - Branch name collision across engineers after slug normalization. Hash only uses spec path/content, not engineer name. "Alice" and "alice" produce the same branch (types/mod.rs:232, handlers.rs:42). Fix: include the raw (pre-slugified) engineer name in the hash input, not the slugified version.
+Assumptions:
+- `.claude/.sandbox-claude.json` is a local untracked file and out of scope for review.
