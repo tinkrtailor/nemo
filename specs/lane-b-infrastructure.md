@@ -25,7 +25,7 @@ Postgres schema, git operations, and config loading for the Nemo control plane. 
 - FR-4: The `egress_logs` table shall store all outbound network traffic logged by the auth sidecar, linked to the originating job.
 - FR-4a: The `log_events` table shall store structured log events (id, loop_id, timestamp, stage, round, level, message) persisted from pod logs by the loop engine. This is the source for `GET /logs/:id`.
 - FR-4b: The `engineer_credentials` table shall store per-engineer, per-provider credential references (id, engineer_id, provider, credential_ref, valid, created_at, updated_at). Unique on `(engineer_id, provider)`. The `credential_ref` is always `nemo-creds-{engineer}` (one K8s Secret per engineer). The `provider` (`claude`, `openai`, or `ssh`) maps to a key within that Secret. Secret keys: `claude` (contains `~/.claude/` session data), `openai` (contains opencode auth data), `ssh` (contains the engineer's SSH private key, read from `~/.ssh/id_ed25519` or a configured path). Mount paths in sidecar: `/secrets/model-credentials/` (directory, files named by provider key for `claude` and `openai`), `/secrets/ssh-key/` (mounted from the same Secret's `ssh` key).
-- FR-4c: The `cluster_credentials` table shall store cluster-level credentials used by the control plane itself (id, type [`api_key`, `mtls_cert`, `git_host_token`], credential_ref pointing to a K8s Secret, description, created_at). These are not per-engineer credentials; they are cluster-wide (e.g., `NEMO_API_KEY` for CLI authentication, `GIT_HOST_TOKEN` GitHub PAT for PR creation/merge operations). The control plane reads these on startup to configure API auth and git host integration.
+- FR-4c: The `cluster_credentials` table shall store cluster-level credentials used by the control plane itself (id, type [`api_key`, `git_host_token`], credential_ref pointing to a K8s Secret, description, created_at). These are not per-engineer credentials; they are cluster-wide (e.g., `NEMO_API_KEY` for CLI authentication, `GIT_HOST_TOKEN` GitHub PAT for PR creation/merge operations). The control plane reads these on startup to configure API auth and git host integration. V1 uses API key auth only (mTLS deferred to V2).
 - FR-5: All schema changes shall be managed via `sqlx migrate` with sequential, timestamped migration files checked into the repo.
 - FR-5a: Migrations shall run as a separate K8s Job (`helm.sh/hook: pre-upgrade`) BEFORE either API server or loop engine Deployment starts. Both binaries verify schema version on startup but do not run migrations themselves. This ensures schema consistency across split deployments.
 - FR-6: The schema shall enforce referential integrity: jobs reference loops, loops reference engineers, egress_logs reference jobs, log_events reference loops, engineer_credentials reference engineers.
@@ -291,7 +291,7 @@ CREATE TRIGGER trg_engineer_credentials_updated_at
 -- Cluster-level credentials for control plane operations (API auth, git host tokens).
 -- These are NOT per-engineer; they are cluster-wide credentials used by the control
 -- plane itself (e.g., to create/merge PRs, authenticate CLI requests).
-CREATE TYPE credential_type AS ENUM ('api_key', 'mtls_cert', 'git_host_token');
+CREATE TYPE credential_type AS ENUM ('api_key', 'git_host_token');  -- mTLS deferred to V2
 
 CREATE TABLE cluster_credentials (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -494,8 +494,34 @@ pub struct ClusterConfig {
 }
 
 #[derive(Deserialize)]
+pub struct RepoMeta {
+    pub name: String,
+    pub default_branch: String,
+}
+
+#[derive(Deserialize)]
+pub struct ModelConfig {
+    pub implementor: Option<String>,
+    pub reviewer: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct LimitsConfig {
+    pub max_rounds_harden: Option<u32>,
+    pub max_rounds_implement: Option<u32>,
+    pub max_concurrent_test_jvm: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct ServiceConfig {
+    pub path: String,
+    pub test: String,
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
 pub struct RepoConfig {
-    pub repo: RepoMeta,        // name, default_branch
+    pub repo: RepoMeta,
     pub models: Option<ModelConfig>,
     pub limits: Option<LimitsConfig>,
     pub services: HashMap<String, ServiceConfig>,
@@ -705,6 +731,8 @@ This was the #1 systemic bug pattern in Lane A (round 19: 8 call sites created K
 - Partial clone / shallow clone optimizations
 - Config hot-reload without control plane restart (V2)
 - Postgres replication or HA (single-node V1)
+- GitLab support (V1 is GitHub only via `gh` CLI and GitHub PAT; GitLab deferred to V2)
+- mTLS authentication (V1 is API key only; mTLS deferred to V2)
 - `nemo init` for polyglot monorepos with nested build systems beyond the configured depth
 
 ## Acceptance Criteria

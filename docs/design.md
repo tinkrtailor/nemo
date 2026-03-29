@@ -147,7 +147,7 @@ Other commands:
 - `nemo init` -- scan monorepo, detect services, generate starter `nemo.toml`. Engineer reviews and commits.
 - `nemo auth` -- pipe local model credentials (Claude Max session, OpenAI Pro tokens) to the control plane. Stored as K8s secrets scoped to the engineer. The engineer extends their own subscription into the cluster, same model as local worktrees.
 - `nemo config` -- configure personal model preferences, review thresholds (writes `~/.nemo/config.toml`)
-- Auth: API key or mTLS to control plane
+- Auth: API key to control plane (mTLS deferred to V2)
 
 ### Configuration Layers
 
@@ -461,7 +461,7 @@ The review job outputs a JSON file at `.agent/review-verdict.json`:
 
 ## Open Questions
 
-1. **Model credentials: solved.** Claude Code runs headless via `claude --print --output-format stream-json` with Max subscription auth (mounted `~/.claude/` via K8s secrets into auth sidecar). No tmux needed. `nemo auth` copies credentials into K8s secrets scoped to the engineer. Auth sidecar proxies model API calls (injects auth) so the agent container never sees raw credentials. **Fallback:** API keys (Anthropic API + OpenAI API) for teams that prefer direct API access over subscription piping.
+1. **Model credentials: solved.** Claude Code runs headless via `claude --print --output-format stream-json` with Max subscription auth. The `~/.claude/` session directory is mounted from a K8s Secret directly into the agent container's HOME (`/work/home/.claude/`). Claude Code reads its own session auth and connects directly to `api.anthropic.com`. The sidecar model proxy (`:9090`) is used only for OpenAI (injects `Authorization: Bearer` header for opencode). `nemo auth` copies credentials into K8s secrets scoped to the engineer. **Fallback:** API keys (Anthropic API + OpenAI API) for teams that prefer direct API access over subscription piping.
 2. **Cost tracking**: Token usage per loop, per engineer, per day. The review verdict schema includes `token_usage`. The control plane should aggregate this. Where does cost data surface? Dashboard? CLI? Daily email?
 3. **Spec format**: Do existing specs in `specs/` work as-is, or does the system need a wrapper format with metadata (target services, test commands, review thresholds, max rounds)?
 4. **Network security: solved.** Auth sidecar architecture. Agent containers get open internet (for docs, deps, research) but NO mounted secrets. Model API auth and git push proxy through a sidecar container (localhost:9090, :9091). Sidecar also runs a transparent egress logger (:9092) that logs all outbound traffic from the agent container for audit. Secrets never touch the agent container's filesystem. Malicious code can reach the internet but has nothing to exfiltrate.

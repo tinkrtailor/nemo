@@ -18,7 +18,7 @@ and the three specs (`lane-a-core-loop.md`, `lane-b-infrastructure.md`,
                           |   ~/.claude/ (credentials)|
                           +------------+--------------+
                                        |
-                                       | HTTPS / mTLS
+                                       | HTTPS (API key auth)
                                        |
            ============================|==============================
            |           k3s Cluster (Hetzner CCX43)                   |
@@ -74,8 +74,8 @@ and the three specs (`lane-a-core-loop.md`, `lane-b-infrastructure.md`,
                         |               |               |
                +--------v---+  +--------v---+  +--------v--------+
                | Git Remote |  | Anthropic  |  | OpenAI          |
-               | (GitHub /  |  | API        |  | API             |
-               | GitLab)    |  | api.       |  | api.openai.com  |
+               | (GitHub)   |  | API        |  | API             |
+               |            |  | api.       |  | api.openai.com  |
                |            |  | anthropic. |  |                 |
                +------------+  | com        |  +-----------------+
                                +------------+
@@ -83,7 +83,7 @@ and the three specs (`lane-a-core-loop.md`, `lane-b-infrastructure.md`,
 
 **Key network flows:**
 
-- `nemo CLI` --> `API Server`: HTTPS/mTLS (submit, status, cancel, approve)
+- `nemo CLI` --> `API Server`: HTTPS with API key auth (submit, status, cancel, approve)
 - `API Server` <--> `Postgres`: SQL reads/writes (shared state)
 - `Loop Engine` <--> `Postgres`: SQL reads/writes (state machine transitions)
 - `Loop Engine` --> `K8s API`: Job create/delete/watch (kube-rs)
@@ -115,10 +115,10 @@ and the three specs (`lane-a-core-loop.md`, `lane-b-infrastructure.md`,
 |  |   SESSION_ID, FEEDBACK_PATH,    |  |  Reads on each request:       |  |
 |  |   MAX_ROUNDS,                    |  |   /secrets/model-credentials  |  |
 |  |   GIT_AUTHOR_NAME/EMAIL,        |  |   /secrets/ssh-key            |  |
-|  |   ANTHROPIC_BASE_URL=           |  |                               |  |
-|  |     http://localhost:9090/v1,    |  |  Writes:                      |  |
+|  |   (Claude: session auth, no     |  |                               |  |
+|  |    ANTHROPIC_BASE_URL needed)    |  |  Writes:                      |  |
 |  |   OPENAI_BASE_URL=              |  |   /tmp/shared/ready           |  |
-|  |     http://localhost:9090/v1,    |  |   (readiness signal)          |  |
+|  |     http://localhost:9090/openai,|  |   (readiness signal)          |  |
 |  |   HTTP_PROXY=                    |  |                               |  |
 |  |     http://localhost:9092,       |  |  Egress logger:               |  |
 |  |   GIT_SSH_COMMAND=              |  |   Logs all outbound traffic   |  |
@@ -159,9 +159,9 @@ NETWORK FLOW:
   Agent container                    Auth sidecar                  External
   +------------+                     +------------+                +--------+
   |            |  model API call     |            |  authenticated |        |
-  | claude -p  | ---- :9090 ------> | inject     | ------------> | api.   |
-  |            |  localhost          | x-api-key  |  HTTPS        | anthro |
-  |            |                     | or Bearer  |               | pic.com|
+  | claude -p  | --- direct ------> |            | ------------> | api.   |
+  |            |  (session auth)     |            |  HTTPS        | anthro |
+  |            |                     |            |               | pic.com|
   |            |  git push           |            |  SSH w/ key   |        |
   |            | ---- :9091 ------> | SSH proxy  | ------------> | github |
   |            |  localhost          | inject key |               | .com   |
@@ -808,29 +808,35 @@ Engineer                API Server          Postgres            Loop Engine     
   |  +-------------------------------+    +------------------------------+  |
   |  |  Agent Container              |    |  Auth Sidecar               |  |
   |  |                               |    |                              |  |
-  |  |  NO secrets mounted.          |    |  /secrets/model-credentials  |  |
-  |  |  Cannot read credentials.     |    |    mounted from K8s Secret   |  |
+  |  |  ~/.claude/ session dir        |    |  /secrets/model-credentials  |  |
+  |  |  mounted at /work/home/.claude |    |    mounted from K8s Secret   |  |
+  |  |  (for Claude session auth)     |    |  /secrets/ssh-key            |  |
+  |  |                               |    |    mounted from K8s Secret   |  |
+  |  |  OPENAI_BASE_URL=             |    |                              |  |
+  |  |    http://localhost:9090/openai|    |                              |  |
   |  |                               |    |                              |  |
-  |  |  ANTHROPIC_BASE_URL=          |    |  /secrets/ssh-key            |  |
-  |  |    http://localhost:9090/v1   |    |    mounted from K8s Secret   |  |
+  |  |  Step 1a: claude -p sends     |    |                              |  |
+  |  |  API request DIRECTLY to      |    |                              |  |
+  |  |  api.anthropic.com using      |    |                              |  |
+  |  |  session auth from ~/.claude/ |    |                              |  |
+  |  |  ===============================>  |  (Claude bypasses sidecar)  |  |
   |  |                               |    |                              |  |
-  |  |  Step 1: claude -p sends      |    |                              |  |
+  |  |  Step 1b: opencode sends      |    |                              |  |
   |  |  API request to localhost:9090|    |                              |  |
-  |  |                               |    |                              |  |
   |  |  Request has NO auth header.  |    |                              |  |
   |  |  --------------------------->-+--->|  Step 2: Sidecar intercepts  |  |
   |  |                               |    |  Reads /secrets/model-creds  |  |
-  |  |                               |    |  Injects x-api-key header   |  |
-  |  |                               |    |  (or Authorization: Bearer) |  |
+  |  |                               |    |  Injects Authorization:      |  |
+  |  |                               |    |  Bearer header (OpenAI)     |  |
   |  |                               |    |                              |  |
   |  |                               |    |  Step 3: Sidecar forwards   |  |
-  |  |                               |    |  to api.anthropic.com       |  |
+  |  |                               |    |  to api.openai.com          |  |
   |  |                               |    |  with real credentials      |  |
   |  |                               |    |  ========================>  |  |
   |  |                               |    |           (HTTPS)           |  |
   |  |  Step 5: Agent receives       |    |                              |  |
   |  |  model response.              |    |  Step 4: Response streams   |  |
-  |  |  Never saw the API key.  <----+----|  back through sidecar.      |  |
+  |  |  Never saw the OpenAI key.<---+----|  back through sidecar.      |  |
   |  |                               |    |  (not buffered, streamed)   |  |
   |  |                               |    |                              |  |
   |  |  Step 6: git push             |    |                              |  |

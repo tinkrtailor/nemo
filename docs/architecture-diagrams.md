@@ -12,7 +12,7 @@ High-level view of all components: the engineer's machine, the k3s cluster (spli
 graph TD
     CLI["<b>nemo CLI</b><br/>Engineer's Machine<br/>~/.nemo/config.toml<br/>~/.claude/ credentials"]
 
-    CLI -->|"HTTPS / mTLS"| API
+    CLI -->|"HTTPS (API key)"| API
 
     subgraph k3s["k3s Cluster (Hetzner CCX43)"]
 
@@ -40,9 +40,9 @@ graph TD
     BareRepo -.-|"mount as /work"| J2
     BareRepo -.-|"mount as /work"| J3
 
-    J1 -->|"via sidecar :9090"| ModelAPIs["<b>Model APIs</b><br/>api.anthropic.com<br/>api.openai.com"]
-    J3 -->|"via sidecar :9090"| ModelAPIs
-    J1 -->|"via sidecar :9091"| Git["<b>Git Remote</b><br/>GitHub / GitLab"]
+    J1 -->|"direct (session auth)"| Anthropic3["<b>Anthropic API</b><br/>api.anthropic.com"]
+    J3 -->|"via sidecar :9090"| OpenAIAPI["<b>OpenAI API</b><br/>api.openai.com"]
+    J1 -->|"via sidecar :9091"| Git["<b>Git Remote</b><br/>GitHub"]
     J3 -->|"via sidecar :9091"| Git
 
     style k3s fill:#1a1a2e,stroke:#e94560,color:#fff
@@ -65,7 +65,7 @@ graph LR
         direction LR
 
         subgraph Agent["Agent Container<br/>(claude-code OR opencode)<br/>User 1000, readOnlyRootFilesystem"]
-            A_ENV["Env: STAGE, SPEC_PATH,<br/>BRANCH, SHA, MODEL,<br/>ANTHROPIC_BASE_URL=<br/>localhost:9090/v1"]
+            A_ENV["Env: STAGE, SPEC_PATH,<br/>BRANCH, SHA, MODEL,<br/>OPENAI_BASE_URL=<br/>localhost:9090/openai"]
             A_WORK["/work — Bare Repo PVC<br/>(worktree)"]
             A_SESS["/sessions — Session PVC<br/>(cross-round)"]
             A_SPEC["/specs — ConfigMap/PVC"]
@@ -91,7 +91,7 @@ graph LR
     Agent ---|"readiness poll"| SHARED
     Sidecar ---|"writes /tmp/shared/ready"| SHARED
 
-    S_MODEL -->|"inject x-api-key<br/>HTTPS"| Anthropic["api.anthropic.com"]
+    Agent -->|"direct (session auth)<br/>HTTPS"| Anthropic["api.anthropic.com"]
     S_MODEL -->|"inject Bearer<br/>HTTPS"| OpenAI["api.openai.com"]
     S_GIT -->|"inject SSH key"| GitHub["github.com"]
     S_LOG -->|"passthrough + log"| Internet["any host"]
@@ -434,7 +434,8 @@ graph LR
     AGENT -->|"localhost:9090<br/>(no auth header)"| SIDECAR
     AGENT -->|"localhost:9091<br/>(git push)"| SIDECAR
 
-    SIDECAR -->|"inject x-api-key<br/>HTTPS"| ModelAPIs["<b>Model APIs</b><br/>api.anthropic.com<br/>api.openai.com"]
+    AGENT -->|"direct (session auth)<br/>HTTPS"| Anthropic2["<b>Anthropic API</b><br/>api.anthropic.com"]
+    SIDECAR -->|"inject Bearer<br/>HTTPS"| OpenAI2["<b>OpenAI API</b><br/>api.openai.com"]
     SIDECAR -->|"inject SSH key"| GitRemote["<b>Git Remote</b><br/>github.com"]
 
     style Machine fill:#16213e,stroke:#0f3460,color:#fff

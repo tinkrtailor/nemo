@@ -16,7 +16,7 @@ The three binaries that compose the Nemo control plane: a loop engine that drive
 ```
                         nemo CLI (engineer's Mac)
                               |
-                              | HTTPS / mTLS
+                              | HTTPS (API key auth)
                               v
                     +-------------------+
                     |  API Server (k3s) |
@@ -82,8 +82,8 @@ The API server and loop engine are separate k3s Deployments. They share a Postgr
 - NFR-3: Postgres connection pool: max 20 connections shared across API server and loop engine
 - NFR-4: Loop engine must recover all in-progress loops on restart (crash recovery from Postgres state)
 - NFR-5: CLI binary size < 15 MB (static Rust binary, cross-compiled for linux-amd64 and darwin-arm64)
-- NFR-6: All API endpoints authenticated via API key or mTLS
-- NFR-7: `nemo ship` shall not bypass branch protection rules. It merges via the GitHub/GitLab API, which enforces protection rules. If protection requires review approvals, `nemo ship` falls back to PR creation.
+- NFR-6: All API endpoints authenticated via API key (mTLS deferred to V2)
+- NFR-7: `nemo ship` shall not bypass branch protection rules. It merges via the GitHub API, which enforces protection rules. If protection requires review approvals, `nemo ship` falls back to PR creation.
 - NFR-8: `nemo ship` shall log the auto-merge event to Postgres (loop_id, merge_sha, merge_strategy, ci_status)
 
 ## Behavior
@@ -424,7 +424,7 @@ Special transitions:
 **Startup:**
 1. Connect to Postgres (shared pool). Verify schema version matches expected version (do NOT run migrations; migrations are handled by a separate pre-upgrade K8s Job per Lane B FR-5a). If schema version mismatch, refuse to start with error: "Schema version mismatch: expected {expected}, found {actual}. Run migrations before starting."
 2. Bind HTTP server (axum) on `:8080`
-3. Apply auth middleware (API key from `Authorization: Bearer <key>` header, or mTLS client cert)
+3. Apply auth middleware (API key from `Authorization: Bearer <key>` header; mTLS deferred to V2)
 
 **Endpoints:**
 
@@ -936,6 +936,8 @@ The implement/revise agent receives both the spec path and the feedback file pat
 - Auth sidecar and credential proxy architecture (separate spec)
 - `opencode serve` persistent sidecar mode (V1 uses per-job process invocation)
 - Multi-node k3s topology (V1 is single-node; code is node-count agnostic)
+- GitLab support (V1 is GitHub only via `gh` CLI and GitHub PAT; GitLab deferred to V2)
+- mTLS authentication (V1 is API key only; mTLS deferred to V2)
 - Auto-deploy after merge (that's the repo's CI/CD, not Nemo's job)
 - Rollback if merged code breaks production
 - Multi-PR atomic merge (ship multiple specs as one merge)
@@ -977,4 +979,4 @@ The implement/revise agent receives both the spec path and the feedback file pat
 
 - [x] ~~Should `GET /logs/:id` proxy raw pod logs or persist to Postgres?~~ Decision: persist structured log events to Postgres. Pod logs are ephemeral.
 - [x] ~~Exact Postgres schema for the `loops`, `rounds`, `log_events`, and `engineer_credentials` tables.~~ Decision: defined in Lane B schema. See Lane B FR-1 through FR-4c.
-- [x] ~~How does `nemo auth` securely transport credentials?~~ Decision: API server relay endpoint. `nemo auth` reads name + email from `~/.nemo/config.toml` `[identity]` section, credential files from `~/.claude/` and `~/.config/opencode/`, and the SSH private key from `~/.ssh/id_ed25519` (or `[identity] ssh_key_path`). It POSTs each to `POST /credentials` (defined above). The API server upserts the `engineers` table (name + email), upserts `engineer_credentials`, and creates/updates K8s Secrets in `nemo-jobs` namespace. One `nemo auth` invocation registers the engineer AND uploads all credentials. Transport security via HTTPS/mTLS (same as all other endpoints).
+- [x] ~~How does `nemo auth` securely transport credentials?~~ Decision: API server relay endpoint. `nemo auth` reads name + email from `~/.nemo/config.toml` `[identity]` section, credential files from `~/.claude/` and `~/.config/opencode/`, and the SSH private key from `~/.ssh/id_ed25519` (or `[identity] ssh_key_path`). It POSTs each to `POST /credentials` (defined above). The API server upserts the `engineers` table (name + email), upserts `engineer_credentials`, and creates/updates K8s Secrets in `nemo-jobs` namespace. One `nemo auth` invocation registers the engineer AND uploads all credentials. Transport security via HTTPS with API key auth (same as all other endpoints).
