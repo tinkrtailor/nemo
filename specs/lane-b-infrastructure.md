@@ -24,7 +24,7 @@ Postgres schema, git operations, and config loading for the Nemo control plane. 
 - FR-3: The `engineers` table shall store registered engineers with their git identity, model preferences, and concurrency limits.
 - FR-4: The `egress_logs` table shall store all outbound network traffic logged by the auth sidecar, linked to the originating job.
 - FR-4a: The `log_events` table shall store structured log events (id, loop_id, timestamp, stage, round, level, message) persisted from pod logs by the loop engine. This is the source for `GET /logs/:id`.
-- FR-4b: The `engineer_credentials` table shall store per-engineer, per-provider credential references (id, engineer_id, provider, credential_ref, valid, created_at, updated_at). Unique on `(engineer_id, provider)`. The `credential_ref` is always `nemo-creds-{engineer}` (one K8s Secret per engineer). The `provider` (`claude` or `openai`) maps to a key within that Secret. Secret keys: `claude` (contains `~/.claude/` session data), `openai` (contains opencode auth data). Mount path in sidecar: `/secrets/model-credentials/` (directory, files named by provider key).
+- FR-4b: The `engineer_credentials` table shall store per-engineer, per-provider credential references (id, engineer_id, provider, credential_ref, valid, created_at, updated_at). Unique on `(engineer_id, provider)`. The `credential_ref` is always `nemo-creds-{engineer}` (one K8s Secret per engineer). The `provider` (`claude`, `openai`, or `ssh`) maps to a key within that Secret. Secret keys: `claude` (contains `~/.claude/` session data), `openai` (contains opencode auth data), `ssh` (contains the engineer's SSH private key, read from `~/.ssh/id_ed25519` or a configured path). Mount paths in sidecar: `/secrets/model-credentials/` (directory, files named by provider key for `claude` and `openai`), `/secrets/ssh-key/` (mounted from the same Secret's `ssh` key).
 - FR-4c: The `cluster_credentials` table shall store cluster-level credentials used by the control plane itself (id, type [`api_key`, `mtls_cert`, `git_host_token`], credential_ref pointing to a K8s Secret, description, created_at). These are not per-engineer credentials; they are cluster-wide (e.g., `NEMO_API_KEY` for CLI authentication, `GIT_HOST_TOKEN` GitHub PAT for PR creation/merge operations). The control plane reads these on startup to configure API auth and git host integration.
 - FR-5: All schema changes shall be managed via `sqlx migrate` with sequential, timestamped migration files checked into the repo.
 - FR-5a: Migrations shall run as a separate K8s Job (`helm.sh/hook: pre-upgrade`) BEFORE either API server or loop engine Deployment starts. Both binaries verify schema version on startup but do not run migrations themselves. This ensures schema consistency across split deployments.
@@ -255,7 +255,7 @@ CREATE INDEX idx_log_events_loop_id_round ON log_events(loop_id, round);
 CREATE TABLE engineer_credentials (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     engineer_id     UUID NOT NULL REFERENCES engineers(id) ON DELETE CASCADE,
-    provider        TEXT NOT NULL,           -- 'claude' or 'openai'
+    provider        TEXT NOT NULL,           -- 'claude', 'openai', or 'ssh'
     credential_ref  TEXT NOT NULL,           -- K8s Secret name: 'nemo-creds-{engineer}' (one secret per engineer, provider is a key within the secret)
     valid           BOOLEAN NOT NULL DEFAULT true,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -331,7 +331,7 @@ CREATE INDEX idx_cluster_credentials_type ON cluster_credentials(type);
 - `loops.cancel_requested`, `loops.approve_requested`, `loops.resume_requested`, `loops.force_resume`: boolean flags set by the API server and read by the loop engine on the next reconciliation tick. This is the communication mechanism between the two deployments (they share only Postgres, no direct RPC). Flags are reset by the loop engine after processing. `force_resume` is set alongside `resume_requested` when `nemo resume --force` is used; the loop engine checks `force_resume` before allowing resume from `paused_force_deviated` (rejects if `force_resume = false`).
 - `loops.needs_human_review`: set when max_rounds exceeded or CI fails in ship mode. Queryable by `nemo status` to highlight loops that need engineer attention. Distinct from terminal state -- a loop can be `converged` (PR created) with `needs_human_review = true`.
 - `log_events`: structured log events persisted from pod logs. Pod logs are ephemeral and disappear after K8s Job deletion, so the loop engine streams them into this table in near-real-time. `GET /logs/:id` reads from here, not from pod logs. Columns: `stage` and `round` enable filtering (`?round=N&stage=implement`). `level` supports filtering by severity.
-- `engineer_credentials`: tracks per-engineer, per-provider credential references and validity. The actual secrets are stored in a single K8s Secret per engineer (`nemo-creds-{engineer}`), with keys named by provider (`claude`, `openai`). The `credential_ref` column stores the K8s Secret name (always `nemo-creds-{engineer}`). This table enables the loop engine to check credential status before dispatching (avoiding wasted job starts with expired creds) and enables the `awaiting_reauth` -> resume flow when `nemo auth` updates credentials.
+- `engineer_credentials`: tracks per-engineer, per-provider credential references and validity. The actual secrets are stored in a single K8s Secret per engineer (`nemo-creds-{engineer}`), with keys named by provider (`claude`, `openai`, `ssh`). The `credential_ref` column stores the K8s Secret name (always `nemo-creds-{engineer}`). This table enables the loop engine to check credential status before dispatching (avoiding wasted job starts with expired creds) and enables the `awaiting_reauth` -> resume flow when `nemo auth` updates credentials. The `ssh` provider stores the engineer's SSH private key, uploaded by `nemo auth` from `~/.ssh/id_ed25519` (or `[identity] ssh_key_path` in `~/.nemo/config.toml`).
 - `egress_logs` uses `BIGSERIAL` because it is append-only, high-volume, and never updated. Split into `host`, `port`, `bytes_sent`, `bytes_received`, `protocol`, `status_code` for structured querying and alerting.
 
 #### Terminal State Protection
@@ -530,9 +530,17 @@ pub struct TimeoutsConfig {
 
 #[derive(Deserialize)]
 pub struct EngineerConfig {
-    pub identity: Option<IdentityConfig>,   // name, email
+    pub identity: Option<IdentityConfig>,   // name, email, ssh_key_path
     pub models: Option<ModelConfig>,
     pub limits: Option<LimitsConfig>,
+}
+
+/// Engineer identity from ~/.nemo/config.toml [identity] section.
+/// Read by `nemo auth` to register the engineer and set git identity.
+pub struct IdentityConfig {
+    pub name: String,                       // engineer name (required)
+    pub email: String,                      // engineer email (required); used for GIT_AUTHOR_EMAIL / GIT_COMMITTER_EMAIL
+    pub ssh_key_path: Option<String>,       // path to SSH private key (default: ~/.ssh/id_ed25519)
 }
 
 pub struct MergedConfig {
@@ -579,6 +587,8 @@ For each scalar field, take the highest-priority non-None value. For limits, app
 - `models`: last-writer-wins. Engineer overrides repo, repo overrides cluster.
 
 **Model preferences authority:** `~/.nemo/config.toml` is authoritative for model preferences. The `engineers` table stores a JSONB cache that is synced on `nemo auth`. On conflict, the config file wins.
+
+**Engineer identity authority:** `~/.nemo/config.toml` `[identity]` section is the source of truth for engineer name and email. `nemo auth` reads name + email from this section and upserts the `engineers` table via `POST /credentials`. The email is used by Lane C's job builder to set `GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_EMAIL` on agent jobs (see Lane C FR-10, FR-27). The job builder reads the email from the `engineers` table.
 
 #### Cluster Config Loading
 
@@ -752,8 +762,10 @@ This was the #1 systemic bug pattern in Lane A (round 19: 8 call sites created K
 - [ ] `nemo status` highlights loops with `needs_human_review = true`
 - [ ] `log_events` table stores structured log events with loop_id, stage, round, level, message
 - [ ] `GET /logs/:id` reads from `log_events` table, not pod logs
-- [ ] `engineer_credentials` table tracks per-engineer, per-provider credential references with validity flag
+- [ ] `engineer_credentials` table tracks per-engineer, per-provider credential references with validity flag (providers: `claude`, `openai`, `ssh`)
 - [ ] `engineer_credentials` unique on `(engineer_id, provider)`
+- [ ] `POST /credentials` upserts `engineers` table with name + email from request before upserting credentials
+- [ ] SSH key stored in `nemo-creds-{engineer}` Secret under key `ssh`, uploaded via `nemo auth --ssh`
 - [ ] `updated_at` trigger fires on `engineer_credentials` row updates
 - [ ] Migrations run as a K8s Job (pre-upgrade hook) BEFORE either API server or loop engine starts
 - [ ] Neither API server nor loop engine runs migrations on its own startup

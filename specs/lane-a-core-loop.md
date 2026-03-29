@@ -565,6 +565,7 @@ Request:
 ```json
 {
   "engineer": "alice",
+  "email": "alice@example.com",
   "provider": "claude",
   "credential_data": "base64-encoded-credential-content...",
   "valid": true
@@ -572,13 +573,15 @@ Request:
 ```
 
 - `engineer` (string, required): engineer name. Must not be empty.
-- `provider` (string, required): credential provider. Must be `"claude"` or `"openai"`.
-- `credential_data` (string, required): the actual credential content, base64-encoded. For `claude`, this is the `~/.claude/` session data. For `openai`, this is the opencode auth data.
+- `email` (string, required): engineer email. The CLI reads this from `~/.nemo/config.toml` `[identity]` section. Used for git identity (`GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_EMAIL`) and stored in the `engineers` table.
+- `provider` (string, required): credential provider. Must be `"claude"`, `"openai"`, or `"ssh"`.
+- `credential_data` (string, required): the actual credential content, base64-encoded. For `claude`, this is the `~/.claude/` session data. For `openai`, this is the opencode auth data. For `ssh`, this is the engineer's SSH private key (read from `~/.ssh/id_ed25519` or a configured path in `~/.nemo/config.toml` `[identity] ssh_key_path`).
 - `valid` (bool, required): whether the credential is currently valid.
 
 Behavior:
 - The API server base64-decodes `credential_data`.
-- Creates or updates the K8s Secret named `nemo-creds-{engineer}` (one secret per engineer, see Lane B/C credential layout) with a key matching the `provider` value (e.g., key `claude` or key `openai`) containing the decoded credential data.
+- **Upserts the `engineers` table** (unique on `name`): creates or updates the engineer record with `name = engineer` and `email = email`. This ensures the engineer exists before credentials are linked. The `email` field is updated on every call so engineers can change their email via `~/.nemo/config.toml`.
+- Creates or updates the K8s Secret named `nemo-creds-{engineer}` (one secret per engineer, see Lane B/C credential layout) with a key matching the `provider` value (e.g., key `claude`, `openai`, or `ssh`) containing the decoded credential data.
 - Upserts the `engineer_credentials` table row with `credential_ref = "nemo-creds-{engineer}"`.
 
 Response (200):
@@ -586,6 +589,7 @@ Response (200):
 {
   "id": "f1e2d3c4-...",
   "engineer": "alice",
+  "email": "alice@example.com",
   "provider": "claude",
   "valid": true
 }
@@ -593,11 +597,13 @@ Response (200):
 
 Additional behavior:
 - Requires valid API key (same auth as all other endpoints).
+- Upserts into `engineers` table (unique on `name`) with `email` from the request.
 - Upserts into `engineer_credentials` table (unique on `(engineer_id, provider)` per Lane B FR-4b).
-- Returns 400 if `engineer` is empty or `credential_data` is not valid base64.
+- Returns 400 if `engineer` is empty, `email` is empty, or `credential_data` is not valid base64.
 - Returns 401 if not authenticated.
 
 Error (400): `{ "error": "engineer must not be empty" }`
+Error (400): `{ "error": "email must not be empty" }`
 Error (400): `{ "error": "credential_data is not valid base64" }`
 Error (401): `{ "error": "Authentication failed" }`
 
@@ -698,9 +704,13 @@ UTILITY COMMANDS:
   init                      Scan monorepo, generate nemo.toml
     --force                 Overwrite existing nemo.toml
 
-  auth                      Push local model credentials to cluster
+  auth                      Register engineer identity and push credentials to cluster.
+                            Reads name + email from ~/.nemo/config.toml [identity] section.
+                            Upserts the engineer record (name + email) in the engineers table
+                            AND uploads credentials. One command does both.
     --claude                Push Claude credentials only
     --openai                Push OpenAI credentials only
+    --ssh                   Push SSH key only (reads from ~/.ssh/id_ed25519 or [identity] ssh_key_path)
 
   config                    Edit ~/.nemo/config.toml
     --set <key>=<value>     Set a config value
@@ -908,7 +918,7 @@ The implement/revise agent receives both the spec path and the feedback file pat
 | Engineer not registered | 401 | "Unknown engineer. Run `nemo auth` first" | Run `nemo auth` |
 | Invalid API key | 401 | "Authentication failed" | Check API key in `~/.nemo/config.toml` |
 | Malformed verdict JSON (retriable) | - | Internal: retries 2x then FAILED | Agent-side issue; check agent image/model |
-| Expired model credentials | - | Loop -> AWAITING_REAUTH | Run `nemo auth --claude` or `--openai` |
+| Expired model credentials | - | Loop -> AWAITING_REAUTH | Run `nemo auth --claude` or `--openai` or `--ssh` |
 | K8s API unreachable | 503 | "Cluster unavailable" | Check k3s health |
 | Postgres unreachable | 503 | "Database unavailable" | Check Postgres pod |
 | Ship not enabled | 400 | "nemo ship is not enabled for this repo" | Set `[ship] allowed = true` in `nemo.toml` |
@@ -957,8 +967,9 @@ The implement/revise agent receives both the spec path and the feedback file pat
 - [ ] Auto-merge event logged to Postgres (loop_id, merge_sha, merge_strategy, ci_status)
 - [ ] `[harden] merge_strategy` controls spec PR merge behavior
 - [ ] `nemo harden` merges spec PR on convergence (when `auto_merge_spec_pr = true`)
-- [ ] `POST /credentials` upserts engineer credentials and returns `{ id, engineer, provider, valid }`
-- [ ] `POST /credentials` returns 400 when `engineer` is empty, 401 when not authenticated
+- [ ] `POST /credentials` upserts engineer record (name + email) in `engineers` table AND upserts credential in `engineer_credentials`, returns `{ id, engineer, email, provider, valid }`
+- [ ] `POST /credentials` returns 400 when `engineer` is empty, `email` is empty, or `credential_data` is not valid base64; 401 when not authenticated
+- [ ] `POST /credentials` with `provider: "ssh"` stores the SSH private key in the `nemo-creds-{engineer}` K8s Secret under key `ssh`
 - [ ] Branch names follow `agent/{engineer}/{spec-slug}-{short-hash}` convention
 - [ ] Session continuation works across rounds (agent resumes context, not cold start)
 
@@ -966,4 +977,4 @@ The implement/revise agent receives both the spec path and the feedback file pat
 
 - [x] ~~Should `GET /logs/:id` proxy raw pod logs or persist to Postgres?~~ Decision: persist structured log events to Postgres. Pod logs are ephemeral.
 - [x] ~~Exact Postgres schema for the `loops`, `rounds`, `log_events`, and `engineer_credentials` tables.~~ Decision: defined in Lane B schema. See Lane B FR-1 through FR-4c.
-- [x] ~~How does `nemo auth` securely transport credentials?~~ Decision: API server relay endpoint. The CLI reads credential files from `~/.claude/` and `~/.config/opencode/`, serializes the content, and POSTs to `POST /credentials` (defined above). The API server upserts `engineer_credentials` and creates/updates K8s Secrets in `nemo-jobs` namespace. Transport security via HTTPS/mTLS (same as all other endpoints).
+- [x] ~~How does `nemo auth` securely transport credentials?~~ Decision: API server relay endpoint. `nemo auth` reads name + email from `~/.nemo/config.toml` `[identity]` section, credential files from `~/.claude/` and `~/.config/opencode/`, and the SSH private key from `~/.ssh/id_ed25519` (or `[identity] ssh_key_path`). It POSTs each to `POST /credentials` (defined above). The API server upserts the `engineers` table (name + email), upserts `engineer_credentials`, and creates/updates K8s Secrets in `nemo-jobs` namespace. One `nemo auth` invocation registers the engineer AND uploads all credentials. Transport security via HTTPS/mTLS (same as all other endpoints).
