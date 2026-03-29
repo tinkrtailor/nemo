@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Repo-level configuration loaded from `nemo.toml`.
@@ -16,6 +17,25 @@ pub struct NemoConfig {
     pub ship: ShipConfig,
     #[serde(default)]
     pub harden: HardenMergeConfig,
+    /// Service definitions: `[services.<name>]` with `path` and `test` fields.
+    /// Used by the control plane to map changed file paths to services and
+    /// look up test commands for the TEST stage (FR-42a, FR-42b).
+    #[serde(default)]
+    pub services: HashMap<String, ServiceConfig>,
+}
+
+/// Configuration for a single service in the monorepo.
+/// Defined under `[services.<name>]` in nemo.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceConfig {
+    /// Path prefix in the repo that belongs to this service.
+    /// Used to map git diff paths to affected services.
+    pub path: String,
+    /// Shell command to run tests for this service.
+    pub test: String,
+    /// Optional JVM tag for elevated resource limits (FR-28).
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl NemoConfig {
@@ -398,5 +418,45 @@ mod tests {
         assert_eq!(config.timeouts.implement_secs, 3600);
         assert_eq!(config.timeouts.review_secs, 900); // default
         assert_eq!(config.models.implementor, "claude-sonnet-4");
+    }
+
+    #[test]
+    fn test_services_config_deserialize() {
+        let toml_str = r#"
+            [services.api]
+            path = "packages/api"
+            test = "cargo test -p api"
+
+            [services.web]
+            path = "packages/web"
+            test = "npm test"
+            tags = ["jvm"]
+        "#;
+        let config: NemoConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.services.len(), 2);
+
+        let api = &config.services["api"];
+        assert_eq!(api.path, "packages/api");
+        assert_eq!(api.test, "cargo test -p api");
+        assert!(api.tags.is_empty());
+
+        let web = &config.services["web"];
+        assert_eq!(web.path, "packages/web");
+        assert_eq!(web.test, "npm test");
+        assert_eq!(web.tags, vec!["jvm"]);
+    }
+
+    #[test]
+    fn test_default_config_has_no_services() {
+        let config = NemoConfig::default();
+        assert!(config.services.is_empty());
+    }
+
+    #[test]
+    fn test_cluster_config_new_fields() {
+        let config = ClusterConfig::default();
+        assert_eq!(config.sidecar_image, "nemo-sidecar:latest");
+        assert_eq!(config.sessions_pvc, "nemo-sessions");
+        assert!(config.image_pull_secret.is_none());
     }
 }
