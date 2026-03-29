@@ -312,6 +312,7 @@ async fn main() -> anyhow::Result<()> {
             commands::auth::run(
                 &http_client,
                 &eng_config.engineer,
+                &eng_config.name,
                 &eng_config.email,
                 claude,
                 openai,

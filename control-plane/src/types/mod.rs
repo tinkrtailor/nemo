@@ -192,9 +192,12 @@ pub enum LoopDecision {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopContext {
     pub loop_id: Uuid,
+    /// Engineer slug (lowercase, used for K8s secret names, branch names).
     pub engineer: String,
-    /// Engineer email from the engineers table (populated by nemo auth).
-    /// Used for GIT_AUTHOR_EMAIL and GIT_COMMITTER_EMAIL (FR-27).
+    /// Engineer display name for git attribution (GIT_AUTHOR_NAME).
+    /// Falls back to engineer slug if not configured.
+    pub engineer_name: String,
+    /// Engineer email for git attribution (GIT_AUTHOR_EMAIL).
     pub engineer_email: String,
     pub spec_path: String,
     pub branch: String,

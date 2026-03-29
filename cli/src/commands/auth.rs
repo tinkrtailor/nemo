@@ -9,6 +9,7 @@ use crate::client::NemoClient;
 pub async fn run(
     client: &NemoClient,
     engineer: &str,
+    name: &str,
     email: &str,
     claude: bool,
     openai: bool,
@@ -128,6 +129,7 @@ pub async fn run(
                 engineer,
                 provider,
                 &content,
+                if name.is_empty() { None } else { Some(name) },
                 if email.is_empty() { None } else { Some(email) },
             )
             .await

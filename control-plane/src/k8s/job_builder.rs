@@ -252,14 +252,14 @@ fn build_agent_env_vars(ctx: &LoopContext, stage: &StageConfig, is_test: bool) -
         env_var("no_proxy", "localhost,127.0.0.1,::1"),
         // FR-9: OpenAI API through sidecar model proxy
         env_var("OPENAI_BASE_URL", "http://localhost:9090/openai"),
-        // Claude/Anthropic API through sidecar model proxy
-        env_var("ANTHROPIC_BASE_URL", "http://localhost:9090/anthropic"),
+        // Note: ANTHROPIC_BASE_URL is NOT set. Claude Code authenticates via the
+        // mounted ~/.claude/ session directory (FR-25b), not via the sidecar proxy.
     ];
 
-    // FR-10, FR-27: Git identity from engineers table (populated by nemo auth)
-    env.push(env_var("GIT_AUTHOR_NAME", &ctx.engineer));
+    // FR-10, FR-27: Git identity from engineer identity (populated by nemo auth)
+    env.push(env_var("GIT_AUTHOR_NAME", &ctx.engineer_name));
     env.push(env_var("GIT_AUTHOR_EMAIL", &ctx.engineer_email));
-    env.push(env_var("GIT_COMMITTER_NAME", &ctx.engineer));
+    env.push(env_var("GIT_COMMITTER_NAME", &ctx.engineer_name));
     env.push(env_var("GIT_COMMITTER_EMAIL", &ctx.engineer_email));
 
     // FR-11: GIT_SSH_COMMAND to route through sidecar SSH proxy on localhost.
@@ -576,6 +576,7 @@ mod tests {
         LoopContext {
             loop_id: Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap(),
             engineer: "alice".to_string(),
+            engineer_name: "Alice Smith".to_string(),
             engineer_email: "alice@example.com".to_string(),
             spec_path: "specs/feature/invoice-cancel.md".to_string(),
             branch: "agent/alice/invoice-cancel-a1b2c3d4".to_string(),
@@ -723,9 +724,9 @@ mod tests {
             "http://localhost:9090/openai"
         );
 
-        // FR-10: Git identity
-        assert_eq!(find_env("GIT_AUTHOR_NAME").unwrap(), "alice");
-        assert_eq!(find_env("GIT_COMMITTER_NAME").unwrap(), "alice");
+        // FR-10: Git identity (display name, not slug)
+        assert_eq!(find_env("GIT_AUTHOR_NAME").unwrap(), "Alice Smith");
+        assert_eq!(find_env("GIT_COMMITTER_NAME").unwrap(), "Alice Smith");
 
         // FR-11: Git SSH command
         assert!(find_env("GIT_SSH_COMMAND").unwrap().contains("9091"));
@@ -889,7 +890,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_build_job_implement_has_claude_session() {
         // FR-25b: Claude session mounted for implement stage
         let ctx = test_ctx();
@@ -899,12 +899,17 @@ mod tests {
         let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let mounts = agent.volume_mounts.as_ref().unwrap();
         let claude_mount = mounts.iter().find(|m| m.mount_path == "/work/home/.claude");
-        assert!(claude_mount.is_some(), "Claude session should be mounted for implement");
+        assert!(
+            claude_mount.is_some(),
+            "Claude session should be mounted for implement"
+        );
         assert_eq!(claude_mount.unwrap().read_only, Some(true));
         // No /secrets or model-credentials in agent
-        assert!(!mounts
-            .iter()
-            .any(|m| m.mount_path.contains("/secrets") || m.mount_path.contains("credential")));
+        assert!(
+            !mounts
+                .iter()
+                .any(|m| m.mount_path.contains("/secrets") || m.mount_path.contains("credential"))
+        );
     }
 
     #[test]

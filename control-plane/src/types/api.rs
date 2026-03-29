@@ -146,7 +146,10 @@ pub struct CredentialRequest {
     pub credential_ref: String,
     #[serde(default = "default_valid")]
     pub valid: bool,
-    /// Engineer email for git commit attribution. Optional — updates the stored email if provided.
+    /// Engineer display name for git commit attribution. Optional.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Engineer email for git commit attribution. Optional.
     #[serde(default)]
     pub email: Option<String>,
 }

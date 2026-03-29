@@ -93,6 +93,7 @@ impl NemoClient {
         engineer: &str,
         provider: &str,
         cred_content: &str,
+        name: Option<&str>,
         email: Option<&str>,
     ) -> Result<()> {
         let mut body = serde_json::json!({
@@ -101,6 +102,9 @@ impl NemoClient {
             "credential_ref": cred_content,
             "valid": true,
         });
+        if let Some(n) = name {
+            body["name"] = serde_json::json!(n);
+        }
         if let Some(e) = email {
             body["email"] = serde_json::json!(e);
         }

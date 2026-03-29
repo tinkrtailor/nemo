@@ -529,19 +529,21 @@ pub async fn upsert_credentials(
     };
     state.store.upsert_credential(&cred).await?;
 
-    // Persist engineer email if provided (used for git commit attribution)
-    if let Some(ref email) = req.email
-        && !email.is_empty()
-    {
-        let email_cred = crate::types::EngineerCredential {
-            id: Uuid::new_v4(),
-            engineer: req.engineer.clone(),
-            provider: "_email".to_string(),
-            credential_ref: email.clone(),
-            valid: true,
-            updated_at: chrono::Utc::now(),
-        };
-        state.store.upsert_credential(&email_cred).await?;
+    // Persist engineer identity fields (used for git commit attribution)
+    for (provider, value) in [("_name", &req.name), ("_email", &req.email)] {
+        if let Some(v) = value
+            && !v.is_empty()
+        {
+            let identity_cred = crate::types::EngineerCredential {
+                id: Uuid::new_v4(),
+                engineer: req.engineer.clone(),
+                provider: provider.to_string(),
+                credential_ref: v.clone(),
+                valid: true,
+                updated_at: chrono::Utc::now(),
+            };
+            state.store.upsert_credential(&identity_cred).await?;
+        }
     }
 
     Ok((StatusCode::OK, Json(serde_json::json!({"status": "ok"}))))

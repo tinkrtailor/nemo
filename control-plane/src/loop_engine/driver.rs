@@ -1278,9 +1278,14 @@ impl ConvergentLoopDriver {
             .map(|c| (c.provider, c.credential_ref))
             .collect();
 
-        // Engineer email: look up from stored credentials (provider="_email"),
-        // fall back to {engineer}@nemo.dev if not set.
+        // Engineer identity: look up name and email from stored credentials,
+        // fall back to engineer slug / {engineer}@nemo.dev if not set.
         let all_creds = self.store.get_credentials(&record.engineer).await?;
+        let engineer_name = all_creds
+            .iter()
+            .find(|c| c.provider == "_name" && c.valid)
+            .map(|c| c.credential_ref.clone())
+            .unwrap_or_else(|| record.engineer.clone());
         let engineer_email = all_creds
             .iter()
             .find(|c| c.provider == "_email" && c.valid)
@@ -1301,6 +1306,7 @@ impl ConvergentLoopDriver {
         Ok(LoopContext {
             loop_id: record.id,
             engineer: record.engineer.clone(),
+            engineer_name,
             engineer_email,
             spec_path: record.spec_path.clone(),
             branch: record.branch.clone(),

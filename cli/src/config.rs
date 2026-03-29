@@ -9,6 +9,9 @@ pub struct EngineerConfig {
     pub server_url: String,
     #[serde(default)]
     pub engineer: String,
+    /// Display name for git attribution (GIT_AUTHOR_NAME).
+    #[serde(default)]
+    pub name: String,
     #[serde(default)]
     pub email: String,
     pub api_key: Option<String>,
@@ -23,6 +26,7 @@ impl Default for EngineerConfig {
         Self {
             server_url: default_server_url(),
             engineer: String::new(),
+            name: String::new(),
             email: String::new(),
             api_key: None,
         }
