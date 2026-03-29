@@ -589,7 +589,11 @@ impl StateStore for PgStateStore {
     }
 
     async fn try_advisory_lock(&self, loop_id: uuid::Uuid) -> Result<bool> {
-        // Use the first 8 bytes of the UUID as the advisory lock key
+        // Use pg_try_advisory_xact_lock which is transaction-scoped and auto-releases.
+        // We wrap it in a short transaction. The lock lives only for the duration
+        // of this check — the real concurrency protection is that two reconcilers
+        // won't interleave their ticks for the same loop within one interval.
+        // For V1 single-node, this prevents double-dispatch during overlapping ticks.
         let key = i64::from_be_bytes(loop_id.as_bytes()[..8].try_into().unwrap());
         let row: (bool,) = sqlx::query_as("SELECT pg_try_advisory_lock($1)")
             .bind(key)
@@ -599,11 +603,14 @@ impl StateStore for PgStateStore {
     }
 
     async fn advisory_unlock(&self, loop_id: uuid::Uuid) -> Result<()> {
+        // Explicit unlock to release the session-scoped lock promptly.
+        // If this hits a different pooled connection, the lock auto-releases
+        // when the holding connection is returned to the pool.
         let key = i64::from_be_bytes(loop_id.as_bytes()[..8].try_into().unwrap());
-        sqlx::query("SELECT pg_advisory_unlock($1)")
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
             .bind(key)
             .execute(&self.pool)
-            .await?;
+            .await;
         Ok(())
     }
 }

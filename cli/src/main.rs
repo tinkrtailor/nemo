@@ -175,6 +175,11 @@ async fn main() -> anyhow::Result<()> {
         return commands::config::run(set.clone(), get.clone());
     }
 
+    // Init is local-only — don't require config
+    if let Commands::Init { force } = cli.command {
+        return commands::init::run(force);
+    }
+
     let eng_config = config::load_config()?;
 
     let server_url = cli.server.unwrap_or(eng_config.server_url.clone());
@@ -295,8 +300,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Resume { loop_id } => {
             commands::resume::run(&http_client, &loop_id).await?;
         }
-        Commands::Init { force } => {
-            commands::init::run(force)?;
+        Commands::Init { .. } => {
+            // Handled above before config loading
+            unreachable!("Init is dispatched before config loading");
         }
         Commands::Auth {
             claude,

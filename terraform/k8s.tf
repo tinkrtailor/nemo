@@ -26,11 +26,36 @@ resource "kubernetes_namespace" "jobs" {
 # V1 is single-node k3s, so hostPath is safe. Both control plane and agent jobs
 # see the same directory on disk.
 
-resource "kubernetes_persistent_volume" "bare_repo" {
+# Two PVs pointing to the same hostPath — one per namespace PVC.
+# A single PV can only bind to one PVC, so we need two.
+
+resource "kubernetes_persistent_volume" "bare_repo_system" {
   depends_on = [null_resource.kubeconfig]
 
   metadata {
-    name = "nemo-bare-repo"
+    name = "nemo-bare-repo-system"
+  }
+  spec {
+    capacity = {
+      storage = "100Gi"
+    }
+    access_modes = ["ReadWriteMany"]
+    persistent_volume_reclaim_policy = "Retain"
+    storage_class_name               = "manual"
+    persistent_volume_source {
+      host_path {
+        path = "/data/nemo-bare-repo"
+        type = "DirectoryOrCreate"
+      }
+    }
+  }
+}
+
+resource "kubernetes_persistent_volume" "bare_repo_jobs" {
+  depends_on = [null_resource.kubeconfig]
+
+  metadata {
+    name = "nemo-bare-repo-jobs"
   }
   spec {
     capacity = {
@@ -49,7 +74,7 @@ resource "kubernetes_persistent_volume" "bare_repo" {
 }
 
 resource "kubernetes_persistent_volume_claim" "bare_repo" {
-  depends_on = [kubernetes_namespace.system, kubernetes_persistent_volume.bare_repo]
+  depends_on = [kubernetes_namespace.system, kubernetes_persistent_volume.bare_repo_system]
 
   metadata {
     name      = "nemo-bare-repo"
@@ -58,7 +83,7 @@ resource "kubernetes_persistent_volume_claim" "bare_repo" {
   spec {
     access_modes       = ["ReadWriteMany"]
     storage_class_name = "manual"
-    volume_name        = kubernetes_persistent_volume.bare_repo.metadata[0].name
+    volume_name        = kubernetes_persistent_volume.bare_repo_system.metadata[0].name
     resources {
       requests = {
         storage = "100Gi"
@@ -68,7 +93,7 @@ resource "kubernetes_persistent_volume_claim" "bare_repo" {
 }
 
 resource "kubernetes_persistent_volume_claim" "bare_repo_jobs" {
-  depends_on = [kubernetes_namespace.jobs, kubernetes_persistent_volume.bare_repo]
+  depends_on = [kubernetes_namespace.jobs, kubernetes_persistent_volume.bare_repo_jobs]
 
   metadata {
     name      = "nemo-bare-repo"
@@ -77,7 +102,7 @@ resource "kubernetes_persistent_volume_claim" "bare_repo_jobs" {
   spec {
     access_modes       = ["ReadWriteMany"]
     storage_class_name = "manual"
-    volume_name        = kubernetes_persistent_volume.bare_repo.metadata[0].name
+    volume_name        = kubernetes_persistent_volume.bare_repo_jobs.metadata[0].name
     resources {
       requests = {
         storage = "100Gi"

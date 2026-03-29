@@ -567,7 +567,7 @@ func proxyGitCommand(channel ssh.Channel, command string, gitRemoteHost string) 
 		Timeout:         10 * time.Second,
 	}
 
-	destAddr := gitRemoteHost + ":22"
+	destAddr := gitRemoteHost // host:port already formatted by caller
 	client, err := ssh.Dial("tcp", destAddr, clientConfig)
 	if err != nil {
 		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("failed to connect to git remote %s: %v", destAddr, err))
@@ -606,12 +606,29 @@ func proxyGitCommand(channel ssh.Channel, command string, gitRemoteHost string) 
 // gitRemoteInfo holds parsed git remote details for SSH proxy validation.
 type gitRemoteInfo struct {
 	host     string
+	port     string // SSH port, defaults to "22"
 	repoPath string // e.g., "user/repo.git" or "/user/repo.git"
 }
 
-// extractGitRemote parses host and repo path from a git URL.
+// extractGitRemote parses host, port, and repo path from a git URL.
 func extractGitRemote(gitURL string) gitRemoteInfo {
 	// Handle SSH-style URLs: git@github.com:user/repo.git
+	// or with port: ssh://git@github.com:2222/user/repo.git
+	if strings.HasPrefix(gitURL, "ssh://") {
+		parsed, err := url.Parse(gitURL)
+		if err == nil && parsed.Host != "" {
+			port := parsed.Port()
+			if port == "" {
+				port = "22"
+			}
+			return gitRemoteInfo{
+				host:     parsed.Hostname(),
+				port:     port,
+				repoPath: strings.TrimPrefix(parsed.Path, "/"),
+			}
+		}
+	}
+
 	if strings.Contains(gitURL, "@") && strings.Contains(gitURL, ":") && !strings.Contains(gitURL, "://") {
 		parts := strings.SplitN(gitURL, "@", 2)
 		if len(parts) == 2 {
@@ -621,15 +638,20 @@ func extractGitRemote(gitURL string) gitRemoteInfo {
 			if len(hostAndPath) == 2 {
 				repoPath = hostAndPath[1]
 			}
-			return gitRemoteInfo{host: host, repoPath: repoPath}
+			return gitRemoteInfo{host: host, port: "22", repoPath: repoPath}
 		}
 	}
 
 	// Handle HTTPS URLs
 	parsed, err := url.Parse(gitURL)
 	if err == nil && parsed.Host != "" {
+		port := parsed.Port()
+		if port == "" {
+			port = "22"
+		}
 		return gitRemoteInfo{
 			host:     parsed.Hostname(),
+			port:     port,
 			repoPath: strings.TrimPrefix(parsed.Path, "/"),
 		}
 	}
@@ -704,7 +726,8 @@ func main() {
 	}()
 
 	// FR-18: Git SSH proxy on :9091
-	if err := startGitProxy(ctx, remote.host, remote.repoPath); err != nil {
+	gitHostAddr := fmt.Sprintf("%s:%s", remote.host, remote.port)
+	if err := startGitProxy(ctx, gitHostAddr, remote.repoPath); err != nil {
 		log.Fatalf("git proxy error: %v", err)
 	}
 
@@ -779,10 +802,17 @@ func main() {
 		healthServer.Shutdown(shutdownCtx)
 	}()
 
-	// Wait for active SSH sessions to complete (up to grace period).
-	// The git proxy listener is closed (cancel above), so no new connections.
-	// Existing sessions will finish or be killed when shutdownCtx expires.
-	sshWg.Wait()
+	// Wait for active SSH sessions with timeout — don't hang indefinitely.
+	sshDone := make(chan struct{})
+	go func() {
+		sshWg.Wait()
+		close(sshDone)
+	}()
+	select {
+	case <-sshDone:
+	case <-shutdownCtx.Done():
+		logJSON("NEMO_SIDECAR", "warn", "SSH session drain timed out, proceeding with shutdown")
+	}
 
 	wg.Wait()
 	logJSON("NEMO_SIDECAR", "info", "shutdown complete")

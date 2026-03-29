@@ -175,7 +175,7 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
         spec: Some(JobSpec {
             active_deadline_seconds: active_deadline,
             backoff_limit: Some(0), // No K8s-level retries; we handle retries in the loop engine
-            ttl_seconds_after_finished: Some(300),
+            ttl_seconds_after_finished: Some(3600), // 1 hour — must outlive reconciler delays
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(labels),

@@ -24,15 +24,17 @@ pub async fn start(
     State(state): State<AppState>,
     Json(req): Json<StartRequest>,
 ) -> Result<impl IntoResponse, NemoError> {
-    // Validate engineer name: must be non-empty, alphanumeric + hyphens only
+    // Validate engineer name: must be non-empty, lowercase alphanumeric + hyphens.
+    // Lowercase enforced to prevent normalization collisions in K8s Secret names.
     if req.engineer.is_empty()
         || !req
             .engineer
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
         return Err(NemoError::BadRequest(
-            "engineer must be non-empty and contain only alphanumeric, hyphen, or underscore characters".to_string(),
+            "engineer must be non-empty, lowercase, and contain only a-z, 0-9, or hyphen"
+                .to_string(),
         ));
     }
 
@@ -411,10 +413,11 @@ pub async fn upsert_credentials(
         || !req
             .engineer
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
         return Err(NemoError::BadRequest(
-            "engineer must be non-empty and contain only alphanumeric, hyphen, or underscore characters".to_string(),
+            "engineer must be non-empty, lowercase, and contain only a-z, 0-9, or hyphen"
+                .to_string(),
         ));
     }
 
