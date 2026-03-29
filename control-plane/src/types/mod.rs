@@ -94,6 +94,91 @@ pub enum LoopKind {
     Implement,
 }
 
+/// Stage name mapping between short names (used in jobs, API, logs, prompts)
+/// and DB enum values (used in Postgres `loop_stage` column).
+///
+/// | Short name | DB enum value |
+/// |------------|---------------|
+/// | implement  | implementing  |
+/// | test       | testing       |
+/// | review     | reviewing     |
+/// | audit      | spec_audit    |
+/// | revise     | spec_revise   |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    Implement,
+    Test,
+    Review,
+    Audit,
+    Revise,
+}
+
+impl Stage {
+    /// Short name used in jobs, API, logs, and prompt template filenames.
+    pub fn short_name(self) -> &'static str {
+        match self {
+            Self::Implement => "implement",
+            Self::Test => "test",
+            Self::Review => "review",
+            Self::Audit => "audit",
+            Self::Revise => "revise",
+        }
+    }
+
+    /// DB enum value used in Postgres `loop_stage` column.
+    pub fn db_name(self) -> &'static str {
+        match self {
+            Self::Implement => "implementing",
+            Self::Test => "testing",
+            Self::Review => "reviewing",
+            Self::Audit => "spec_audit",
+            Self::Revise => "spec_revise",
+        }
+    }
+
+    /// Prompt template filename (without directory).
+    pub fn prompt_filename(self) -> &'static str {
+        match self {
+            Self::Implement => "implement.md",
+            Self::Test => "test.md",
+            Self::Review => "review.md",
+            Self::Audit => "spec-audit.md",
+            Self::Revise => "spec-revise.md",
+        }
+    }
+
+    /// Parse a short name into a Stage.
+    pub fn from_short_name(name: &str) -> Option<Self> {
+        match name {
+            "implement" => Some(Self::Implement),
+            "test" => Some(Self::Test),
+            "review" => Some(Self::Review),
+            "audit" => Some(Self::Audit),
+            "revise" => Some(Self::Revise),
+            _ => None,
+        }
+    }
+
+    /// Parse a DB enum value into a Stage.
+    pub fn from_db_name(name: &str) -> Option<Self> {
+        match name {
+            "implementing" => Some(Self::Implement),
+            "testing" => Some(Self::Test),
+            "reviewing" => Some(Self::Review),
+            "spec_audit" => Some(Self::Audit),
+            "spec_revise" => Some(Self::Revise),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Stage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.short_name())
+    }
+}
+
 /// Decision from evaluating a stage output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
@@ -343,5 +428,67 @@ mod tests {
         assert!(LoopState::Reviewing.is_active_stage());
         assert!(!LoopState::Pending.is_active_stage());
         assert!(!LoopState::Converged.is_active_stage());
+    }
+
+    #[test]
+    fn test_stage_short_names() {
+        assert_eq!(Stage::Implement.short_name(), "implement");
+        assert_eq!(Stage::Test.short_name(), "test");
+        assert_eq!(Stage::Review.short_name(), "review");
+        assert_eq!(Stage::Audit.short_name(), "audit");
+        assert_eq!(Stage::Revise.short_name(), "revise");
+    }
+
+    #[test]
+    fn test_stage_db_names() {
+        assert_eq!(Stage::Implement.db_name(), "implementing");
+        assert_eq!(Stage::Test.db_name(), "testing");
+        assert_eq!(Stage::Review.db_name(), "reviewing");
+        assert_eq!(Stage::Audit.db_name(), "spec_audit");
+        assert_eq!(Stage::Revise.db_name(), "spec_revise");
+    }
+
+    #[test]
+    fn test_stage_prompt_filenames() {
+        assert_eq!(Stage::Implement.prompt_filename(), "implement.md");
+        assert_eq!(Stage::Test.prompt_filename(), "test.md");
+        assert_eq!(Stage::Review.prompt_filename(), "review.md");
+        assert_eq!(Stage::Audit.prompt_filename(), "spec-audit.md");
+        assert_eq!(Stage::Revise.prompt_filename(), "spec-revise.md");
+    }
+
+    #[test]
+    fn test_stage_from_short_name() {
+        assert_eq!(Stage::from_short_name("implement"), Some(Stage::Implement));
+        assert_eq!(Stage::from_short_name("test"), Some(Stage::Test));
+        assert_eq!(Stage::from_short_name("review"), Some(Stage::Review));
+        assert_eq!(Stage::from_short_name("audit"), Some(Stage::Audit));
+        assert_eq!(Stage::from_short_name("revise"), Some(Stage::Revise));
+        assert_eq!(Stage::from_short_name("unknown"), None);
+    }
+
+    #[test]
+    fn test_stage_from_db_name() {
+        assert_eq!(Stage::from_db_name("implementing"), Some(Stage::Implement));
+        assert_eq!(Stage::from_db_name("testing"), Some(Stage::Test));
+        assert_eq!(Stage::from_db_name("reviewing"), Some(Stage::Review));
+        assert_eq!(Stage::from_db_name("spec_audit"), Some(Stage::Audit));
+        assert_eq!(Stage::from_db_name("spec_revise"), Some(Stage::Revise));
+        assert_eq!(Stage::from_db_name("unknown"), None);
+    }
+
+    #[test]
+    fn test_stage_display() {
+        assert_eq!(format!("{}", Stage::Implement), "implement");
+        assert_eq!(format!("{}", Stage::Audit), "audit");
+    }
+
+    #[test]
+    fn test_stage_roundtrip_through_db_name() {
+        for stage in [Stage::Implement, Stage::Test, Stage::Review, Stage::Audit, Stage::Revise] {
+            let db = stage.db_name();
+            let parsed = Stage::from_db_name(db).unwrap();
+            assert_eq!(parsed, stage);
+        }
     }
 }
