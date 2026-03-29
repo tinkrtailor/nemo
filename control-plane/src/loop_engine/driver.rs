@@ -8,7 +8,7 @@ use crate::k8s::job_builder;
 use crate::k8s::{JobDispatcher, JobStatus};
 use crate::state::StateStore;
 use crate::types::verdict::{
-    AuditVerdict, FeedbackFile, FeedbackSource, ReviewVerdict, TestOutput,
+    AuditVerdict, FeedbackFile, FeedbackSource, ReviewVerdict, TestOutput, TestResultData,
 };
 use crate::types::{
     LoopContext, LoopKind, LoopRecord, LoopState, RoundRecord, StageConfig, SubState,
@@ -276,6 +276,13 @@ impl ConvergentLoopDriver {
             );
         }
 
+        // Persist session_id from the output so later rounds can resume the session.
+        if let Some(ref data) = verdict_json
+            && let Some(sid) = data.get("session_id").and_then(|v| v.as_str())
+        {
+            record.session_id = Some(sid.to_string());
+        }
+
         // Update the round record with output + completion time
         let rounds = self.store.get_rounds(record.id).await?;
         if let Some(round) = rounds
@@ -404,20 +411,33 @@ impl ConvergentLoopDriver {
                 }
             }
             "revise" => {
-                // Parse revise output to detect spec path changes
-                let revise_output: Option<crate::types::verdict::ReviseOutput> = last_round
-                    .and_then(|r| r.output.as_ref())
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
-                if let Some(ref output) = revise_output
-                    && output.updated_spec_path != record.spec_path
+                // Parse revise output to detect spec path changes.
+                // Try new ReviseResultData first, fall back to legacy ReviseOutput.
+                let updated_spec_path: Option<String> =
+                    last_round.and_then(|r| r.output.as_ref()).and_then(|v| {
+                        if let Ok(rd) = serde_json::from_value::<
+                            crate::types::verdict::ReviseResultData,
+                        >(v.clone())
+                        {
+                            Some(rd.revised_spec_path)
+                        } else if let Ok(legacy) =
+                            serde_json::from_value::<crate::types::verdict::ReviseOutput>(v.clone())
+                        {
+                            Some(legacy.updated_spec_path)
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(ref new_path) = updated_spec_path
+                    && *new_path != record.spec_path
                 {
                     tracing::info!(
                         loop_id = %record.id,
                         old = %record.spec_path,
-                        new = %output.updated_spec_path,
+                        new = %new_path,
                         "Spec path updated by revise stage"
                     );
-                    record.spec_path = output.updated_spec_path.clone();
+                    record.spec_path = new_path.clone();
                 }
 
                 // After revise: check max rounds, then re-audit
@@ -462,16 +482,26 @@ impl ConvergentLoopDriver {
             .iter()
             .rfind(|r| r.round == record.round && r.stage == "test");
 
-        let output: Option<TestOutput> = test_round
-            .and_then(|r| r.output.as_ref())
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let raw = test_round.and_then(|r| r.output.as_ref());
 
-        match output {
-            Some(test_output) if test_output.passed => {
+        // Try new TestResultData shape first (from entrypoint NEMO_RESULT),
+        // fall back to legacy TestOutput for backward compatibility
+        let passed = raw.and_then(|v| {
+            if let Ok(td) = serde_json::from_value::<TestResultData>(v.clone()) {
+                Some(td.all_passed)
+            } else if let Ok(legacy) = serde_json::from_value::<TestOutput>(v.clone()) {
+                Some(legacy.passed)
+            } else {
+                None
+            }
+        });
+
+        match passed {
+            Some(true) => {
                 // Tests passed: advance to review
                 self.dispatch_review(record).await
             }
-            Some(test_output) => {
+            Some(false) => {
                 // Tests failed: feed back to implement (no review dispatched per spec)
                 if record.round >= record.max_rounds {
                     record.state = LoopState::Failed;
@@ -485,12 +515,36 @@ impl ConvergentLoopDriver {
                     return Ok(LoopState::Failed);
                 }
 
+                // Extract test failures from either format for feedback
+                let failures = raw.and_then(|v| {
+                    if let Ok(td) = serde_json::from_value::<TestResultData>(v.clone()) {
+                        let fails: Vec<_> = td
+                            .services
+                            .into_iter()
+                            .filter(|s| s.exit_code != 0)
+                            .map(|s| crate::types::verdict::TestFailure {
+                                service: s.name,
+                                test_command: s.test_command,
+                                test_name: None,
+                                exit_code: s.exit_code,
+                                stdout: s.stdout,
+                                stderr: s.stderr,
+                            })
+                            .collect();
+                        Some(fails)
+                    } else if let Ok(legacy) = serde_json::from_value::<TestOutput>(v.clone()) {
+                        Some(legacy.failures)
+                    } else {
+                        None
+                    }
+                });
+
                 // Create feedback file for next round
                 let feedback = FeedbackFile {
                     round: record.round as u32,
                     source: FeedbackSource::Test,
                     issues: None,
-                    failures: Some(test_output.failures),
+                    failures,
                 };
 
                 record.round += 1;

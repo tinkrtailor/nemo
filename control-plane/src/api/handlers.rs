@@ -451,20 +451,27 @@ pub async fn upsert_credentials(
             ..Default::default()
         };
 
-        // Use server-side apply for idempotent create-or-update
+        // Create-or-update K8s Secret
         match secrets_api
             .create(&kube::api::PostParams::default(), &secret)
             .await
         {
             Ok(_) => {}
             Err(kube::Error::Api(err)) if err.code == 409 => {
-                // Already exists — replace
-                let _ = secrets_api
+                // Already exists — replace. Propagate failure so caller knows creds aren't updated.
+                if let Err(e) = secrets_api
                     .replace(&secret_name, &kube::api::PostParams::default(), &secret)
-                    .await;
+                    .await
+                {
+                    return Err(NemoError::Internal(format!(
+                        "Failed to update K8s Secret {secret_name}: {e}"
+                    )));
+                }
             }
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to create K8s Secret for credentials");
+                return Err(NemoError::Internal(format!(
+                    "Failed to create K8s Secret {secret_name}: {e}"
+                )));
             }
         }
     }

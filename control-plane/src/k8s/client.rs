@@ -124,7 +124,7 @@ impl JobDispatcher for KubeJobDispatcher {
             if let Some(pod_name) = &pod.metadata.name {
                 let log_params = kube::api::LogParams {
                     container: Some("agent".to_string()),
-                    tail_lines: Some(100),
+                    tail_lines: Some(1000),
                     ..Default::default()
                 };
                 match pods_api.logs(pod_name, &log_params).await {
