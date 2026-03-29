@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# nemo-agent-entry: Agent entrypoint script for Nemo agent jobs.
+# FR-4 through FR-13: Stage dispatch, environment setup, result output.
+set -euo pipefail
+
+# --- FR-30: Wait for sidecar readiness (Finding 10: integer arithmetic, no bc) ---
+READY_FILE="/tmp/shared/ready"
+TIMEOUT=30
+ELAPSED=0
+
+while [ ! -f "$READY_FILE" ]; do
+    ELAPSED=$((ELAPSED + 1))
+    if [ "$ELAPSED" -ge "$((TIMEOUT * 10))" ]; then
+        echo "NEMO_ERROR: sidecar: readiness timeout after ${TIMEOUT}s" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+
+# --- Validate required environment variables (Edge Case: Template variable not set) ---
+required_vars="STAGE SPEC_PATH BRANCH SHA ROUND LOOP_ID"
+missing=""
+for var in $required_vars; do
+    if [ -z "${!var:-}" ]; then
+        missing="$missing $var"
+    fi
+done
+if [ -n "$missing" ]; then
+    echo "NEMO_ERROR: entrypoint: missing required environment variables:$missing" >&2
+    exit 1
+fi
+
+# --- Check worktree mount (Edge Case: Worktree volume not mounted) ---
+if [ ! -d "/work" ] || { [ ! -f "/work/.git" ] && [ ! -d "/work/.git" ]; }; then
+    echo "NEMO_ERROR: entrypoint: worktree volume not found at /work" >&2
+    exit 1
+fi
+
+# --- FR-4: Load prompt template ---
+# FR-34: Repo-side overrides take precedence
+STAGE_FILENAME=""
+case "$STAGE" in
+    implement) STAGE_FILENAME="implement.md" ;;
+    revise)    STAGE_FILENAME="spec-revise.md" ;;
+    review)    STAGE_FILENAME="review.md" ;;
+    audit)     STAGE_FILENAME="spec-audit.md" ;;
+    test)      ;; # No prompt template for test stage
+    *)
+        echo "NEMO_ERROR: entrypoint: unknown stage '$STAGE'" >&2
+        exit 1
+        ;;
+esac
+
+PROMPT_CONTENT=""
+if [ -n "$STAGE_FILENAME" ]; then
+    REPO_PROMPT="/work/.nemo/prompts/$STAGE_FILENAME"
+    DEFAULT_PROMPT="/etc/nemo/prompts/$STAGE_FILENAME"
+
+    if [ -f "$REPO_PROMPT" ]; then
+        PROMPT_CONTENT=$(cat "$REPO_PROMPT")
+    elif [ -f "$DEFAULT_PROMPT" ]; then
+        PROMPT_CONTENT=$(cat "$DEFAULT_PROMPT")
+    else
+        echo "NEMO_ERROR: entrypoint: prompt template not found: $STAGE_FILENAME" >&2
+        exit 1
+    fi
+
+    # FR-39: Variable injection
+    SPEC_CONTENT=""
+    if [ -f "/work/$SPEC_PATH" ]; then
+        SPEC_CONTENT=$(cat "/work/$SPEC_PATH")
+    fi
+
+    FEEDBACK_CONTENT=""
+    if [ -n "${FEEDBACK_PATH:-}" ] && [ -f "$FEEDBACK_PATH" ]; then
+        FEEDBACK_CONTENT=$(cat "$FEEDBACK_PATH")
+    fi
+
+    DIFF_CONTENT=""
+    if [ "$STAGE" = "review" ] || [ "$STAGE" = "audit" ]; then
+        # Generate diff for review context
+        DIFF_CONTENT=$(cd /work && git diff "origin/main...$SHA" 2>/dev/null || echo "")
+    fi
+
+    PROMPT_CONTENT="${PROMPT_CONTENT//\{\{SPEC\}\}/$SPEC_CONTENT}"
+    PROMPT_CONTENT="${PROMPT_CONTENT//\{\{DIFF\}\}/$DIFF_CONTENT}"
+    PROMPT_CONTENT="${PROMPT_CONTENT//\{\{FEEDBACK\}\}/$FEEDBACK_CONTENT}"
+    PROMPT_CONTENT="${PROMPT_CONTENT//\{\{BRANCH\}\}/$BRANCH}"
+    PROMPT_CONTENT="${PROMPT_CONTENT//\{\{SHA\}\}/$SHA}"
+    PROMPT_CONTENT="${PROMPT_CONTENT//\{\{AFFECTED_SERVICES\}\}/${AFFECTED_SERVICES:-[]}}"
+
+    # Write assembled prompt to a temp file for CLI tools
+    PROMPT_FILE="/tmp/nemo-prompt-$$"
+    echo "$PROMPT_CONTENT" > "$PROMPT_FILE"
+fi
+
+# --- Sidecar connection check helper ---
+check_sidecar() {
+    if ! curl -sf http://localhost:9092/ >/dev/null 2>&1; then
+        echo "NEMO_ERROR: sidecar: connection refused on proxy port 9092" >&2
+        # FR-22: Exit code 111 for sidecar connection failure
+        exit 111
+    fi
+}
+
+# --- Helper: run CLI as child process, extract result, emit NEMO_RESULT: ---
+# Finding 1: exec replaces the process, preventing NEMO_RESULT emission.
+# Instead, run as child, capture output, extract final assistant payload.
+run_and_emit_result() {
+    local stage_name="$1"
+    shift
+    local cli_stdout="/tmp/cli-stdout-$$"
+    local cli_stderr="/tmp/cli-stderr-$$"
+    local exit_code=0
+
+    # Run CLI, capturing stdout and stderr separately
+    set +e
+    "$@" > "$cli_stdout" 2>"$cli_stderr"
+    exit_code=$?
+    set -e
+
+    if [ "$exit_code" -ne 0 ]; then
+        local stderr_tail
+        stderr_tail=$(tail -c 5000 "$cli_stderr" 2>/dev/null || echo "")
+        # Build a failure result envelope
+        local result
+        result=$(jq -n \
+            --arg stage "$stage_name" \
+            --argjson exit_code "$exit_code" \
+            --arg stderr "$stderr_tail" \
+            '{stage: $stage, data: {exit_code: $exit_code, error: $stderr}}')
+        echo "$result" > /output/result.json
+        echo "NEMO_RESULT:$result"
+        exit "$exit_code"
+    fi
+
+    # For stream-json output (claude), extract the final result message
+    # For json output (opencode), the whole stdout is the result
+    local result_data
+    if [ "$stage_name" = "implement" ] || [ "$stage_name" = "revise" ]; then
+        # Claude stream-json: last assistant message is the result
+        result_data=$(jq -s '[.[] | select(.type == "assistant")] | last // empty' "$cli_stdout" 2>/dev/null || cat "$cli_stdout")
+    else
+        # OpenCode json: entire output is structured
+        result_data=$(cat "$cli_stdout")
+    fi
+
+    local result
+    result=$(jq -n --arg stage "$stage_name" --argjson data "$result_data" '{stage: $stage, data: $data}' 2>/dev/null || \
+        jq -n --arg stage "$stage_name" --arg data "$result_data" '{stage: $stage, data: $data}')
+    echo "$result" > /output/result.json
+    echo "NEMO_RESULT:$result"
+}
+
+# --- FR-4: Stage dispatch ---
+case "$STAGE" in
+    implement|revise)
+        # FR-5, FR-7: Claude Code for implement/revise
+        # Use --prompt-file to avoid argv length limits on large specs/diffs
+        CLAUDE_ARGS=(--prompt-file "$PROMPT_FILE" --output-format stream-json --dangerously-skip-permissions)
+        if [ -n "${SESSION_ID:-}" ]; then
+            CLAUDE_ARGS+=(--resume "$SESSION_ID")
+        fi
+        run_and_emit_result "$STAGE" claude "${CLAUDE_ARGS[@]}"
+        ;;
+
+    review|audit)
+        # FR-6, FR-7: OpenCode for review/audit (read-only)
+        export OPENCODE_PERMISSIONS='{"edit":"deny","bash":"deny","read":"allow"}'
+        # Use --prompt-file to avoid argv length limits on large specs/diffs
+        OPENCODE_ARGS=(run --format json --prompt-file "$PROMPT_FILE")
+        if [ -n "${SESSION_ID:-}" ]; then
+            OPENCODE_ARGS+=(-s "$SESSION_ID")
+        fi
+        run_and_emit_result "$STAGE" opencode "${OPENCODE_ARGS[@]}"
+        ;;
+
+    test)
+        # FR-42a through FR-42d: Run test commands for affected services
+        if [ -z "${AFFECTED_SERVICES:-}" ]; then
+            echo "NEMO_ERROR: test: AFFECTED_SERVICES not set" >&2
+            exit 1
+        fi
+
+        # FR-42b: Read test commands from nemo.toml
+        TOML_FILE="/work/nemo.toml"
+        if [ ! -f "$TOML_FILE" ]; then
+            echo "NEMO_ERROR: test: nemo.toml not found at $TOML_FILE" >&2
+            exit 1
+        fi
+
+        TOML_JSON=$(tomlq -r . "$TOML_FILE")
+        RESULTS="[]"
+        ALL_PASSED=true
+        CI_STATUS="passed"
+
+        # Iterate over affected services
+        for svc in $(echo "$AFFECTED_SERVICES" | jq -r '.[]'); do
+            cmd=$(echo "$TOML_JSON" | jq -r ".services[\"$svc\"].test // empty")
+            if [ -z "$cmd" ]; then
+                # Service not found in config - unknown status
+                RESULTS=$(echo "$RESULTS" | jq --arg name "$svc" --arg cmd "unknown" \
+                    '. + [{"name": $name, "test_command": $cmd, "exit_code": -1, "stdout": "", "stderr": "service not found in nemo.toml"}]')
+                CI_STATUS="unknown"
+                ALL_PASSED=false
+                continue
+            fi
+
+            # FR-42c: Run test, capture stdout and stderr separately (Finding 11)
+            STDOUT_FILE="/tmp/test-stdout-$$-$svc"
+            STDERR_FILE="/tmp/test-stderr-$$-$svc"
+            set +e
+            (cd /work && eval "$cmd") > "$STDOUT_FILE" 2>"$STDERR_FILE"
+            TEST_EXIT=$?
+            set -e
+
+            STDOUT_PART=$(head -c 10000 "$STDOUT_FILE" 2>/dev/null || echo "")
+            STDERR_PART=$(head -c 5000 "$STDERR_FILE" 2>/dev/null || echo "")
+
+            RESULTS=$(echo "$RESULTS" | jq \
+                --arg name "$svc" \
+                --arg cmd "$cmd" \
+                --argjson exit "$TEST_EXIT" \
+                --arg stdout "$STDOUT_PART" \
+                --arg stderr "$STDERR_PART" \
+                '. + [{"name": $name, "test_command": $cmd, "exit_code": $exit, "stdout": $stdout, "stderr": $stderr}]')
+
+            if [ "$TEST_EXIT" -ne 0 ]; then
+                ALL_PASSED=false
+                # Distinguish infra failures from test failures.
+                # Exit codes 124 (timeout), 126 (not executable), 127 (not found),
+                # and >= 128 (killed by signal) indicate infra issues.
+                if [ "$TEST_EXIT" -eq 124 ] || [ "$TEST_EXIT" -ge 126 ]; then
+                    CI_STATUS="unknown"
+                elif [ "$CI_STATUS" = "passed" ]; then
+                    CI_STATUS="failed"
+                fi
+            fi
+        done
+
+        # FR-42d: Write structured result
+        RESULT_DATA=$(jq -n \
+            --argjson services "$RESULTS" \
+            --argjson all_passed "$ALL_PASSED" \
+            --arg ci_status "$CI_STATUS" \
+            '{services: $services, all_passed: $all_passed, ci_status: $ci_status, token_usage: {input: 0, output: 0}}')
+
+        RESULT_ENVELOPE=$(jq -n --arg stage "test" --argjson data "$RESULT_DATA" '{stage: $stage, data: $data}')
+
+        # FR-13: Write to /output/result.json and stdout with prefix
+        echo "$RESULT_ENVELOPE" > /output/result.json
+        echo "NEMO_RESULT:$RESULT_ENVELOPE"
+        exit 0
+        ;;
+
+    *)
+        echo "NEMO_ERROR: entrypoint: unknown stage '$STAGE'" >&2
+        exit 1
+        ;;
+esac

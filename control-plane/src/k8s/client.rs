@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, DeleteParams, ListParams, PostParams};
 use kube::Client;
+use kube::api::{Api, DeleteParams, ListParams, PostParams};
 
 use super::{JobDispatcher, JobStatus};
 use crate::error::Result;
@@ -108,13 +108,54 @@ impl JobDispatcher for KubeJobDispatcher {
             Err(e) => Err(e.into()),
         }
     }
+
+    async fn get_job_logs(&self, name: &str, namespace: &str) -> Result<String> {
+        let ns = if namespace.is_empty() {
+            &self.namespace
+        } else {
+            namespace
+        };
+        // Find pods for this job, then get logs from the "agent" container
+        let pods_api: Api<Pod> = Api::namespaced(self.client.clone(), ns);
+        let lp = ListParams::default().labels(&format!("job-name={name}"));
+        let pod_list = pods_api.list(&lp).await?;
+
+        for pod in &pod_list.items {
+            if let Some(pod_name) = &pod.metadata.name {
+                let log_params = kube::api::LogParams {
+                    container: Some("agent".to_string()),
+                    tail_lines: Some(5000), // Large enough for verbose agent output
+                    ..Default::default()
+                };
+                match pods_api.logs(pod_name, &log_params).await {
+                    Ok(logs) => return Ok(logs),
+                    Err(e) => {
+                        tracing::warn!(pod = %pod_name, error = %e, "Failed to get pod logs");
+                    }
+                }
+            }
+        }
+
+        if pod_list.items.is_empty() {
+            // No pods found — job may have been cleaned up already
+            Ok(String::new())
+        } else {
+            // Pods exist but all log retrievals failed
+            Err(crate::error::NemoError::Internal(format!(
+                "Failed to retrieve logs from any pod for job {name}"
+            )))
+        }
+    }
 }
 
-/// Extract the exit code from a pod's first terminated container.
+/// Extract the exit code from the pod's `agent` container specifically.
+/// In a multi-container pod we must not mis-tag from the sidecar container.
 fn extract_exit_code(pod: &Pod) -> Option<i32> {
     let status = pod.status.as_ref()?;
     for cs in status.container_statuses.as_ref()? {
-        if let Some(ref terminated) = cs.state.as_ref()?.terminated {
+        if cs.name == "agent"
+            && let Some(ref terminated) = cs.state.as_ref()?.terminated
+        {
             return Some(terminated.exit_code);
         }
     }

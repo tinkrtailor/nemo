@@ -3,17 +3,17 @@ use std::time::Duration;
 
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
-use tokio::sync::{watch, Notify};
+use tokio::sync::{Notify, watch};
 use tracing_subscriber::EnvFilter;
 
 use nemo_control_plane::api::{self, AppState};
 use nemo_control_plane::config::NemoConfig;
 use nemo_control_plane::git::GitOperations;
-use nemo_control_plane::k8s::client::KubeJobDispatcher;
 use nemo_control_plane::k8s::JobDispatcher;
-use nemo_control_plane::loop_engine::{watcher::JobWatcher, ConvergentLoopDriver, Reconciler};
-use nemo_control_plane::state::postgres::PgStateStore;
+use nemo_control_plane::k8s::client::KubeJobDispatcher;
+use nemo_control_plane::loop_engine::{ConvergentLoopDriver, Reconciler, watcher::JobWatcher};
 use nemo_control_plane::state::StateStore;
+use nemo_control_plane::state::postgres::PgStateStore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -28,9 +28,14 @@ async fn main() -> anyhow::Result<()> {
     let config = NemoConfig::load().map_err(|e| anyhow::anyhow!(e))?;
     let config_arc = Arc::new(config.clone());
 
+    // Fail fast if NEMO_API_KEY is not set — better than 500 on every request
+    if std::env::var("NEMO_API_KEY").is_err() {
+        anyhow::bail!("NEMO_API_KEY environment variable is required");
+    }
+
     // Connect to Postgres and run migrations
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| config.cluster.database_url.clone());
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| config.cluster.database_url.clone());
 
     let pool = PgPoolOptions::new()
         .max_connections(config.cluster.max_connections)
@@ -47,13 +52,15 @@ async fn main() -> anyhow::Result<()> {
     let kube_client = kube::Client::try_default().await?;
     tracing::info!("Connected to Kubernetes cluster");
     let dispatcher: Arc<dyn JobDispatcher> = Arc::new(KubeJobDispatcher::new(
-        kube_client,
+        kube_client.clone(),
         config.cluster.jobs_namespace.clone(),
     ));
 
     // Build git operations (bare repo)
-    let bare_repo_path = std::env::var("NEMO_BARE_REPO_PATH")
-        .unwrap_or_else(|_| "/data/bare-repo.git".to_string());
+    // BARE_REPO_PATH is set by Terraform (control-plane.tf); fall back for local dev.
+    let bare_repo_path = std::env::var("BARE_REPO_PATH")
+        .or_else(|_| std::env::var("NEMO_BARE_REPO_PATH"))
+        .unwrap_or_else(|_| "/bare-repo".to_string());
     let git: Arc<dyn GitOperations> = Arc::new(
         nemo_control_plane::git::bare::BareRepoGitOperations::new(&bare_repo_path),
     );
@@ -71,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
         store: store.clone(),
         git: git.clone(),
         config: config_arc,
+        kube_client: Some(kube_client),
     };
     let router = api::build_router(app_state);
 
@@ -97,7 +105,9 @@ async fn main() -> anyhow::Result<()> {
     let watcher_namespace = config.cluster.jobs_namespace.clone();
     let watcher_rx = shutdown_rx.clone();
     let watcher_handle = tokio::spawn(async move {
-        job_watcher.run(watcher_client, &watcher_namespace, watcher_rx).await;
+        job_watcher
+            .run(watcher_client, &watcher_namespace, watcher_rx)
+            .await;
     });
 
     // Start API server
@@ -123,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
     {
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             let mut sigterm = signal(SignalKind::terminate())?;
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {},

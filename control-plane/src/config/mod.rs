@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Repo-level configuration loaded from `nemo.toml`.
@@ -16,28 +17,51 @@ pub struct NemoConfig {
     pub ship: ShipConfig,
     #[serde(default)]
     pub harden: HardenMergeConfig,
+    /// Service definitions: `[services.<name>]` with `path` and `test` fields.
+    /// Used by the control plane to map changed file paths to services and
+    /// look up test commands for the TEST stage (FR-42a, FR-42b).
+    #[serde(default)]
+    pub services: HashMap<String, ServiceConfig>,
+}
+
+/// Configuration for a single service in the monorepo.
+/// Defined under `[services.<name>]` in nemo.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceConfig {
+    /// Path prefix in the repo that belongs to this service.
+    /// Used to map git diff paths to affected services.
+    pub path: String,
+    /// Shell command to run tests for this service.
+    pub test: String,
+    /// Optional JVM tag for elevated resource limits (FR-28).
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl NemoConfig {
     /// Load config from `NEMO_CONFIG_PATH` env var, or `./nemo.toml` (repo-local),
     /// or `/etc/nemo/nemo.toml` (system), or fall back to defaults.
     pub fn load() -> std::result::Result<Self, String> {
-        let candidates: Vec<String> = if let Ok(explicit) = std::env::var("NEMO_CONFIG_PATH") {
-            vec![explicit]
+        let explicit = std::env::var("NEMO_CONFIG_PATH").ok();
+
+        let candidates: Vec<String> = if let Some(ref explicit_path) = explicit {
+            vec![explicit_path.clone()]
         } else {
-            vec![
-                "./nemo.toml".to_string(),
-                "/etc/nemo/nemo.toml".to_string(),
-            ]
+            vec!["./nemo.toml".to_string(), "/etc/nemo/nemo.toml".to_string()]
         };
 
-        let path = candidates.iter()
+        let path = candidates
+            .iter()
             .map(std::path::PathBuf::from)
             .find(|p| p.exists());
 
         let path = match path {
             Some(p) => p,
             None => {
+                // If NEMO_CONFIG_PATH was explicitly set but doesn't exist, fail hard
+                if let Some(ref explicit_path) = explicit {
+                    return Err(format!("NEMO_CONFIG_PATH={explicit_path} does not exist"));
+                }
                 tracing::warn!("No config file found at {:?}, using defaults", candidates);
                 return Ok(Self::default());
             }
@@ -115,7 +139,6 @@ fn default_max_rounds_auto_merge() -> u32 {
 fn default_merge_strategy() -> String {
     "squash".to_string()
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LimitsConfig {
@@ -258,6 +281,21 @@ pub struct ClusterConfig {
     /// Bare repo PVC claim name.
     #[serde(default = "default_bare_repo_pvc")]
     pub bare_repo_pvc: String,
+    /// Auth sidecar container image.
+    #[serde(default = "default_sidecar_image")]
+    pub sidecar_image: String,
+    /// Session state PVC claim name (FR-47b).
+    #[serde(default = "default_sessions_pvc")]
+    pub sessions_pvc: String,
+    /// Image pull secret name (optional, for private registries).
+    #[serde(default)]
+    pub image_pull_secret: Option<String>,
+    /// Git repository URL (SSH format, used for sidecar git proxy host restriction).
+    #[serde(default)]
+    pub git_repo_url: String,
+    /// ConfigMap name containing SSH known_hosts for sidecar host key verification.
+    #[serde(default = "default_ssh_known_hosts_configmap")]
+    pub ssh_known_hosts_configmap: String,
     /// API server bind address.
     #[serde(default = "default_bind_addr")]
     pub bind_addr: String,
@@ -280,6 +318,11 @@ impl Default for ClusterConfig {
             system_namespace: default_system_namespace(),
             agent_image: default_agent_image(),
             bare_repo_pvc: default_bare_repo_pvc(),
+            sidecar_image: default_sidecar_image(),
+            sessions_pvc: default_sessions_pvc(),
+            image_pull_secret: None,
+            git_repo_url: String::new(),
+            ssh_known_hosts_configmap: default_ssh_known_hosts_configmap(),
             bind_addr: default_bind_addr(),
             port: default_port(),
             max_connections: default_max_connections(),
@@ -301,7 +344,16 @@ fn default_agent_image() -> String {
     "nemo-agent:latest".to_string()
 }
 fn default_bare_repo_pvc() -> String {
-    "bare-repo-pvc".to_string()
+    "nemo-bare-repo".to_string()
+}
+fn default_sidecar_image() -> String {
+    "nemo-sidecar:latest".to_string()
+}
+fn default_ssh_known_hosts_configmap() -> String {
+    "nemo-ssh-known-hosts".to_string()
+}
+fn default_sessions_pvc() -> String {
+    "nemo-sessions".to_string()
 }
 fn default_bind_addr() -> String {
     "0.0.0.0".to_string()
@@ -380,5 +432,45 @@ mod tests {
         assert_eq!(config.timeouts.implement_secs, 3600);
         assert_eq!(config.timeouts.review_secs, 900); // default
         assert_eq!(config.models.implementor, "claude-sonnet-4");
+    }
+
+    #[test]
+    fn test_services_config_deserialize() {
+        let toml_str = r#"
+            [services.api]
+            path = "packages/api"
+            test = "cargo test -p api"
+
+            [services.web]
+            path = "packages/web"
+            test = "npm test"
+            tags = ["jvm"]
+        "#;
+        let config: NemoConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.services.len(), 2);
+
+        let api = &config.services["api"];
+        assert_eq!(api.path, "packages/api");
+        assert_eq!(api.test, "cargo test -p api");
+        assert!(api.tags.is_empty());
+
+        let web = &config.services["web"];
+        assert_eq!(web.path, "packages/web");
+        assert_eq!(web.test, "npm test");
+        assert_eq!(web.tags, vec!["jvm"]);
+    }
+
+    #[test]
+    fn test_default_config_has_no_services() {
+        let config = NemoConfig::default();
+        assert!(config.services.is_empty());
+    }
+
+    #[test]
+    fn test_cluster_config_new_fields() {
+        let config = ClusterConfig::default();
+        assert_eq!(config.sidecar_image, "nemo-sidecar:latest");
+        assert_eq!(config.sessions_pvc, "nemo-sessions");
+        assert!(config.image_pull_secret.is_none());
     }
 }

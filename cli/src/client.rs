@@ -10,17 +10,16 @@ pub struct NemoClient {
 }
 
 impl NemoClient {
-    pub fn new(base_url: &str, api_key: Option<&str>, insecure: bool) -> Self {
+    pub fn new(base_url: &str, api_key: Option<&str>, insecure: bool) -> Result<Self> {
         let client = Client::builder()
             .danger_accept_invalid_certs(insecure)
-            .build()
-            .expect("Failed to create HTTP client");
+            .build()?;
 
-        Self {
+        Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.map(String::from),
-        }
+        })
     }
 
     fn auth_header(&self) -> Option<String> {
@@ -89,13 +88,26 @@ impl NemoClient {
     }
 
     /// Register credentials with the control plane.
-    pub async fn register_credentials(&self, engineer: &str, provider: &str, cred_path: &str) -> Result<()> {
-        let body = serde_json::json!({
+    pub async fn register_credentials(
+        &self,
+        engineer: &str,
+        provider: &str,
+        cred_content: &str,
+        name: Option<&str>,
+        email: Option<&str>,
+    ) -> Result<()> {
+        let mut body = serde_json::json!({
             "engineer": engineer,
             "provider": provider,
-            "credential_ref": cred_path,
+            "credential_ref": cred_content,
             "valid": true,
         });
+        if let Some(n) = name {
+            body["name"] = serde_json::json!(n);
+        }
+        if let Some(e) = email {
+            body["email"] = serde_json::json!(e);
+        }
         let _: serde_json::Value = self.post("/credentials", &body).await?;
         Ok(())
     }

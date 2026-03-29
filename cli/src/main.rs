@@ -133,13 +133,17 @@ enum Commands {
 
     /// Push local model credentials to cluster
     Auth {
-        /// Push Claude credentials only
+        /// Push Claude/Anthropic credentials only
         #[arg(long)]
         claude: bool,
 
         /// Push OpenAI credentials only
         #[arg(long)]
         openai: bool,
+
+        /// Push SSH key only
+        #[arg(long)]
+        ssh: bool,
     },
 
     /// Edit ~/.nemo/config.toml
@@ -164,12 +168,34 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Handle config command before loading config — a broken config file
+    // must not prevent `nemo config --set` from working.
+    if let Commands::Config { ref set, ref get } = cli.command {
+        return commands::config::run(set.clone(), get.clone());
+    }
+
+    // Init is local-only — don't require config
+    if let Commands::Init { force } = cli.command {
+        return commands::init::run(force);
+    }
+
     let eng_config = config::load_config()?;
 
     let server_url = cli.server.unwrap_or(eng_config.server_url.clone());
 
-    let insecure = cli.insecure || matches!(std::env::var("NEMO_INSECURE").as_deref(), Ok("true" | "1"));
-    let http_client = client::NemoClient::new(&server_url, eng_config.api_key.as_deref(), insecure);
+    let insecure =
+        cli.insecure || matches!(std::env::var("NEMO_INSECURE").as_deref(), Ok("true" | "1"));
+    // Warn early if api_key is missing — commands that hit the server will fail
+    if eng_config.api_key.is_none() {
+        // Init and Config don't need an API key
+        if !matches!(cli.command, Commands::Init { .. }) {
+            anyhow::bail!("API key not configured. Run: nemo config --set api_key=<your-key>");
+        }
+    }
+
+    let http_client =
+        client::NemoClient::new(&server_url, eng_config.api_key.as_deref(), insecure)?;
 
     // Validate engineer is configured for commands that need it
     // Status --team doesn't need engineer
@@ -182,9 +208,7 @@ async fn main() -> anyhow::Result<()> {
         _ => false,
     };
     if needs_engineer && eng_config.engineer.is_empty() {
-        anyhow::bail!(
-            "Engineer name not configured. Run: nemo config --set engineer=<your-name>"
-        );
+        anyhow::bail!("Engineer name not configured. Run: nemo config --set engineer=<your-name>");
     }
 
     match cli.command {
@@ -276,11 +300,25 @@ async fn main() -> anyhow::Result<()> {
         Commands::Resume { loop_id } => {
             commands::resume::run(&http_client, &loop_id).await?;
         }
-        Commands::Init { force } => {
-            commands::init::run(force)?;
+        Commands::Init { .. } => {
+            // Handled above before config loading
+            unreachable!("Init is dispatched before config loading");
         }
-        Commands::Auth { claude, openai } => {
-            commands::auth::run(&http_client, &eng_config.engineer, claude, openai).await?;
+        Commands::Auth {
+            claude,
+            openai,
+            ssh,
+        } => {
+            commands::auth::run(
+                &http_client,
+                &eng_config.engineer,
+                &eng_config.name,
+                &eng_config.email,
+                claude,
+                openai,
+                ssh,
+            )
+            .await?;
         }
         Commands::Config { set, get } => {
             commands::config::run(set, get)?;

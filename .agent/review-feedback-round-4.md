@@ -1,23 +1,12 @@
-# Adversarial Review: Round 4 (OpenCode GPT-5.4)
+Not clean. I read all current Rust source under `control-plane/src` and `cli/src`, plus runtime sources `images/sidecar/main.go` and `images/base/nemo-agent-entry`.
 
-Most prior findings FIXED. 1 still broken, 7 new findings. Reviewer is getting pickier.
+- Critical — `control-plane/src/loop_engine/driver.rs:236`, `control-plane/src/git/mod.rs:229`: completed-job ingestion treats any branch tip change as divergence via `sha != expected_sha` instead of checking ancestry, so a normal successful agent commit pauses the loop instead of advancing.
+- High — `control-plane/src/k8s/job_builder.rs:333`: the `model-credentials` volume always requests both `openai` and `anthropic` keys; if only one provider is registered, pod startup fails on the missing key.
+- High — `control-plane/src/api/handlers.rs:413`: credential metadata is committed to Postgres before the K8s Secret write succeeds, so failed secret updates leave the system believing creds are valid while jobs still mount stale/missing secrets.
+- High — `control-plane/src/api/handlers.rs:460`: Secret updates use `replace()` without the existing `metadata.resourceVersion`, so rotating/updating an existing credential secret fails at runtime.
+- High — `cli/src/commands/auth.rs:82`, `cli/src/client.rs:92`, `control-plane/src/api/handlers.rs:439`, `images/sidecar/main.go:73`: CLI uploads credential file contents verbatim, but the sidecar consumes mounted files as raw API keys; JSON credential files become invalid auth headers at runtime.
+- High — `images/base/nemo-agent-entry:159`, `images/base/nemo-agent-entry:170`: assembled prompts are written to a temp file but then re-inlined into argv, so large specs/diffs can fail job launch with argument-length limits.
+- High — `images/sidecar/main.go:632`, `images/sidecar/main.go:660`, `images/sidecar/main.go:460`: malformed or missing `GIT_REPO_URL` falls back to `github.com` with an empty allowed repo path, so the git proxy starts “healthy” but can target the wrong host and skip repo-path enforcement.
+- Medium — `images/sidecar/main.go:752`, `images/sidecar/main.go:768`: shutdown drains only HTTP servers, not active SSH git sessions, so in-flight fetch/push operations can be cut off during pod termination.
 
-## STILL BROKEN
-
-R3-N4. **MEDIUM** - /credentials still stores `req.engineer.unwrap_or_default()` (handlers.rs:370). `engineer` is still optional in api.rs:145. Fix: make engineer required in the request struct (not Option), reject if empty.
-
-## NEW FINDINGS
-
-N7. **HIGH** - Retry/resume can re-create the same K8s Job name and hit AlreadyExists. Deterministic name in job_builder.rs:21, redispatch without cleanup in driver.rs:891. Fix: append retry count to job name, or delete the old Job before redispatching.
-
-N8. **HIGH** - Feedback files are modeled and paths passed, but nothing writes the JSON file to the worktree before redispatch. Feedback constructed in driver.rs:445 and driver.rs:574, ignored in driver.rs:853. Fix: write feedback JSON to the worktree (via git ops) before dispatching the next implement job.
-
-N9. **MEDIUM** - ship.require_passing_ci is dead config. Ship merge ignores it (config/mod.rs:27, driver.rs:498). Fix: check CI status before merging, or remove the config field.
-
-N10. **MEDIUM** - ship_mode + require_harden uses implement round limits because max_rounds computed before effective_harden (handlers.rs:62, 69). Fix: compute effective_harden first, then pick the right max_rounds.
-
-N11. **MEDIUM** - CLI approve/resume always print success even if server didn't act (approve.rs:17, resume.rs:17). Fix: check response status field before printing success.
-
-N12. **MEDIUM** - CLI config prints raw API keys to stdout (config.rs:11, 35). Fix: mask sensitive values when printing.
-
-N13. **LOW** - Job watcher exists but is never started from main, so wakeups are polling-only (watcher.rs:9, main.rs:81). Fix: start the watcher task in main alongside the reconciler.
+So Lane C is not converged yet. If you want, I can do a read-only Round 5 after these are fixed.

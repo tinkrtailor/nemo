@@ -1,39 +1,51 @@
-# Adversarial Review: Round 1 (OpenCode GPT-5.4)
+1. `images/base/nemo-agent-entry:111`, `images/base/nemo-agent-entry:122`, `control-plane/src/types/verdict.rs:56` — Severity: critical  
+   Implement/revise/review/audit `exec` the model CLIs directly in `stream-json`/`json` mode, but Lane C’s output contract requires the entrypoint to emit a single `NEMO_RESULT:` line. In production, pod logs will contain CLI event streams, not the required envelope, so the control plane cannot parse stage results.  
+   Fix: run the CLI as a child process, extract the final assistant payload, write `/output/result.json`, and print exactly one `NEMO_RESULT:` line.
 
-Fix ALL findings below. This is a cross-model adversarial review of your implementation.
+2. `control-plane/src/k8s/job_builder.rs:481`, `control-plane/src/k8s/job_builder.rs:485`, `control-plane/src/k8s/job_builder.rs:487` — Severity: critical  
+   The “egress enforcement” init container does not actually enforce proxy-only egress. It explicitly allows all TCP from UID 1000 and never adds a default DROP for other outbound TCP, so the agent can bypass the sidecar and connect directly to the internet.  
+   Fix: default-drop outbound traffic for the agent UID and only allow loopback / explicit sidecar ports, or transparently redirect outbound traffic through the proxy.
 
-## CRITICAL
+3. `control-plane/src/k8s/job_builder.rs:383`, `control-plane/src/k8s/job_builder.rs:439` — Severity: critical  
+   Claude session credentials are mounted directly into the untrusted agent container at `/work/home/.claude`. Any adversarial code running in IMPLEMENT/REVISE can read and exfiltrate the engineer’s auth material.  
+   Fix: move Claude auth behind the sidecar or another broker; do not mount raw model credentials into the agent container.
 
-1. **control-plane/src/main.rs:26-65**: Binary boots MemoryStateStore + MockJobDispatcher + MockGitOperations. No real DB, no migrations, no real job execution. Fix: wire PgStateStore, call run_migrations(), build real kube::Client/KubeJobDispatcher.
+4. `control-plane/src/k8s/job_builder.rs:307`, `terraform/k8s.tf:29` — Severity: critical  
+   Agent jobs mount PVC `nemo-bare-repo` in namespace `nemo-jobs`, but Terraform creates that PVC only in `nemo-system`. Namespaced PVCs are not cross-namespace mountable, so job pods will fail to start.  
+   Fix: create the PVC in `nemo-jobs` too, or redesign shared storage so the job namespace can mount it legally.
 
-2. **control-plane/src/api/auth.rs:17-25**: Any non-empty Bearer token accepted. Effectively unauthenticated. Fix: validate API keys against stored credentials or configured secret; reject unknown keys.
+5. `control-plane/src/k8s/job_builder.rs:307`, `control-plane/src/k8s/job_builder.rs:403` — Severity: critical  
+   The job mounts the entire bare-repo PVC at `/work` with no `subPath`, so the agent gets the PVC root instead of the prepared per-loop worktree. That breaks the worktree model and risks corrupting the shared repo area.  
+   Fix: pass the concrete worktree path into the job builder and mount it via `VolumeMount.sub_path`.
 
-3. **control-plane/src/loop_engine/driver.rs:173-443**: Completed jobs never write back output to RoundRecord. create_round_record() writes output: None, nothing calls update_round(). Loops stall because verdicts are never populated. Fix: on job success, fetch and persist stage artifacts, update round record, then evaluate transitions.
+6. `images/sidecar/main.go:504`, `images/sidecar/main.go:415`, `images/sidecar/main.go:467`, `control-plane/src/k8s/job_builder.rs:134` — Severity: high  
+   The git proxy only restricts by host, not by repository path. A malicious agent can ask the localhost SSH proxy to run `git-upload-pack`/`git-receive-pack` against any repo on the same host that the mounted SSH key can access.  
+   Fix: parse the configured `GIT_REPO_URL` fully and reject any SSH exec whose repo path does not exactly match it.
 
-## HIGH
+7. `images/sidecar/main.go:458`, `terraform/k8s.tf:115`, `control-plane/src/k8s/job_builder.rs:449` — Severity: high  
+   The sidecar connects to the real git remote with `ssh.InsecureIgnoreHostKey()`. Terraform creates `nemo-ssh-known-hosts`, but the sidecar never mounts or uses it. This leaves git fetch/push vulnerable to MITM.  
+   Fix: mount known-hosts into the sidecar and use a strict host key callback such as `knownhosts.New(...)`.
 
-4. **control-plane/src/loop_engine/driver.rs:355-399, git/mod.rs, types/mod.rs**: Ship/harden terminal paths are fiction. SHIPPED set without merge/CI/PR ops. merge_event uses current_sha.unwrap_or_default() which is never populated. Fix: add real git/PR/merge operations, populate current_sha from implement output.
+8. `terraform/control-plane.tf:60`, `terraform/control-plane.tf:190` — Severity: critical  
+   `DATABASE_URL` uses `$(POSTGRES_PASSWORD)` inside a literal env value. Kubernetes does not shell-expand env var references in `value`, so both deployments get an unusable DSN string and fail DB connection.  
+   Fix: store the full DSN in a Secret, or pass discrete DB env vars and assemble the URL in application code.
 
-5. **control-plane/src/api/handlers.rs:37-42**: Race condition on /start. has_active_loop_for_branch() + create_loop() not atomic. Concurrent requests create duplicate loops. Fix: DB uniqueness constraint on active branch + atomic insert.
+9. `terraform/control-plane.tf:313`, `terraform/k8s.tf:61`, `terraform/variables.tf:1` — Severity: high  
+   `repo_init` mounts secret `nemo-repo-ssh-key`, but this Terraform module never creates it and exposes no input for it. Fresh-cluster bootstrap against an SSH repo will fail immediately.  
+   Fix: add a variable/resource for the bootstrap SSH key, or support HTTPS bootstrap with a token.
 
-6. **control-plane/src/loop_engine/driver.rs:43-70, state/postgres.rs:318-353**: Driver reads full LoopRecord, mutates clone, writes back. API flag writes (cancel/approve/resume_requested) can be lost between read and overwrite. Fix: use optimistic locking or narrow patch updates.
+10. `images/base/nemo-agent-entry:13`, `images/base/Dockerfile:16` — Severity: high  
+    The sidecar readiness loop depends on `bc`, but the base image never installs it. The agent entrypoint can fail before any stage runs.  
+    Fix: install `bc`, or rewrite the timeout loop with integer shell arithmetic / `date +%s`.
 
-7. **control-plane/src/loop_engine/driver.rs:62-63, 459-476**: PAUSED state exists but nothing transitions into it. Interrupt state required by spec is unreachable. Fix: add divergence detection that triggers PAUSED, persist paused_from_state.
+11. `images/base/nemo-agent-entry:162`, `images/base/nemo-agent-entry:173`, `images/base/nemo-agent-entry:176` — Severity: medium  
+    TEST stage merges stderr into stdout, then always records `stderr: ""`, and maps every non-zero exit to `failed`. Harness failures like `command not found`, timeouts, or infra errors can never surface as `ci_status: "unknown"`.  
+    Fix: capture stdout/stderr separately and map infrastructure failures to `unknown`.
 
-8. **cli/src/commands/auth.rs:5-40**: nemo auth is placeholder. AWAITING_REAUTH has no recovery path. Fix: implement credential upload or mark as known gap.
+12. `terraform/k8s.tf:128`, `terraform/control-plane.tf:241` — Severity: high  
+    The `ssh-keyscan` fallback updates the ConfigMap after creation, but `repo_init` depends only on the original ConfigMap resource, not the fallback patch step. First apply can race and run `git fetch` with empty `known_hosts`.  
+    Fix: make `repo_init` depend on the fallback resource when `ssh_known_hosts` is empty, or generate the final ConfigMap content in one Terraform step.
 
-## MEDIUM
-
-9. **driver.rs:734-736**: redispatch_current_stage() always maps Hardening to audit. If revise job fails, incorrectly dispatches audit instead of revise. Fix: track current harden sub-stage from latest round.
-
-10. **state/postgres.rs:267-270**: get_active_loops() excludes only CONVERGED/FAILED/CANCELLED but not HARDENED/SHIPPED. Reconciler ticks terminal loops forever. Fix: match LoopState::is_terminal() fully.
-
-## LOW
-
-11. **handlers.rs:33-35, git/mod.rs:14-15**: Branch created in DB but never in git. create_branch() is dead code. Fix: create branch during /start.
-
-12. **state/postgres.rs:35-68**: Unknown DB enum values silently coerce to Pending/Dispatched. Hides corruption. Fix: make parsing fallible.
-
-13. **handlers.rs:219-229**: /cancel returns CANCELLED but only sets flag. Loop still running. Fix: return current state + cancel_requested: true.
-
-14. **driver.rs:1213-1383**: Tests inject round outputs manually, never exercise real output ingestion. Biggest failure mode untested. Fix: add integration tests with real job completion artifacts.
+13. `terraform/main.tf:33`, `terraform/main.tf:62` — Severity: medium  
+    Terraform `file("~/.ssh/id_ed25519")` does not expand `~`, so SSH-based provisioning breaks on a normal machine unless the path is manually expanded.  
+    Fix: use `pathexpand("~/.ssh/id_ed25519")` or make the key path an input variable.

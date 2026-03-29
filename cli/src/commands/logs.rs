@@ -16,7 +16,18 @@ pub async fn run(
         params.push(format!("round={r}"));
     }
     if let Some(ref s) = stage {
-        params.push(format!("stage={s}"));
+        // URL-encode the stage value to handle reserved characters
+        let encoded: String = s
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c.to_string()
+                } else {
+                    format!("%{:02X}", c as u32)
+                }
+            })
+            .collect();
+        params.push(format!("stage={encoded}"));
     }
     if !params.is_empty() {
         path = format!("{path}?{}", params.join("&"));
@@ -55,14 +66,9 @@ pub async fn run(
                         return Ok(());
                     }
                     if let Some(line_text) = parsed.get("line").and_then(|l| l.as_str()) {
-                        let stage_name = parsed
-                            .get("stage")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("?");
-                        let r = parsed
-                            .get("round")
-                            .and_then(|r| r.as_i64())
-                            .unwrap_or(0);
+                        let stage_name =
+                            parsed.get("stage").and_then(|s| s.as_str()).unwrap_or("?");
+                        let r = parsed.get("round").and_then(|r| r.as_i64()).unwrap_or(0);
                         println!("[{stage_name}/r{r}] {line_text}");
                     }
                 }

@@ -53,6 +53,9 @@ pub enum NemoError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    #[error("Bad request: {0}")]
+    BadRequest(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -71,7 +74,13 @@ impl NemoError {
                     || msg.contains("has an open PR")
             }
             // Config/serialization errors won't self-heal
-            Self::Config(_) | Self::Serialization(_) | Self::Internal(_) => true,
+            Self::Config(_) | Self::Serialization(_) => true,
+            // Internal errors may be transient (e.g., pod log retrieval hiccup)
+            Self::Internal(msg) => {
+                !msg.contains("Failed to retrieve logs")
+                    && !msg.contains("pod")
+                    && !msg.contains("log")
+            }
             // Spec not found, ship not enabled — logic errors, won't change on retry
             Self::SpecNotFound { .. } | Self::ShipNotEnabled => true,
             // Loop not found — data integrity issue
@@ -90,7 +99,7 @@ impl NemoError {
                 StatusCode::CONFLICT
             }
             Self::AuthenticationFailed | Self::UnknownEngineer => StatusCode::UNAUTHORIZED,
-            Self::ShipNotEnabled => StatusCode::BAD_REQUEST,
+            Self::ShipNotEnabled | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Database(_) | Self::ClusterUnavailable | Self::Kube(_) => {
                 StatusCode::SERVICE_UNAVAILABLE
             }

@@ -1,15 +1,15 @@
-# Adversarial Review: Round 3 (OpenCode GPT-5.4)
+Not converged. I read all Rust source under `control-plane/src` and `cli/src` and found 4 real production bugs.
 
-16/17 prior findings FIXED. 1 still broken, 3 new. Almost converged.
+- `control-plane/src/loop_engine/driver.rs:301` + `control-plane/src/loop_engine/driver.rs:327` + `control-plane/src/loop_engine/driver.rs:460` + `control-plane/src/loop_engine/driver.rs:516` + `control-plane/src/loop_engine/driver.rs:408`  
+  Completed jobs are decoded with the wrong JSON shape. `extract_nemo_result()` stores only the `data` payload, but the evaluators still parse legacy top-level structs (`AuditVerdict`, `ReviewVerdict`, `TestOutput`, `ReviseOutput`). Real impact: successful audit/review/test/revise jobs get treated as malformed/no output, so loops retry or fail instead of advancing.
 
-## STILL BROKEN
+- `control-plane/src/k8s/client.rs:125`  
+  `get_job_logs()` only requests `tail_lines: Some(100)`. If the agent emits more than 100 log lines and `NEMO_RESULT:` is not in that tail window, a successful job is misclassified as having no result. Real impact: false failures on noisy runs.
 
-4. **STILL_BROKEN** - Harden completion still just transitions state. Never creates/merges a spec PR or sets hardened-spec fields. Implement/ship path has real gh PR+merge calls, but harden path does not (driver.rs:303, 315, 326). Fix: add create_pr + merge_pr calls to the harden convergence path, same pattern as implement.
+- `control-plane/src/api/handlers.rs:454`  
+  Credential secret updates ignore failure on the 409/replace path. The API returns 200 even if the Kubernetes Secret update fails after Postgres metadata is updated. Real impact: `nemo auth` can appear successful while resumed jobs still run with stale or expired credentials.
 
-## NEW FINDINGS
+- `control-plane/src/loop_engine/driver.rs:229` + `control-plane/src/loop_engine/driver.rs:1125` + `control-plane/src/k8s/job_builder.rs:252`  
+  Stage outputs include `session_id`, but ingestion never persists it back onto the loop record. Later rounds and resume/reauth paths therefore stop sending `SESSION_ID`. Real impact: session continuity is broken across retries/rounds, especially for multi-round review/implement flows.
 
-N4. **MEDIUM** - nemo auth sends credentials with empty engineer name. CLI never sends engineer field, server defaults to "". Breaks reauth lookup for real users (cli/src/client.rs:93, handlers.rs:369). Fix: CLI should read engineer name from ~/.nemo/config.toml and include it in the request.
-
-N5. **MEDIUM** - /inspect cannot inspect terminal loops because get_loop_by_branch filters out terminal states (handlers.rs:321, state/mod.rs:138, postgres.rs:267). Fix: add a get_loop_by_branch_any() that includes terminal states, use it for /inspect.
-
-N6. **LOW** - Ship mode marks SHIPPED immediately after `gh pr merge --auto`, but --auto can defer the merge. State and merge_sha can be wrong (git/mod.rs:147, 161, driver.rs:480, 483). Fix: either use `gh pr merge` (blocking) instead of --auto, or add a polling step to verify merge completed before setting SHIPPED.
+If you want, I can do a round 4 read-only pass after these are fixed.

@@ -1,11 +1,5 @@
-# Adversarial Review: Round 12 (OpenCode GPT-5.4, read-only)
+Not clean. I read all Rust source files under `control-plane/src` and `cli/src`.
 
-3 findings.
+- `control-plane/src/k8s/client.rs:144` + `control-plane/src/loop_engine/driver.rs:266` + `control-plane/src/error.rs:77` + `control-plane/src/loop_engine/reconciler.rs:102` — a temporary pod log retrieval failure is treated as `Internal`, and `Internal` is classified as fatal, so the reconciler permanently marks the loop `FAILED`. In production, a brief apiserver/network hiccup after a job succeeds can irreversibly kill an otherwise successful loop.
 
-## FINDINGS
-
-N47. **MEDIUM** - generate_branch_name interpolates raw engineer and spec filename into git ref. Spaces, .., ~, ^, :, trailing .lock produce invalid refs. Same-stem specs from different dirs collide (types/mod.rs:244). Fix: slugify both segments, add path hash for uniqueness, validate against git check-ref-format rules.
-
-N48. **LOW** - nemo inspect help says "alice/..." but server expects "agent/alice/...". CLI forwards raw input, documented command returns not found (main.rs:117, inspect.rs:6, handlers.rs:329). Fix: CLI prepends "agent/" automatically, or server accepts both forms.
-
-N49. **LOW** - nemo auth stores raw credential JSON in Postgres as credential_ref. Raw secrets in application DB (auth.rs:45, client.rs:96, handlers.rs:394). Fix: for V1, accept this as known limitation. For V2, use K8s Secrets or KMS. Add a comment noting this is a V1 shortcut.
+- `control-plane/src/k8s/job_builder.rs:178` + `control-plane/src/loop_engine/driver.rs:194` — jobs are configured with `ttl_seconds_after_finished = 300`, but if reconciliation later observes `JobStatus::NotFound`, the driver treats that as a hard job failure. Any control-plane outage/restart or reconciliation delay beyond 5 minutes after completion can falsely fail already-finished work.

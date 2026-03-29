@@ -1,15 +1,10 @@
-# Adversarial Review: Round 10 (OpenCode GPT-5.4)
+BUGS FOUND
 
-5 findings. Fix all.
+- High — `control-plane/src/loop_engine/driver.rs:1248`
+  - The loop derives `worktree_path` as `worktrees/<branch-safe>` and passes that through to both git setup and pod mounting.
+  - But `ensure_worktree` resolves that relative to the bare repo root, so the actual checkout is created at `bare_repo_path/worktrees/...` in `control-plane/src/git/mod.rs:542`.
+  - The Kubernetes job mount uses that same string as a PVC `subPath` at `control-plane/src/k8s/job_builder.rs:377`, which mounts from the PVC root, not from inside `bare_repo.git/`.
+  - With the default bare repo path in `control-plane/src/main.rs:60` set to `/data/bare-repo.git`, the real worktree lands under `/data/bare-repo.git/worktrees/...` while the pod tries to mount `worktrees/...`.
+  - Result: stage pods mount the wrong directory and can fail or run against an empty/non-worktree path.
 
-## FINDINGS
-
-N37. **CRITICAL** - Unrecoverable driver errors (gh/git/K8s failures) never transition loop to FAILED. Reconciler logs and retries forever (reconciler.rs:79, driver.rs:492, 523). Fix: catch non-retryable errors in tick(), transition to FAILED with failure_reason. Distinguish retryable (timeout, transient) from fatal (auth denied, binary not found, git corrupt).
-
-N38. **HIGH** - /start validates spec and hashes content from HEAD, but creates branch from origin/main. After fetch, these can differ. System validates one revision, branches from another (handlers.rs:27, 37, git/mod.rs:83, 98). Fix: read spec content from origin/main (not HEAD), or resolve the base ref first and use it consistently for both validation and branching.
-
-N39. **HIGH** - Failed K8s jobs collapse to "Pod failure" for all agent exits. Auth expiry not distinguishable from other failures, so AWAITING_REAUTH never triggers (k8s/client.rs:120, driver.rs:705, 1141). Fix: parse job pod logs or exit code to detect auth failures. Convention: exit code 42 = auth expired, or parse stderr for "auth", "unauthorized", "expired".
-
-N40. **MEDIUM** - nemo status --team blocked when no engineer configured, even though team-wide query doesn't need one. Fresh users can't check team status (main.rs:175, 183, status.rs:24). Fix: skip engineer validation for --team flag.
-
-N41. **MEDIUM** - nemo inspect sends raw user input but server expects /inspect/{user}/{branch}. Copy-pasting the printed branch name (agent/alice/slug-hash) doesn't match the route (start.rs:43, inspect.rs:6, mod.rs:44, handlers.rs:327). Fix: either split the input on first / in CLI, or change the API route to /inspect/{branch_path} with a wildcard.
+I read all 35 Rust production source files under `control-plane/src` and `cli/src`. No other real production bugs stood out at high confidence.

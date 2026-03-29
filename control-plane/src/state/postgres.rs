@@ -1,7 +1,11 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{LoopFlag, StateStore};
@@ -14,11 +18,17 @@ use crate::types::{
 #[derive(Debug, Clone)]
 pub struct PgStateStore {
     pool: PgPool,
+    /// Dedicated connections holding session-scoped advisory locks.
+    /// Keyed by advisory lock key (derived from loop UUID).
+    lock_conns: Arc<Mutex<HashMap<i64, PoolConnection<Postgres>>>>,
 }
 
 impl PgStateStore {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            lock_conns: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -274,12 +284,11 @@ impl StateStore for PgStateStore {
     }
 
     async fn get_loop_by_branch_any(&self, branch: &str) -> Result<Option<LoopRecord>> {
-        let row = sqlx::query(
-            "SELECT * FROM loops WHERE branch = $1 ORDER BY updated_at DESC LIMIT 1",
-        )
-        .bind(branch)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query("SELECT * FROM loops WHERE branch = $1 ORDER BY updated_at DESC LIMIT 1")
+                .bind(branch)
+                .fetch_optional(&self.pool)
+                .await?;
 
         row.as_ref().map(row_to_loop_record).transpose()
     }
@@ -311,18 +320,13 @@ impl StateStore for PgStateStore {
                 let q = format!(
                     "SELECT * FROM loops WHERE engineer = $1{terminal_filter} ORDER BY created_at DESC LIMIT 100"
                 );
-                sqlx::query(&q)
-                    .bind(eng)
-                    .fetch_all(&self.pool)
-                    .await?
+                sqlx::query(&q).bind(eng).fetch_all(&self.pool).await?
             }
             _ => {
                 let q = format!(
                     "SELECT * FROM loops WHERE true{terminal_filter} ORDER BY created_at DESC LIMIT 100"
                 );
-                sqlx::query(&q)
-                    .fetch_all(&self.pool)
-                    .await?
+                sqlx::query(&q).fetch_all(&self.pool).await?
             }
         };
 
@@ -527,11 +531,7 @@ impl StateStore for PgStateStore {
         Ok(rows.iter().map(row_to_log_event).collect())
     }
 
-    async fn get_logs_after(
-        &self,
-        loop_id: Uuid,
-        after: DateTime<Utc>,
-    ) -> Result<Vec<LogEvent>> {
+    async fn get_logs_after(&self, loop_id: Uuid, after: DateTime<Utc>) -> Result<Vec<LogEvent>> {
         let rows = sqlx::query(
             "SELECT * FROM log_events WHERE loop_id = $1 AND timestamp >= $2 ORDER BY timestamp ASC, id ASC",
         )
@@ -544,12 +544,10 @@ impl StateStore for PgStateStore {
     }
 
     async fn get_credentials(&self, engineer: &str) -> Result<Vec<EngineerCredential>> {
-        let rows = sqlx::query(
-            "SELECT * FROM engineer_credentials WHERE engineer = $1",
-        )
-        .bind(engineer)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query("SELECT * FROM engineer_credentials WHERE engineer = $1")
+            .bind(engineer)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(rows.iter().map(row_to_credential).collect())
     }
@@ -597,6 +595,42 @@ impl StateStore for PgStateStore {
         .bind(event.created_at)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    async fn try_advisory_lock(&self, loop_id: uuid::Uuid) -> Result<bool> {
+        // Acquire a DEDICATED connection from the pool and hold it for the lock
+        // duration. pg_try_advisory_lock is session-scoped, so the lock persists
+        // as long as we keep this specific connection. advisory_unlock() will
+        // unlock on the SAME connection and return it to the pool.
+        let key = i64::from_be_bytes(loop_id.as_bytes()[..8].try_into().unwrap());
+        let mut conn = self.pool.acquire().await?;
+        let row: (bool,) = sqlx::query_as("SELECT pg_try_advisory_lock($1)")
+            .bind(key)
+            .fetch_one(&mut *conn)
+            .await?;
+        if row.0 {
+            // Lock acquired — hold the connection
+            let mut locks = self.lock_conns.lock().await;
+            locks.insert(key, conn);
+            Ok(true)
+        } else {
+            // Lock not acquired — return connection to pool immediately
+            Ok(false)
+        }
+    }
+
+    async fn advisory_unlock(&self, loop_id: uuid::Uuid) -> Result<()> {
+        let key = i64::from_be_bytes(loop_id.as_bytes()[..8].try_into().unwrap());
+        let mut locks = self.lock_conns.lock().await;
+        if let Some(mut conn) = locks.remove(&key) {
+            // Unlock on the SAME connection that acquired the lock
+            let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(key)
+                .execute(&mut *conn)
+                .await;
+            // Connection is returned to the pool when dropped
+        }
         Ok(())
     }
 }

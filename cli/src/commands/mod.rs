@@ -6,5 +6,5 @@ pub mod init;
 pub mod inspect;
 pub mod logs;
 pub mod resume;
-pub mod status;
 pub mod start;
+pub mod status;

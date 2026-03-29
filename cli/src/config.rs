@@ -9,6 +9,11 @@ pub struct EngineerConfig {
     pub server_url: String,
     #[serde(default)]
     pub engineer: String,
+    /// Display name for git attribution (GIT_AUTHOR_NAME).
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub email: String,
     pub api_key: Option<String>,
 }
 
@@ -21,6 +26,8 @@ impl Default for EngineerConfig {
         Self {
             server_url: default_server_url(),
             engineer: String::new(),
+            name: String::new(),
+            email: String::new(),
             api_key: None,
         }
     }
@@ -32,7 +39,9 @@ pub fn config_path() -> PathBuf {
 }
 
 fn dirs_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE")) // Windows fallback
+        .unwrap_or_else(|_| "/tmp".to_string()); // Safe fallback, never cwd
     PathBuf::from(home).join(".nemo")
 }
 
@@ -49,20 +58,37 @@ pub fn load_config() -> Result<EngineerConfig> {
 }
 
 /// Save the engineer config.
+/// Writes atomically via temp file to avoid a window where the file is world-readable.
 pub fn save_config(config: &EngineerConfig) -> Result<()> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let contents = toml::to_string_pretty(config)?;
-    std::fs::write(&path, contents)?;
 
-    // Restrict permissions to owner-only (0600) since file may contain API keys
+    // Write to a temp file with restricted permissions first, then rename.
+    // This avoids a window where the file exists with default umask permissions.
+    let tmp_path = path.with_extension("toml.tmp");
+
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        file.write_all(contents.as_bytes())?;
     }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&tmp_path, &contents)?;
+    }
+
+    std::fs::rename(&tmp_path, &path)?;
 
     Ok(())
 }

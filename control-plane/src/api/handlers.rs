@@ -1,7 +1,7 @@
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use uuid::Uuid;
 
 use super::AppState;
@@ -11,7 +11,7 @@ use crate::types::api::{
     ApproveResponse, CancelResponse, CredentialRequest, InspectResponse, LogsQuery, LoopSummary,
     ResumeResponse, RoundSummary, StartRequest, StartResponse, StatusQuery, StatusResponse,
 };
-use crate::types::{generate_branch_name, LoopKind, LoopRecord, LoopState};
+use crate::types::{LoopKind, LoopRecord, LoopState, generate_branch_name};
 
 /// Query parameters for GET /inspect
 #[derive(Debug, serde::Deserialize)]
@@ -24,6 +24,20 @@ pub async fn start(
     State(state): State<AppState>,
     Json(req): Json<StartRequest>,
 ) -> Result<impl IntoResponse, NemoError> {
+    // Validate engineer name: must be non-empty, lowercase alphanumeric + hyphens.
+    // Lowercase enforced to prevent normalization collisions in K8s Secret names.
+    if req.engineer.is_empty()
+        || !req
+            .engineer
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(NemoError::BadRequest(
+            "engineer must be non-empty, lowercase, and contain only a-z, 0-9, or hyphen"
+                .to_string(),
+        ));
+    }
+
     // If ship_mode, check that ship is allowed in config
     if req.ship_mode && !state.config.ship.allowed {
         return Err(NemoError::ShipNotEnabled);
@@ -54,7 +68,8 @@ pub async fn start(
 
     // Compute effective flags first so max_rounds uses the right values
     // harden_only implies harden; ship_mode with require_harden also implies harden (FR-20)
-    let effective_harden = req.harden || req.harden_only || (req.ship_mode && state.config.ship.require_harden);
+    let effective_harden =
+        req.harden || req.harden_only || (req.ship_mode && state.config.ship.require_harden);
 
     // ship --harden implies auto_approve (FR-20: zero human gates)
     let effective_auto_approve = req.auto_approve || req.ship_mode;
@@ -100,8 +115,14 @@ pub async fn start(
         session_id: None,
         active_job_name: None,
         retry_count: 0,
-        model_implementor: req.model_overrides.as_ref().and_then(|m| m.implementor.clone()),
-        model_reviewer: req.model_overrides.as_ref().and_then(|m| m.reviewer.clone()),
+        model_implementor: req
+            .model_overrides
+            .as_ref()
+            .and_then(|m| m.implementor.clone()),
+        model_reviewer: req
+            .model_overrides
+            .as_ref()
+            .and_then(|m| m.reviewer.clone()),
         merge_sha: None,
         merged_at: None,
         hardened_spec_path: None,
@@ -125,7 +146,10 @@ pub async fn start(
     let branch_sha = match state.git.create_branch(&branch).await {
         Ok(sha) => sha,
         Err(e) => {
-            let _ = state.store.update_loop_state(loop_id, LoopState::Failed, None).await;
+            let _ = state
+                .store
+                .update_loop_state(loop_id, LoopState::Failed, None)
+                .await;
             return Err(e);
         }
     };
@@ -164,7 +188,11 @@ pub async fn status(
     let show_all = query.all.unwrap_or(false);
     let loops = state
         .store
-        .get_loops_for_engineer(query.engineer.as_deref(), query.team.unwrap_or(false), show_all)
+        .get_loops_for_engineer(
+            query.engineer.as_deref(),
+            query.team.unwrap_or(false),
+            show_all,
+        )
         .await?;
 
     let summaries = loops
@@ -334,7 +362,7 @@ pub async fn inspect(
         .store
         .get_loop_by_branch_any(branch)
         .await?
-        .ok_or(NemoError::LoopNotFound { id: Uuid::nil() })?;
+        .ok_or_else(|| NemoError::BadRequest(format!("No loop found for branch: {branch}")))?;
 
     let rounds = state.store.get_rounds(record.id).await?;
 
@@ -375,26 +403,148 @@ pub async fn inspect(
 
 /// POST /credentials - Register or update engineer credentials.
 ///
-/// V1 limitation: credential content is stored as plaintext in Postgres (credential_ref column).
-/// V2 should migrate to K8s Secrets or a KMS-backed store.
+/// Stores credential metadata in Postgres and creates/updates a K8s Secret
+/// `nemo-creds-{engineer}` in the jobs namespace so job pods can mount it.
 pub async fn upsert_credentials(
     State(state): State<AppState>,
     Json(req): Json<CredentialRequest>,
 ) -> Result<impl IntoResponse, NemoError> {
-    if req.engineer.is_empty() {
-        return Err(NemoError::Internal("engineer field is required".to_string()));
+    if req.engineer.is_empty()
+        || !req
+            .engineer
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(NemoError::BadRequest(
+            "engineer must be non-empty, lowercase, and contain only a-z, 0-9, or hyphen"
+                .to_string(),
+        ));
     }
 
+    // K8s Secret key = provider name (claude, anthropic, openai, ssh).
+    // "claude" = session dir for implement/revise agent mount.
+    // "anthropic" = API key for sidecar proxy.
+    let secret_key = req.provider.as_str();
+
+    // Process credential content based on provider type.
+    // "claude" = session directory content, stored as-is (not an API key).
+    // "anthropic"/"openai" = API keys, extracted from JSON if needed.
+    // "ssh" = PEM key, stored as-is.
+    let raw_content = req.credential_ref.trim().to_string();
+    let api_key = if secret_key == "claude" || secret_key == "ssh" {
+        // Store verbatim — not an API key
+        raw_content
+    } else if raw_content.starts_with('{') {
+        // Try to extract api_key / key / apiKey from JSON
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw_content) {
+            parsed
+                .get("api_key")
+                .or_else(|| parsed.get("key"))
+                .or_else(|| parsed.get("apiKey"))
+                .or_else(|| parsed.get("ANTHROPIC_API_KEY"))
+                .or_else(|| parsed.get("OPENAI_API_KEY"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or(raw_content)
+        } else {
+            raw_content
+        }
+    } else {
+        raw_content
+    };
+
+    // Write K8s Secret FIRST, then Postgres metadata.
+    // This ensures jobs never mount stale secrets when Postgres says creds are valid.
+    let kube_client = state.kube_client.as_ref().ok_or_else(|| {
+        NemoError::Internal("K8s client not available — cannot store credentials".to_string())
+    })?;
+    {
+        // Normalize engineer name for K8s: lowercase, replace _ with -
+        let safe_engineer: String = req.engineer.to_lowercase().replace('_', "-");
+        let secret_name = format!("nemo-creds-{safe_engineer}");
+        let namespace = &state.config.cluster.jobs_namespace;
+        let secrets_api: kube::Api<k8s_openapi::api::core::v1::Secret> =
+            kube::Api::namespaced(kube_client.clone(), namespace);
+
+        // Get existing secret to merge keys and preserve resourceVersion
+        let (mut data, resource_version) = match secrets_api.get(&secret_name).await {
+            Ok(existing) => {
+                let rv = existing.metadata.resource_version.clone();
+                let mut d = std::collections::BTreeMap::new();
+                if let Some(existing_data) = existing.data {
+                    d = existing_data;
+                }
+                (d, rv)
+            }
+            Err(_) => (std::collections::BTreeMap::new(), None),
+        };
+        if req.valid {
+            data.insert(
+                secret_key.to_string(),
+                k8s_openapi::ByteString(api_key.into_bytes()),
+            );
+        } else {
+            // Invalidated credentials: remove the key so pods can't use stale secrets
+            data.remove(secret_key);
+        }
+
+        let secret = k8s_openapi::api::core::v1::Secret {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some(secret_name.clone()),
+                namespace: Some(namespace.clone()),
+                resource_version: resource_version.clone(),
+                ..Default::default()
+            },
+            data: Some(data),
+            ..Default::default()
+        };
+
+        if resource_version.is_some() {
+            // Existing secret — replace with correct resourceVersion
+            secrets_api
+                .replace(&secret_name, &kube::api::PostParams::default(), &secret)
+                .await
+                .map_err(|e| {
+                    NemoError::Internal(format!("Failed to update K8s Secret {secret_name}: {e}"))
+                })?;
+        } else {
+            // New secret — create
+            secrets_api
+                .create(&kube::api::PostParams::default(), &secret)
+                .await
+                .map_err(|e| {
+                    NemoError::Internal(format!("Failed to create K8s Secret {secret_name}: {e}"))
+                })?;
+        }
+    }
+
+    // Postgres metadata written AFTER K8s Secret succeeds
     let cred = crate::types::EngineerCredential {
         id: Uuid::new_v4(),
-        engineer: req.engineer,
-        provider: req.provider,
-        credential_ref: req.credential_ref,
+        engineer: req.engineer.clone(),
+        provider: req.provider.clone(),
+        credential_ref: "k8s-secret".to_string(),
         valid: req.valid,
         updated_at: chrono::Utc::now(),
     };
-
     state.store.upsert_credential(&cred).await?;
+
+    // Persist engineer identity fields (used for git commit attribution)
+    for (provider, value) in [("_name", &req.name), ("_email", &req.email)] {
+        if let Some(v) = value
+            && !v.is_empty()
+        {
+            let identity_cred = crate::types::EngineerCredential {
+                id: Uuid::new_v4(),
+                engineer: req.engineer.clone(),
+                provider: provider.to_string(),
+                credential_ref: v.clone(),
+                valid: true,
+                updated_at: chrono::Utc::now(),
+            };
+            state.store.upsert_credential(&identity_cred).await?;
+        }
+    }
 
     Ok((StatusCode::OK, Json(serde_json::json!({"status": "ok"}))))
 }
@@ -402,9 +552,7 @@ pub async fn upsert_credentials(
 /// Check if a sqlx error is a unique constraint violation.
 fn is_unique_violation(e: &sqlx::Error) -> bool {
     match e {
-        sqlx::Error::Database(db_err) => {
-            db_err.kind() == sqlx::error::ErrorKind::UniqueViolation
-        }
+        sqlx::Error::Database(db_err) => db_err.kind() == sqlx::error::ErrorKind::UniqueViolation,
         _ => false,
     }
 }
@@ -415,12 +563,12 @@ mod tests {
     use crate::api::AppState;
     use crate::config::NemoConfig;
     use crate::git::mock::MockGitOperations;
-    use crate::state::memory::MemoryStateStore;
     use crate::state::StateStore;
+    use crate::state::memory::MemoryStateStore;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{self, Request};
     use axum::response::Response;
-    use axum::Router;
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -433,6 +581,7 @@ mod tests {
             store: store.clone(),
             git: git.clone(),
             config: Arc::new(config),
+            kube_client: None,
         };
         let router = crate::api::build_router_no_auth(state);
         (router, store, git)
@@ -683,6 +832,7 @@ mod tests {
             store: store.clone(),
             git: git.clone(),
             config: Arc::new(config),
+            kube_client: None,
         };
         let app = crate::api::build_router_no_auth(state);
 

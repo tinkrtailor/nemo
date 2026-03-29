@@ -8,7 +8,8 @@ use crate::k8s::job_builder;
 use crate::k8s::{JobDispatcher, JobStatus};
 use crate::state::StateStore;
 use crate::types::verdict::{
-    AuditVerdict, FeedbackFile, FeedbackSource, ReviewVerdict, TestOutput,
+    AuditVerdict, FeedbackFile, FeedbackSource, ReviewResultData, ReviewVerdict, TestOutput,
+    TestResultData,
 };
 use crate::types::{
     LoopContext, LoopKind, LoopRecord, LoopState, RoundRecord, StageConfig, SubState,
@@ -37,6 +38,20 @@ impl ConvergentLoopDriver {
         }
     }
 
+    /// Build the K8s job configuration from cluster config.
+    fn job_build_config(&self) -> job_builder::JobBuildConfig {
+        job_builder::JobBuildConfig {
+            namespace: self.config.cluster.jobs_namespace.clone(),
+            agent_image: self.config.cluster.agent_image.clone(),
+            sidecar_image: self.config.cluster.sidecar_image.clone(),
+            bare_repo_pvc: self.config.cluster.bare_repo_pvc.clone(),
+            sessions_pvc: self.config.cluster.sessions_pvc.clone(),
+            image_pull_secret: self.config.cluster.image_pull_secret.clone(),
+            git_repo_url: self.config.cluster.git_repo_url.clone(),
+            ssh_known_hosts_configmap: self.config.cluster.ssh_known_hosts_configmap.clone(),
+        }
+    }
+
     /// Run one tick of the loop state machine for the given loop.
     /// All state writes happen within this function.
     /// Returns the new state after the tick.
@@ -50,7 +65,10 @@ impl ConvergentLoopDriver {
         // Terminal states: clear stale flags and return (never transition out)
         if record.state.is_terminal() {
             if record.cancel_requested {
-                let _ = self.store.set_loop_flag(record.id, crate::state::LoopFlag::Cancel, false).await;
+                let _ = self
+                    .store
+                    .set_loop_flag(record.id, crate::state::LoopFlag::Cancel, false)
+                    .await;
             }
             return Ok(record.state);
         }
@@ -90,14 +108,9 @@ impl ConvergentLoopDriver {
 
             let stage_config = self.audit_stage_config();
             let ctx = self.build_context(&updated).await?;
-            let job = job_builder::build_job(
-                &ctx,
-                &stage_config,
-                &self.config.cluster.jobs_namespace,
-                &self.config.cluster.agent_image,
-                &self.config.cluster.bare_repo_pvc,
-            );
-            self.persist_then_dispatch(&mut updated, "audit", &job).await?;
+            let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+            self.persist_then_dispatch(&mut updated, "audit", &job)
+                .await?;
 
             tracing::info!(loop_id = %record.id, "Transitioned PENDING -> HARDENING/DISPATCHED");
             Ok(LoopState::Hardening)
@@ -179,9 +192,24 @@ impl ConvergentLoopDriver {
                         self.handle_auth_expired(record, &reason).await
                     }
                     JobStatus::NotFound => {
-                        // Job disappeared: treat as failure
-                        self.handle_job_failed(record, "Job not found (deleted externally)")
-                            .await
+                        // Job disappeared — could be TTL cleanup after completion.
+                        // Try to ingest output first; if pod logs are available, the
+                        // job succeeded and was cleaned up. Only fail if no output.
+                        tracing::warn!(
+                            loop_id = %record.id,
+                            job_name = record.active_job_name.as_deref().unwrap_or("?"),
+                            "Job not found (TTL cleanup or external deletion), attempting output recovery"
+                        );
+                        match self.handle_job_completed(record).await {
+                            Ok(state) => Ok(state),
+                            Err(_) => {
+                                self.handle_job_failed(
+                                    record,
+                                    "Job not found and output unrecoverable (TTL cleanup after >5m delay?)",
+                                )
+                                .await
+                            }
+                        }
                     }
                 }
             }
@@ -212,15 +240,16 @@ impl ConvergentLoopDriver {
         }
     }
 
-    /// Ingest output from a completed job: read verdict from git, update round record, set current_sha.
+    /// Ingest output from a completed job: read NEMO_RESULT from pod logs, update round record, set current_sha.
     /// Returns Err with a Paused transition if branch has diverged since dispatch.
     async fn ingest_job_output(&self, record: &mut LoopRecord) -> Result<()> {
         // Get the branch tip SHA
         let tip_sha = self.git.get_branch_sha(&record.branch).await?;
 
-        // Divergence check: if we have an expected SHA and branch tip doesn't
-        // descend from it, someone pushed between job exit and this tick.
-        // Pause instead of ingesting potentially wrong output.
+        // Divergence check: if expected SHA is NOT an ancestor of the branch tip,
+        // someone force-pushed or rebased between job exit and this tick.
+        // Normal fast-forwards (agent commits) are fine — the expected SHA will
+        // be an ancestor of the new tip. We accept those and advance current_sha.
         if let (Some(expected), Some(tip)) = (&record.current_sha, &tip_sha)
             && self.git.has_diverged(&record.branch, expected).await?
         {
@@ -245,36 +274,38 @@ impl ConvergentLoopDriver {
             record.current_sha = Some(sha);
         }
 
-        // Determine verdict file path based on current stage
-        let verdict_path = self.verdict_path_for_stage(record).await;
-
-        // Read verdict JSON from git
-        let git_ref = record
-            .current_sha
-            .as_deref()
-            .unwrap_or(&record.branch);
-        let verdict_json = match self.git.read_file(&verdict_path, git_ref).await {
-            Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    tracing::warn!(
-                        loop_id = %record.id,
-                        path = verdict_path,
-                        error = %e,
-                        "Failed to parse verdict JSON"
-                    );
-                    None
-                }
-            },
-            Err(_) => {
-                tracing::debug!(
+        // Read NEMO_RESULT from pod logs instead of git verdict files.
+        // The entrypoint wraps all stage output with NEMO_RESULT: prefix.
+        let job_name = record.active_job_name.as_deref().unwrap_or("unknown");
+        let namespace = &self.config.cluster.jobs_namespace;
+        let logs = match self.dispatcher.get_job_logs(job_name, namespace).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(
                     loop_id = %record.id,
-                    path = verdict_path,
-                    "No verdict file found"
+                    job_name = job_name,
+                    error = %e,
+                    "Failed to retrieve pod logs — cannot determine job output"
                 );
-                None
+                return Err(e);
             }
         };
+
+        let verdict_json = Self::extract_nemo_result(&logs);
+        if verdict_json.is_none() {
+            tracing::warn!(
+                loop_id = %record.id,
+                job_name = job_name,
+                "No NEMO_RESULT line found in pod logs"
+            );
+        }
+
+        // Persist session_id from the output so later rounds can resume the session.
+        if let Some(ref data) = verdict_json
+            && let Some(sid) = data.get("session_id").and_then(|v| v.as_str())
+        {
+            record.session_id = Some(sid.to_string());
+        }
 
         // Update the round record with output + completion time
         let rounds = self.store.get_rounds(record.id).await?;
@@ -295,25 +326,20 @@ impl ConvergentLoopDriver {
         Ok(())
     }
 
-    /// Determine the verdict file path based on current stage and sub-stage.
-    async fn verdict_path_for_stage(&self, record: &LoopRecord) -> String {
-        match record.state {
-            LoopState::Implementing => ".agent/implement-output.json".to_string(),
-            LoopState::Testing => ".agent/test-output.json".to_string(),
-            LoopState::Reviewing => ".agent/review-verdict.json".to_string(),
-            LoopState::Hardening => {
-                // Determine if this was an audit or revise job
-                if let Ok(rounds) = self.store.get_rounds(record.id).await {
-                    let last = rounds.iter().rfind(|r| r.round == record.round);
-                    match last.map(|r| r.stage.as_str()) {
-                        Some("revise") => return ".agent/revise-output.json".to_string(),
-                        _ => return ".agent/audit-verdict.json".to_string(),
-                    }
-                }
-                ".agent/audit-verdict.json".to_string()
+    /// Extract the NEMO_RESULT data from pod log output.
+    /// Scans for the last line starting with "NEMO_RESULT:" and returns the `data` field
+    /// from the envelope `{"stage":"...", "data": {...}}`.
+    fn extract_nemo_result(logs: &str) -> Option<serde_json::Value> {
+        logs.lines().rev().find_map(|line| {
+            let trimmed = line.trim();
+            if let Some(json_str) = trimmed.strip_prefix("NEMO_RESULT:") {
+                let envelope: serde_json::Value = serde_json::from_str(json_str).ok()?;
+                // Return the data field from the envelope, falling back to the whole thing
+                envelope.get("data").cloned().or(Some(envelope))
+            } else {
+                None
             }
-            _ => ".agent/verdict.json".to_string(),
-        }
+        })
     }
 
     /// Evaluate harden stage output (audit or revise).
@@ -324,18 +350,25 @@ impl ConvergentLoopDriver {
         //
         // We determine which sub-stage just completed by checking the round record.
         let rounds = self.store.get_rounds(record.id).await?;
-        let last_round = rounds
-            .iter()
-            .rfind(|r| r.round == record.round);
+        let last_round = rounds.iter().rfind(|r| r.round == record.round);
 
         let stage_name = last_round.map(|r| r.stage.as_str()).unwrap_or("audit");
 
         match stage_name {
             "audit" => {
-                // Parse audit verdict from the round output
-                let verdict: Option<AuditVerdict> = last_round
-                    .and_then(|r| r.output.as_ref())
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+                // Parse audit verdict from the round output.
+                // Try ReviewResultData envelope first (has .verdict field),
+                // then fall back to direct AuditVerdict for backward compat.
+                let verdict: Option<AuditVerdict> =
+                    last_round.and_then(|r| r.output.as_ref()).and_then(|v| {
+                        // New shape: { verdict: {...}, token_usage: {...}, ... }
+                        if let Ok(rd) = serde_json::from_value::<ReviewResultData>(v.clone()) {
+                            serde_json::from_value(rd.verdict).ok()
+                        } else {
+                            // Legacy: direct AuditVerdict at top level
+                            serde_json::from_value(v.clone()).ok()
+                        }
+                    });
 
                 match verdict {
                     Some(v) if v.clean => {
@@ -343,8 +376,8 @@ impl ConvergentLoopDriver {
                         if record.harden_only {
                             // Clean up .agent/ artifacts before PR creation
                             if let Err(e) = self.git.remove_path(&record.branch, ".agent").await {
-                    tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
-                }
+                                tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
+                            }
 
                             // Harden only: create spec PR, merge it, terminal HARDENED (FR-23)
                             let pr_title = format!(
@@ -364,10 +397,7 @@ impl ConvergentLoopDriver {
                             if self.config.harden.auto_merge_spec_pr {
                                 let merge_sha = self
                                     .git
-                                    .merge_pr(
-                                        &record.branch,
-                                        &self.config.harden.merge_strategy,
-                                    )
+                                    .merge_pr(&record.branch, &self.config.harden.merge_strategy)
                                     .await?;
                                 record.merge_sha = Some(merge_sha);
                                 record.merged_at = Some(chrono::Utc::now());
@@ -375,8 +405,7 @@ impl ConvergentLoopDriver {
                                 record.state = LoopState::Hardened;
                                 record.sub_state = None;
                                 record.active_job_name = None;
-                                record.hardened_spec_path =
-                                    Some(record.spec_path.clone());
+                                record.hardened_spec_path = Some(record.spec_path.clone());
                                 self.store.update_loop(record).await?;
                                 tracing::info!(loop_id = %record.id, "Harden loop HARDENED (spec PR merged)");
                                 Ok(LoopState::Hardened)
@@ -386,8 +415,7 @@ impl ConvergentLoopDriver {
                                 record.state = LoopState::Hardened;
                                 record.sub_state = None;
                                 record.active_job_name = None;
-                                record.hardened_spec_path =
-                                    Some(record.spec_path.clone());
+                                record.hardened_spec_path = Some(record.spec_path.clone());
                                 self.store.update_loop(record).await?;
                                 tracing::info!(loop_id = %record.id, "Harden loop HARDENED (spec PR created, human merge required)");
                                 Ok(LoopState::Hardened)
@@ -416,28 +444,43 @@ impl ConvergentLoopDriver {
                 }
             }
             "revise" => {
-                // Parse revise output to detect spec path changes
-                let revise_output: Option<crate::types::verdict::ReviseOutput> = last_round
-                    .and_then(|r| r.output.as_ref())
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
-                if let Some(ref output) = revise_output
-                    && output.updated_spec_path != record.spec_path
+                // Parse revise output to detect spec path changes.
+                // Try new ReviseResultData first, fall back to legacy ReviseOutput.
+                let updated_spec_path: Option<String> =
+                    last_round.and_then(|r| r.output.as_ref()).and_then(|v| {
+                        if let Ok(rd) = serde_json::from_value::<
+                            crate::types::verdict::ReviseResultData,
+                        >(v.clone())
+                        {
+                            Some(rd.revised_spec_path)
+                        } else if let Ok(legacy) =
+                            serde_json::from_value::<crate::types::verdict::ReviseOutput>(v.clone())
+                        {
+                            Some(legacy.updated_spec_path)
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(ref new_path) = updated_spec_path
+                    && *new_path != record.spec_path
                 {
                     tracing::info!(
                         loop_id = %record.id,
                         old = %record.spec_path,
-                        new = %output.updated_spec_path,
+                        new = %new_path,
                         "Spec path updated by revise stage"
                     );
-                    record.spec_path = output.updated_spec_path.clone();
+                    record.spec_path = new_path.clone();
                 }
 
                 // After revise: check max rounds, then re-audit
                 if record.round >= record.max_rounds {
                     record.state = LoopState::Failed;
                     record.sub_state = None;
-                    record.failure_reason =
-                        Some(format!("Max harden rounds ({}) exceeded", record.max_rounds));
+                    record.failure_reason = Some(format!(
+                        "Max harden rounds ({}) exceeded",
+                        record.max_rounds
+                    ));
                     record.active_job_name = None;
                     self.store.update_loop(record).await?;
                     return Ok(LoopState::Failed);
@@ -457,14 +500,55 @@ impl ConvergentLoopDriver {
         record.retry_count = 0; // Reset per-stage retry budget
 
         let stage_config = self.test_stage_config();
-        let ctx = self.build_context(record).await?;
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.config.cluster.jobs_namespace,
-            &self.config.cluster.agent_image,
-            &self.config.cluster.bare_repo_pvc,
-        );
+        let mut ctx = self.build_context(record).await?;
+
+        // Inject affected_services for the TEST stage (FR-42a).
+        // Compute from git diff: only services whose path prefix matches changed files.
+        let diff_files = self
+            .git
+            .changed_files(&record.branch)
+            .await
+            .unwrap_or_default();
+
+        let affected: Vec<String> = if diff_files.is_empty() {
+            // Can't determine diff — test all services
+            self.config.services.keys().cloned().collect()
+        } else {
+            self.config
+                .services
+                .iter()
+                .filter(|(_, svc)| diff_files.iter().any(|f| f.starts_with(&svc.path)))
+                .map(|(name, _)| name.clone())
+                .collect()
+        };
+
+        // If no services matched, still test all (safety net)
+        let service_names = if affected.is_empty() {
+            self.config.services.keys().cloned().collect()
+        } else {
+            affected
+        };
+
+        let services_json =
+            serde_json::to_string(&service_names).unwrap_or_else(|_| "[]".to_string());
+        ctx.credentials
+            .push(("affected_services".to_string(), services_json));
+
+        // Inject service_tags for JVM resource escalation (FR-28) — only from affected services
+        let all_tags: Vec<String> = self
+            .config
+            .services
+            .iter()
+            .filter(|(name, _)| service_names.contains(name))
+            .flat_map(|(_, s)| s.tags.iter().cloned())
+            .collect();
+        if !all_tags.is_empty() {
+            let tags_json = serde_json::to_string(&all_tags).unwrap_or_else(|_| "[]".to_string());
+            ctx.credentials
+                .push(("service_tags".to_string(), tags_json));
+        }
+
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "test", &job).await?;
 
         tracing::info!(loop_id = %record.id, round = record.round, "IMPLEMENTING -> TESTING/DISPATCHED");
@@ -478,16 +562,26 @@ impl ConvergentLoopDriver {
             .iter()
             .rfind(|r| r.round == record.round && r.stage == "test");
 
-        let output: Option<TestOutput> = test_round
-            .and_then(|r| r.output.as_ref())
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let raw = test_round.and_then(|r| r.output.as_ref());
 
-        match output {
-            Some(test_output) if test_output.passed => {
+        // Try new TestResultData shape first (from entrypoint NEMO_RESULT),
+        // fall back to legacy TestOutput for backward compatibility
+        let passed = raw.and_then(|v| {
+            if let Ok(td) = serde_json::from_value::<TestResultData>(v.clone()) {
+                Some(td.all_passed)
+            } else if let Ok(legacy) = serde_json::from_value::<TestOutput>(v.clone()) {
+                Some(legacy.passed)
+            } else {
+                None
+            }
+        });
+
+        match passed {
+            Some(true) => {
                 // Tests passed: advance to review
                 self.dispatch_review(record).await
             }
-            Some(test_output) => {
+            Some(false) => {
                 // Tests failed: feed back to implement (no review dispatched per spec)
                 if record.round >= record.max_rounds {
                     record.state = LoopState::Failed;
@@ -501,19 +595,40 @@ impl ConvergentLoopDriver {
                     return Ok(LoopState::Failed);
                 }
 
+                // Extract test failures from either format for feedback
+                let failures = raw.and_then(|v| {
+                    if let Ok(td) = serde_json::from_value::<TestResultData>(v.clone()) {
+                        let fails: Vec<_> = td
+                            .services
+                            .into_iter()
+                            .filter(|s| s.exit_code != 0)
+                            .map(|s| crate::types::verdict::TestFailure {
+                                service: s.name,
+                                test_command: s.test_command,
+                                test_name: None,
+                                exit_code: s.exit_code,
+                                stdout: s.stdout,
+                                stderr: s.stderr,
+                            })
+                            .collect();
+                        Some(fails)
+                    } else if let Ok(legacy) = serde_json::from_value::<TestOutput>(v.clone()) {
+                        Some(legacy.failures)
+                    } else {
+                        None
+                    }
+                });
+
                 // Create feedback file for next round
                 let feedback = FeedbackFile {
                     round: record.round as u32,
                     source: FeedbackSource::Test,
                     issues: None,
-                    failures: Some(test_output.failures),
+                    failures,
                 };
 
                 record.round += 1;
-                let feedback_path = format!(
-                    ".agent/test-feedback-round-{}.json",
-                    record.round - 1
-                );
+                let feedback_path = format!(".agent/test-feedback-round-{}.json", record.round - 1);
                 self.dispatch_implement_with_feedback(record, &feedback, &feedback_path)
                     .await
             }
@@ -532,9 +647,16 @@ impl ConvergentLoopDriver {
             .iter()
             .rfind(|r| r.round == record.round && r.stage == "review");
 
-        let verdict: Option<ReviewVerdict> = review_round
-            .and_then(|r| r.output.as_ref())
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        // Try ReviewResultData envelope first (has .verdict field),
+        // then fall back to direct ReviewVerdict for backward compat.
+        let verdict: Option<ReviewVerdict> =
+            review_round.and_then(|r| r.output.as_ref()).and_then(|v| {
+                if let Ok(rd) = serde_json::from_value::<ReviewResultData>(v.clone()) {
+                    serde_json::from_value(rd.verdict).ok()
+                } else {
+                    serde_json::from_value(v.clone()).ok()
+                }
+            });
 
         match verdict {
             Some(v) if v.clean => {
@@ -544,11 +666,8 @@ impl ConvergentLoopDriver {
                         tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
                     }
 
-                    let pr_title = format!(
-                        "feat(agent): {} for {}",
-                        record.spec_path,
-                        record.engineer,
-                    );
+                    let pr_title =
+                        format!("feat(agent): {} for {}", record.spec_path, record.engineer,);
                     let pr_body = format!(
                         "Automated convergence loop completed in {} round(s).\n\nSpec: {}\nBranch: {}",
                         record.round, record.spec_path, record.branch,
@@ -685,10 +804,8 @@ impl ConvergentLoopDriver {
                 };
 
                 record.round += 1;
-                let feedback_path = format!(
-                    ".agent/review-feedback-round-{}.json",
-                    record.round - 1
-                );
+                let feedback_path =
+                    format!(".agent/review-feedback-round-{}.json", record.round - 1);
                 self.dispatch_implement_with_feedback(record, &feedback, &feedback_path)
                     .await
             }
@@ -772,7 +889,10 @@ impl ConvergentLoopDriver {
     async fn handle_cancel(&self, record: &LoopRecord) -> Result<LoopState> {
         // Delete active job if any (log failure but proceed — orphan cleanup handles stragglers)
         if let Some(ref job_name) = record.active_job_name
-            && let Err(e) = self.dispatcher.delete_job(job_name, &self.config.cluster.jobs_namespace).await
+            && let Err(e) = self
+                .dispatcher
+                .delete_job(job_name, &self.config.cluster.jobs_namespace)
+                .await
         {
             tracing::warn!(loop_id = %record.id, job = job_name, error = %e, "Failed to delete job during cancel");
         }
@@ -798,7 +918,10 @@ impl ConvergentLoopDriver {
         let mut updated = record.clone();
 
         if let Some(ref job_name) = record.active_job_name
-            && let Err(e) = self.dispatcher.delete_job(job_name, &self.config.cluster.jobs_namespace).await
+            && let Err(e) = self
+                .dispatcher
+                .delete_job(job_name, &self.config.cluster.jobs_namespace)
+                .await
         {
             tracing::warn!(loop_id = %record.id, job = job_name, error = %e, "Failed to delete job during auth expiry");
         }
@@ -823,7 +946,10 @@ impl ConvergentLoopDriver {
         // Detect credential expiry (FR-10): transition to AWAITING_REAUTH
         if is_auth_error(reason) && record.state.is_active_stage() {
             if let Some(ref job_name) = record.active_job_name
-                && let Err(e) = self.dispatcher.delete_job(job_name, &self.config.cluster.jobs_namespace).await
+                && let Err(e) = self
+                    .dispatcher
+                    .delete_job(job_name, &self.config.cluster.jobs_namespace)
+                    .await
             {
                 tracing::warn!(loop_id = %record.id, job = job_name, error = %e, "Failed to delete job during reauth");
             }
@@ -855,10 +981,8 @@ impl ConvergentLoopDriver {
             // Exhausted retries: fail the loop
             updated.state = LoopState::Failed;
             updated.sub_state = None;
-            updated.failure_reason = Some(format!(
-                "{reason} (after {} retries)",
-                updated.retry_count
-            ));
+            updated.failure_reason =
+                Some(format!("{reason} (after {} retries)", updated.retry_count));
             updated.active_job_name = None;
             self.store.update_loop(&updated).await?;
 
@@ -904,14 +1028,9 @@ impl ConvergentLoopDriver {
 
         let stage_config = self.implement_stage_config(record);
         let ctx = self.build_context(&updated).await?;
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.config.cluster.jobs_namespace,
-            &self.config.cluster.agent_image,
-            &self.config.cluster.bare_repo_pvc,
-        );
-        self.persist_then_dispatch(&mut updated, "implement", &job).await?;
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+        self.persist_then_dispatch(&mut updated, "implement", &job)
+            .await?;
 
         tracing::info!(loop_id = %record.id, round = updated.round, "Started IMPLEMENTING/DISPATCHED");
         Ok(LoopState::Implementing)
@@ -925,13 +1044,7 @@ impl ConvergentLoopDriver {
 
         let stage_config = self.audit_stage_config();
         let ctx = self.build_context(record).await?;
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.config.cluster.jobs_namespace,
-            &self.config.cluster.agent_image,
-            &self.config.cluster.bare_repo_pvc,
-        );
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "audit", &job).await?;
 
         Ok(LoopState::Hardening)
@@ -944,13 +1057,7 @@ impl ConvergentLoopDriver {
 
         let stage_config = self.revise_stage_config(record);
         let ctx = self.build_context(record).await?;
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.config.cluster.jobs_namespace,
-            &self.config.cluster.agent_image,
-            &self.config.cluster.bare_repo_pvc,
-        );
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "revise", &job).await?;
 
         Ok(LoopState::Hardening)
@@ -964,13 +1071,7 @@ impl ConvergentLoopDriver {
 
         let stage_config = self.review_stage_config(record);
         let ctx = self.build_context(record).await?;
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.config.cluster.jobs_namespace,
-            &self.config.cluster.agent_image,
-            &self.config.cluster.bare_repo_pvc,
-        );
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "review", &job).await?;
 
         tracing::info!(loop_id = %record.id, round = record.round, "TESTING -> REVIEWING/DISPATCHED");
@@ -986,8 +1087,9 @@ impl ConvergentLoopDriver {
         feedback_path: &str,
     ) -> Result<LoopState> {
         // Write feedback file to the branch worktree so the agent can read it
-        let feedback_json = serde_json::to_string_pretty(feedback)
-            .map_err(|e| crate::error::NemoError::Internal(format!("Failed to serialize feedback: {e}")))?;
+        let feedback_json = serde_json::to_string_pretty(feedback).map_err(|e| {
+            crate::error::NemoError::Internal(format!("Failed to serialize feedback: {e}"))
+        })?;
         self.git
             .write_file(&record.branch, feedback_path, &feedback_json)
             .await?;
@@ -1005,14 +1107,9 @@ impl ConvergentLoopDriver {
         let mut ctx = self.build_context(record).await?;
         ctx.feedback_path = Some(feedback_path.to_string());
 
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.config.cluster.jobs_namespace,
-            &self.config.cluster.agent_image,
-            &self.config.cluster.bare_repo_pvc,
-        );
-        self.persist_then_dispatch(record, "implement", &job).await?;
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+        self.persist_then_dispatch(record, "implement", &job)
+            .await?;
 
         tracing::info!(
             loop_id = %record.id,
@@ -1074,13 +1171,7 @@ impl ConvergentLoopDriver {
             });
         }
 
-        let job = job_builder::build_job(
-            &ctx,
-            &stage_config,
-            &self.config.cluster.jobs_namespace,
-            &self.config.cluster.agent_image,
-            &self.config.cluster.bare_repo_pvc,
-        );
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
 
         // Persist state FIRST, then create K8s Job
         let job_name = job
@@ -1187,9 +1278,36 @@ impl ConvergentLoopDriver {
             .map(|c| (c.provider, c.credential_ref))
             .collect();
 
+        // Engineer identity: look up name and email from stored credentials,
+        // fall back to engineer slug / {engineer}@nemo.dev if not set.
+        let all_creds = self.store.get_credentials(&record.engineer).await?;
+        let engineer_name = all_creds
+            .iter()
+            .find(|c| c.provider == "_name" && c.valid)
+            .map(|c| c.credential_ref.clone())
+            .unwrap_or_else(|| record.engineer.clone());
+        let engineer_email = all_creds
+            .iter()
+            .find(|c| c.provider == "_email" && c.valid)
+            .map(|c| c.credential_ref.clone())
+            .unwrap_or_else(|| format!("{}@nemo.dev", record.engineer));
+
+        // Derive worktree sub-path from branch name.
+        // Use "wt/" prefix (not "worktrees/") to avoid colliding with git's
+        // internal worktree metadata directory in the bare repo.
+        let worktree_dir = record.branch.replace('/', "-");
+        let worktree_path = format!("wt/{worktree_dir}");
+
+        // Ensure the worktree exists on disk before any job tries to mount it.
+        self.git
+            .ensure_worktree(&record.branch, &worktree_path)
+            .await?;
+
         Ok(LoopContext {
             loop_id: record.id,
             engineer: record.engineer.clone(),
+            engineer_name,
+            engineer_email,
             spec_path: record.spec_path.clone(),
             branch: record.branch.clone(),
             current_sha: record.current_sha.clone().unwrap_or_default(),
@@ -1198,6 +1316,7 @@ impl ConvergentLoopDriver {
             retry_count: record.retry_count as u32,
             session_id: record.session_id.clone(),
             feedback_path,
+            worktree_path,
             credentials,
         })
     }
@@ -1779,7 +1898,12 @@ mod tests {
 
         let updated = store.get_loop(record.id).await.unwrap().unwrap();
         assert_eq!(updated.state, LoopState::Converged);
-        assert!(updated.failure_reason.unwrap().contains("above auto-merge threshold"));
+        assert!(
+            updated
+                .failure_reason
+                .unwrap()
+                .contains("above auto-merge threshold")
+        );
     }
 
     #[tokio::test]
@@ -1794,14 +1918,13 @@ mod tests {
             NemoConfig::default(),
         );
 
-        // Set up branch SHA and verdict file in git
+        // Set up branch SHA in git and NEMO_RESULT in mock pod logs
         git.set_branch_sha("agent/alice/test-abc12345", "aabbccdd11223344")
             .await;
-        git.add_file(
-            ".agent/review-verdict.json",
-            r#"{"clean": true, "confidence": 0.95, "issues": [], "summary": "LGTM", "token_usage": {"input": 1000, "output": 200}}"#,
-        )
-        .await;
+        dispatcher.set_job_logs(
+            "review-job",
+            "some other output\nNEMO_RESULT:{\"stage\":\"review\",\"data\":{\"clean\":true,\"confidence\":0.95,\"issues\":[],\"summary\":\"LGTM\",\"token_usage\":{\"input\":1000,\"output\":200}}}\n",
+        ).await;
 
         // Create a loop in REVIEWING/DISPATCHED state
         let mut record = make_pending_loop(true);
@@ -1847,9 +1970,18 @@ mod tests {
         // Verify round record was updated with output
         let rounds = store.get_rounds(record.id).await.unwrap();
         let updated_round = rounds.iter().find(|r| r.id == round_id).unwrap();
-        assert!(updated_round.output.is_some(), "Round output should be populated after ingestion");
-        assert!(updated_round.completed_at.is_some(), "completed_at should be set");
-        assert!(updated_round.duration_secs.is_some(), "duration_secs should be set");
+        assert!(
+            updated_round.output.is_some(),
+            "Round output should be populated after ingestion"
+        );
+        assert!(
+            updated_round.completed_at.is_some(),
+            "completed_at should be set"
+        );
+        assert!(
+            updated_round.duration_secs.is_some(),
+            "duration_secs should be set"
+        );
 
         // Verify current_sha was set
         let updated_loop = store.get_loop(record.id).await.unwrap().unwrap();

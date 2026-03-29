@@ -25,13 +25,16 @@ pub async fn run(client: &NemoClient, engineer: &str, team: bool, json: bool) ->
         "/status?team=true".to_string()
     } else {
         // Percent-encode engineer name to handle special characters
-        let encoded: String = engineer.bytes().map(|b| {
-            if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' {
-                format!("{}", b as char)
-            } else {
-                format!("%{b:02X}")
-            }
-        }).collect();
+        let encoded: String = engineer
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' {
+                    format!("{}", b as char)
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
+            .collect();
         format!("/status?engineer={encoded}")
     };
 

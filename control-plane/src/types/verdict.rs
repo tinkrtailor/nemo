@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub severity: Severity,
-    pub category: String,
+    /// Category is optional per spec FR-40: not all reviewers produce categories.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,21 +53,107 @@ pub struct AuditVerdict {
     pub token_usage: TokenUsage,
 }
 
-/// Implementation output from the implement stage.
+/// NEMO_RESULT envelope: the typed output contract between agent and control plane.
+/// Written as a single JSON line prefixed with `NEMO_RESULT:` to stdout (FR-13).
+/// The `stage` field uses short names: implement, test, review, audit, revise.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NemoResult {
+    pub stage: String,
+    pub data: serde_json::Value,
+}
+
+impl NemoResult {
+    /// Parse the data field into a typed implement output.
+    pub fn as_impl_output(&self) -> std::result::Result<ImplResultData, serde_json::Error> {
+        serde_json::from_value(self.data.clone())
+    }
+
+    /// Parse the data field into a typed test output.
+    pub fn as_test_output(&self) -> std::result::Result<TestResultData, serde_json::Error> {
+        serde_json::from_value(self.data.clone())
+    }
+
+    /// Parse the data field into a typed review/audit output.
+    pub fn as_review_output(&self) -> std::result::Result<ReviewResultData, serde_json::Error> {
+        serde_json::from_value(self.data.clone())
+    }
+
+    /// Parse the data field into a typed revise output.
+    pub fn as_revise_output(&self) -> std::result::Result<ReviseResultData, serde_json::Error> {
+        serde_json::from_value(self.data.clone())
+    }
+}
+
+/// IMPLEMENT stage result data (FR-13).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImplResultData {
+    pub new_sha: String,
+    pub token_usage: TokenUsage,
+    pub exit_code: i32,
+    pub session_id: String,
+}
+
+/// TEST stage result data (FR-42d).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestResultData {
+    pub services: Vec<TestServiceResult>,
+    pub all_passed: bool,
+    pub ci_status: CiStatus,
+    pub token_usage: TokenUsage,
+}
+
+/// Per-service test result within the TEST stage output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestServiceResult {
+    pub name: String,
+    pub test_command: String,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Three-state CI status model (FR-42d).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CiStatus {
+    Passed,
+    Failed,
+    Unknown,
+}
+
+/// REVIEW/AUDIT stage result data (FR-13).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewResultData {
+    pub verdict: serde_json::Value,
+    pub token_usage: TokenUsage,
+    pub exit_code: i32,
+    pub session_id: String,
+}
+
+/// REVISE stage result data (FR-13).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviseResultData {
+    pub revised_spec_path: String,
+    pub new_sha: String,
+    pub token_usage: TokenUsage,
+    pub exit_code: i32,
+    pub session_id: String,
+}
+
+/// Legacy implementation output (kept for backward compatibility with Lane A).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImplOutput {
     pub sha: String,
-    pub affected_services: Vec<String>,
 }
 
-/// Output from the revise stage (harden loop).
+/// Legacy output from the revise stage (kept for backward compatibility with Lane A).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviseOutput {
     pub updated_spec_path: String,
     pub sha: String,
 }
 
-/// A single test failure.
+/// A single test failure (used in feedback files).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestFailure {
     pub service: String,
@@ -77,7 +165,7 @@ pub struct TestFailure {
     pub stderr: String,
 }
 
-/// Output from the test stage.
+/// Legacy test output (kept for backward compatibility with Lane A).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestOutput {
     pub passed: bool,
@@ -156,7 +244,7 @@ mod tests {
             confidence: Some(0.9),
             issues: vec![Issue {
                 severity: Severity::High,
-                category: "completeness".to_string(),
+                category: Some("completeness".to_string()),
                 file: Some("specs/feature/invoice-cancel.md".to_string()),
                 line: None,
                 description: "Missing error handling section".to_string(),
@@ -181,7 +269,7 @@ mod tests {
             source: FeedbackSource::Review,
             issues: Some(vec![Issue {
                 severity: Severity::High,
-                category: "correctness".to_string(),
+                category: Some("correctness".to_string()),
                 file: Some("api/src/invoice.rs".to_string()),
                 line: Some(42),
                 description: "Missing null check".to_string(),
@@ -217,5 +305,120 @@ mod tests {
         let bad_json = r#"{ "not_a_verdict": true }"#;
         let result = serde_json::from_str::<ReviewVerdict>(bad_json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nemo_result_implement_roundtrip() {
+        let data = ImplResultData {
+            new_sha: "abc123def456".to_string(),
+            token_usage: TokenUsage {
+                input: 10000,
+                output: 2000,
+            },
+            exit_code: 0,
+            session_id: "sess-001".to_string(),
+        };
+        let result = NemoResult {
+            stage: "implement".to_string(),
+            data: serde_json::to_value(&data).unwrap(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: NemoResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.stage, "implement");
+        let impl_data = parsed.as_impl_output().unwrap();
+        assert_eq!(impl_data.new_sha, "abc123def456");
+        assert_eq!(impl_data.exit_code, 0);
+    }
+
+    #[test]
+    fn test_nemo_result_test_roundtrip() {
+        let data = TestResultData {
+            services: vec![TestServiceResult {
+                name: "api".to_string(),
+                test_command: "cargo test -p api".to_string(),
+                exit_code: 0,
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+            }],
+            all_passed: true,
+            ci_status: CiStatus::Passed,
+            token_usage: TokenUsage {
+                input: 0,
+                output: 0,
+            },
+        };
+        let result = NemoResult {
+            stage: "test".to_string(),
+            data: serde_json::to_value(&data).unwrap(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: NemoResult = serde_json::from_str(&json).unwrap();
+        let test_data = parsed.as_test_output().unwrap();
+        assert!(test_data.all_passed);
+        assert_eq!(test_data.ci_status, CiStatus::Passed);
+        assert_eq!(test_data.services.len(), 1);
+    }
+
+    #[test]
+    fn test_nemo_result_review_roundtrip() {
+        let data = ReviewResultData {
+            verdict: serde_json::json!({"clean": true, "summary": "looks good"}),
+            token_usage: TokenUsage {
+                input: 5000,
+                output: 1000,
+            },
+            exit_code: 0,
+            session_id: "sess-review-1".to_string(),
+        };
+        let result = NemoResult {
+            stage: "review".to_string(),
+            data: serde_json::to_value(&data).unwrap(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: NemoResult = serde_json::from_str(&json).unwrap();
+        let review_data = parsed.as_review_output().unwrap();
+        assert_eq!(review_data.exit_code, 0);
+    }
+
+    #[test]
+    fn test_nemo_result_revise_roundtrip() {
+        let data = ReviseResultData {
+            revised_spec_path: "specs/feature/invoice-cancel.md".to_string(),
+            new_sha: "def789".to_string(),
+            token_usage: TokenUsage {
+                input: 8000,
+                output: 1500,
+            },
+            exit_code: 0,
+            session_id: "sess-revise-1".to_string(),
+        };
+        let result = NemoResult {
+            stage: "revise".to_string(),
+            data: serde_json::to_value(&data).unwrap(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: NemoResult = serde_json::from_str(&json).unwrap();
+        let revise_data = parsed.as_revise_output().unwrap();
+        assert_eq!(
+            revise_data.revised_spec_path,
+            "specs/feature/invoice-cancel.md"
+        );
+        assert_eq!(revise_data.new_sha, "def789");
+    }
+
+    #[test]
+    fn test_ci_status_serialization() {
+        assert_eq!(
+            serde_json::to_string(&CiStatus::Passed).unwrap(),
+            "\"passed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CiStatus::Failed).unwrap(),
+            "\"failed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CiStatus::Unknown).unwrap(),
+            "\"unknown\""
+        );
     }
 }

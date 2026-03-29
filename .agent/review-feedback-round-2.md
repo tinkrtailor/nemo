@@ -1,21 +1,23 @@
-# Adversarial Review: Round 2 (OpenCode GPT-5.4)
+Not clean — not converged.
 
-10/14 round 1 findings FIXED. 4 still broken. 3 new issues from the fixes.
+I reviewed all source under `control-plane/src`, `cli/src`, `images`, `terraform`, and `.nemo/prompts`.
 
-## STILL BROKEN FROM ROUND 1
+**Round 1**
+- Fixed: proxy egress drop + loopback-only agent access, per-worktree `subPath` mount, git repo-path restriction, Terraform `DATABASE_URL` secret wiring, repo SSH key input, `bc` removal, `ssh-keyscan` dependency, `pathexpand(...)`.
+- Still broken — Critical — output contract is not wired end-to-end: prompts still tell agents to emit `NEMO_RESULT:`, the entrypoint wraps that again, and the control plane still reads `.agent/*-verdict.json` from git instead of pod logs. See `images/base/nemo-agent-entry:140`, `.nemo/prompts/review.md:69`, `.nemo/prompts/spec-audit.md:62`, `control-plane/src/loop_engine/driver.rs:260`, `control-plane/src/types/verdict.rs:34`.
+- Still broken — Critical — Claude-backed stages have no working auth path now: `implement`/`revise` still call `claude`, but no Claude secret is mounted and no sidecar broker exists. See `images/base/nemo-agent-entry:157`, `control-plane/src/k8s/job_builder.rs:342`, `control-plane/src/k8s/job_builder.rs:383`.
+- Still broken — Critical — the bare-repo PVC “fix” created two different namespaced claims, so the loop engine and job pods do not share the same storage. See `terraform/k8s.tf:25`, `terraform/k8s.tf:46`, `terraform/control-plane.tf:140`, `control-plane/src/k8s/job_builder.rs:304`.
+- Still broken — High — SSH host verification still falls back to `ssh.InsecureIgnoreHostKey()` when `known_hosts` is absent/unreadable, so MITM remains possible. See `images/sidecar/main.go:474`.
+- Still broken — Medium — test harness failures still do not map correctly to `unknown`; e.g. timeout exit `124` is reported as `failed`. See `images/base/nemo-agent-entry:227`.
 
-1. **STILL_BROKEN** - main.rs falls back to MockJobDispatcher on kube init failure (control-plane/src/main.rs:47). Real kube client required for production. Fix: fail hard on kube init failure instead of silently falling back to mocks. A control plane that can't dispatch jobs should not start.
+**New Issues**
+- Critical — jobs mount `nemo-creds-{engineer}` secrets, but `nemo auth` only writes credentials to Postgres; no K8s secret is ever created, so pods will fail to mount creds. See `control-plane/src/api/handlers.rs:394`, `control-plane/src/state/postgres.rs:545`, `control-plane/src/k8s/job_builder.rs:346`.
+- Critical — secrets are stored plaintext in Postgres and then injected into agent env as `NEMO_CRED_*`, so untrusted agent code can exfiltrate them directly. See `control-plane/src/api/handlers.rs:392`, `control-plane/src/state/postgres.rs:548`, `control-plane/src/loop_engine/driver.rs:1144`, `control-plane/src/k8s/job_builder.rs:275`.
+- Critical — the control plane never actually creates the persistent per-loop worktree it later mounts; it only derives a string path. Jobs can start on a nonexistent subpath. See `control-plane/src/loop_engine/driver.rs:1159`, `control-plane/src/k8s/job_builder.rs:391`, `control-plane/src/git/mod.rs:235`.
+- High — the egress proxy will CONNECT/dial arbitrary private or cluster-internal addresses, so the agent can pivot through the sidecar into internal services. See `images/sidecar/main.go:179`, `images/sidecar/main.go:233`.
+- High — sidecar readiness can go green even if a listener never bound; the startup loop never fails on per-port timeout. See `images/sidecar/main.go:662`, `images/sidecar/main.go:673`.
+- High — kubeconfig is fetched with `StrictHostKeyChecking=no`, allowing SSH MITM to hand back a malicious kubeconfig. See `terraform/main.tf:67`.
+- High — `nemo auth` is still mismatched to Lane C: wrong Claude/OpenAI credential paths and no `--ssh` support, so required runtime creds cannot be provisioned reliably. See `cli/src/commands/auth.rs:27`, `cli/src/commands/auth.rs:31`, `cli/src/main.rs:135`.
+- High — a transient `gh pr view` failure is treated as “no PR”, and branch creation may delete/reset an active remote branch. See `control-plane/src/git/mod.rs:176`, `control-plane/src/git/mod.rs:200`, `control-plane/src/git/mod.rs:263`.
 
-4. **STILL_BROKEN** - Ship/harden terminal paths still only mutate DB state. No real merge/PR/spec-PR operations exist (driver.rs:455, driver.rs:311, git/mod.rs:7). Fix: add create_pr() and merge_pr() to GitOperations trait. These can shell out to `gh pr create` and `gh pr merge`. For V1, this is acceptable.
-
-5. **STILL_BROKEN** - /start still non-atomic: check + git branch + create_loop are separate operations (handlers.rs:37, 44, 112). Fix: wrap the entire sequence in a Postgres transaction. Use a DB unique constraint on (branch, status != terminal) as the ultimate guard.
-
-8. **STILL_BROKEN** - nemo auth CLI posts to /credentials but the router has no such route (api/mod.rs:37). Fix: add POST /credentials route, or mark auth as a known V1 gap in the spec.
-
-## NEW FINDINGS FROM FIXES
-
-N1. **HIGH** - /start creates a git branch BEFORE the DB insert. If DB insert fails, orphan branch left in git with no cleanup (handlers.rs:44, 112, git/mod.rs:84). Fix: create branch inside the same transaction, or add a cleanup path that deletes the branch on DB failure.
-
-N2. **HIGH** - nemo cancel CLI expects {loop_id, state, reason} but server now returns {loop_id, state, cancel_requested} (types/api.rs:91 vs cancel.rs:6). Deserialization will fail. Fix: align the response struct.
-
-N3. **LOW** - nemo auth prints wrong recovery command: "nemo start resume <loop-id>" instead of "nemo resume <loop-id>" (auth.rs:60). Fix: correct the string.
+If you want, I can do a Round 3 pass after fixes and keep the same adversarial bar.

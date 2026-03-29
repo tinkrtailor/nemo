@@ -95,6 +95,15 @@ pub trait StateStore: Send + Sync + 'static {
 
     /// Create a merge event record (NFR-8).
     async fn create_merge_event(&self, event: &MergeEvent) -> Result<()>;
+
+    /// Try to acquire a per-loop advisory lock (for reconciler coordination).
+    /// Returns `Some(guard_id)` if acquired, `None` if held by another session.
+    /// The lock is session-scoped on a dedicated connection held internally.
+    /// Call `advisory_unlock` with the same loop_id when done.
+    async fn try_advisory_lock(&self, loop_id: Uuid) -> Result<bool>;
+
+    /// Release a per-loop advisory lock and return its dedicated connection to the pool.
+    async fn advisory_unlock(&self, loop_id: Uuid) -> Result<()>;
 }
 
 /// Flags that can be set on a loop by the API server.
@@ -162,13 +171,13 @@ pub mod memory {
         async fn create_loop(&self, record: &LoopRecord) -> Result<LoopRecord> {
             let mut loops = self.loops.write().await;
             // Enforce unique active branch constraint (mirrors Postgres partial unique index)
-            let has_active = loops.values().any(|l| {
-                l.branch == record.branch && !l.state.is_terminal()
-            });
+            let has_active = loops
+                .values()
+                .any(|l| l.branch == record.branch && !l.state.is_terminal());
             if has_active {
-                return Err(crate::error::NemoError::Database(
-                    sqlx::Error::Database(Box::new(MemoryUniqueViolation)),
-                ));
+                return Err(crate::error::NemoError::Database(sqlx::Error::Database(
+                    Box::new(MemoryUniqueViolation),
+                )));
             }
             loops.insert(record.id, record.clone());
             Ok(record.clone())
@@ -383,6 +392,15 @@ pub mod memory {
         async fn create_merge_event(&self, event: &MergeEvent) -> Result<()> {
             let mut events = self.merge_events.write().await;
             events.push(event.clone());
+            Ok(())
+        }
+
+        async fn try_advisory_lock(&self, _loop_id: Uuid) -> Result<bool> {
+            // In-memory store: always succeeds (single instance)
+            Ok(true)
+        }
+
+        async fn advisory_unlock(&self, _loop_id: Uuid) -> Result<()> {
             Ok(())
         }
     }

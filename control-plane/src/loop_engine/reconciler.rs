@@ -77,6 +77,18 @@ impl Reconciler {
         tracing::debug!(count = active_loops.len(), "Reconciling active loops");
 
         for loop_record in &active_loops {
+            // Try to acquire a per-loop advisory lock so multiple control-plane
+            // instances don't tick the same loop concurrently.
+            if !self
+                .store
+                .try_advisory_lock(loop_record.id)
+                .await
+                .unwrap_or(false)
+            {
+                tracing::debug!(loop_id = %loop_record.id, "Skipping loop (advisory lock held by another instance)");
+                continue;
+            }
+
             match self.driver.tick(loop_record.id).await {
                 Ok(new_state) => {
                     tracing::trace!(
@@ -88,23 +100,34 @@ impl Reconciler {
                 }
                 Err(e) => {
                     if e.is_fatal() {
-                        // Fatal error: transition to FAILED so we don't retry forever
+                        // Fatal error: transition to FAILED so we don't retry forever.
+                        // Re-read the current record to avoid overwriting fields that
+                        // tick() may have updated before failing.
                         tracing::error!(
                             loop_id = %loop_record.id,
                             error = %e,
                             "Fatal tick error, transitioning to FAILED"
                         );
-                        let mut failed = loop_record.clone();
-                        failed.state = crate::types::LoopState::Failed;
-                        failed.sub_state = None;
-                        failed.failure_reason = Some(format!("Fatal error: {e}"));
-                        failed.active_job_name = None;
-                        if let Err(update_err) = self.store.update_loop(&failed).await {
-                            tracing::error!(
-                                loop_id = %loop_record.id,
-                                error = %update_err,
-                                "Failed to mark loop as FAILED"
-                            );
+                        match self.store.get_loop(loop_record.id).await {
+                            Ok(Some(mut current)) => {
+                                current.state = crate::types::LoopState::Failed;
+                                current.sub_state = None;
+                                current.failure_reason = Some(format!("Fatal error: {e}"));
+                                current.active_job_name = None;
+                                if let Err(update_err) = self.store.update_loop(&current).await {
+                                    tracing::error!(
+                                        loop_id = %loop_record.id,
+                                        error = %update_err,
+                                        "Failed to mark loop as FAILED"
+                                    );
+                                }
+                            }
+                            _ => {
+                                tracing::error!(
+                                    loop_id = %loop_record.id,
+                                    "Could not re-read loop to mark as FAILED"
+                                );
+                            }
                         }
                     } else {
                         tracing::warn!(
@@ -115,6 +138,9 @@ impl Reconciler {
                     }
                 }
             }
+
+            // Release advisory lock
+            let _ = self.store.advisory_unlock(loop_record.id).await;
         }
     }
 }

@@ -1,15 +1,10 @@
-# Adversarial Review: Round 5 (OpenCode GPT-5.4)
+Not clean. I read all Rust source under `control-plane/src` and `cli/src` and found 6 real production bugs.
 
-5 findings. No CRITICALs. Getting narrow. Fix these and we converge.
+- Critical — `control-plane/src/k8s/job_builder.rs:442`: every job pod uses an init container based on `alpine:3.19` but the script calls `iptables`; Alpine does not ship `iptables` by default, so the init container fails and no agent jobs can start.
+- High — `control-plane/src/k8s/job_builder.rs:347`: the `ssh-key` secret projection requires key `ssh` unconditionally; if an engineer has only model creds, pod startup fails before the job runs.
+- High — `control-plane/src/git/mod.rs:179`: when the branch already exists and PR state is unknown/absent, `create_branch` reuses the old local branch “as-is” instead of recreating from `origin/main`; rerunning the same spec can start from stale commits/artifacts from a previous terminal run.
+- High — `control-plane/src/api/handlers.rs:435`: `POST /credentials` with `valid=false` still writes or leaves the Kubernetes Secret in place, and jobs always mount that secret; “invalidated” credentials remain usable by pods.
+- High — `cli/src/commands/auth.rs:41`: `nemo auth --claude` only checks `~/.config/claude-code/credentials.json` and `~/.claude/credentials.json`, but this repo’s own runtime expects `~/.claude/.credentials.json` (`claude-worktree.sh:252`); users can log in successfully and still fail to upload Claude auth.
+- High — `cli/src/commands/auth.rs:54`: `nemo auth --openai` looks in `~/.config/openai/credentials.json`, but the repo contract is `~/.config/opencode/` for reviewer auth (`specs/lane-a-core-loop.md:562`); on a correctly configured machine, OpenAI reviewer creds are never discovered.
 
-## FINDINGS
-
-N14. **HIGH** - main.rs boots with NemoConfig::default(), never loads nemo.toml. Repo config ignored in production: ship gating, model overrides, namespaces, timeouts all wrong (main.rs:28). Fix: load config from NEMO_CONFIG_PATH env var or default path, fail if invalid.
-
-N15. **HIGH** - CLI always enables danger_accept_invalid_certs(true). TLS verification disabled in all environments. Bearer tokens vulnerable to MITM (cli/src/client.rs:14). Fix: only accept invalid certs when NEMO_INSECURE=true or --insecure flag, default to strict TLS.
-
-N16. **MEDIUM** - AWAITING_REAUTH clears active_job_name but doesn't delete the K8s Job. Resume recreates same deterministic name, cleanup skipped because active_job_name is None, redispatch hits AlreadyExists (driver.rs:705, 709, 920, job_builder.rs:22). Fix: delete the failed Job before clearing active_job_name, or store it for cleanup on resume.
-
-N17. **MEDIUM** - write_file() checks if git add/commit could be launched, not if they succeeded. Failed commits treated as success, worktree removed, loop proceeds with missing file (git/mod.rs:143, 153). Fix: check exit status of git add and git commit, propagate errors.
-
-N18. **MEDIUM** - Branch names are deterministic. Restarting same spec after terminal run fails with "branch already exists" because old branch was never deleted (handlers.rs:35, 45, types/mod.rs:228, git/mod.rs:93). Fix: on /start, if branch exists but no active loop, delete and recreate. Or use create-or-checkout.
+If you want, I can do round 6 with another read-only pass after these are fixed.

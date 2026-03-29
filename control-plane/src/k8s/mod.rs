@@ -37,6 +37,10 @@ pub trait JobDispatcher: Send + Sync + 'static {
 
     /// Get a K8s Job by name.
     async fn get_job(&self, name: &str, namespace: &str) -> Result<Option<Job>>;
+
+    /// Get logs from the agent container of a job's pod.
+    /// Used to extract NEMO_RESULT: lines from completed jobs.
+    async fn get_job_logs(&self, name: &str, namespace: &str) -> Result<String>;
 }
 
 /// In-memory mock job dispatcher for testing.
@@ -49,13 +53,21 @@ pub mod mock {
     #[derive(Debug, Clone)]
     pub struct MockJobDispatcher {
         jobs: Arc<RwLock<HashMap<String, (Job, JobStatus)>>>,
+        logs: Arc<RwLock<HashMap<String, String>>>,
     }
 
     impl MockJobDispatcher {
         pub fn new() -> Self {
             Self {
                 jobs: Arc::new(RwLock::new(HashMap::new())),
+                logs: Arc::new(RwLock::new(HashMap::new())),
             }
+        }
+
+        /// Set mock logs for a job (for testing NEMO_RESULT extraction).
+        pub async fn set_job_logs(&self, name: &str, logs: &str) {
+            let mut log_map = self.logs.write().await;
+            log_map.insert(name.to_string(), logs.to_string());
         }
 
         /// Set the status of a job (for test control).
@@ -109,6 +121,11 @@ pub mod mock {
         async fn get_job(&self, name: &str, _namespace: &str) -> Result<Option<Job>> {
             let jobs = self.jobs.read().await;
             Ok(jobs.get(name).map(|(job, _)| job.clone()))
+        }
+
+        async fn get_job_logs(&self, name: &str, _namespace: &str) -> Result<String> {
+            let logs = self.logs.read().await;
+            Ok(logs.get(name).cloned().unwrap_or_default())
         }
     }
 }

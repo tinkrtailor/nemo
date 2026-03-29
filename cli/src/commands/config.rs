@@ -2,19 +2,39 @@ use anyhow::Result;
 
 /// Edit ~/.nemo/config.toml.
 pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
-    let config = crate::config::load_config()?;
+    if set.is_some() && get.is_some() {
+        anyhow::bail!("Cannot use --set and --get together");
+    }
+
+    // Try loading existing config. For --set, fall back to defaults with a
+    // warning if the file is malformed, so users can repair with --set.
+    // For --get and display, propagate the error.
+    let config = match crate::config::load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            if set.is_some() {
+                eprintln!("Warning: existing config is malformed ({e}), starting from defaults");
+                eprintln!("Other settings may be lost. Re-set them after this operation.");
+                crate::config::EngineerConfig::default()
+            } else {
+                return Err(e);
+            }
+        }
+    };
 
     if let Some(key) = get {
         match key.as_str() {
             "server_url" => println!("{}", config.server_url),
             "engineer" => println!("{}", config.engineer),
+            "name" => println!("{}", config.name),
+            "email" => println!("{}", config.email),
             "api_key" => {
                 if let Some(key) = &config.api_key {
                     // Mask sensitive value using chars() to handle non-ASCII safely
                     let chars: Vec<char> = key.chars().collect();
                     if chars.len() > 12 {
                         let prefix: String = chars[..4].iter().collect();
-                        let suffix: String = chars[chars.len()-4..].iter().collect();
+                        let suffix: String = chars[chars.len() - 4..].iter().collect();
                         println!("{prefix}...{suffix}");
                     } else {
                         println!("****");
@@ -40,16 +60,25 @@ pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
         match key {
             "server_url" => config.server_url = value.to_string(),
             "engineer" => config.engineer = value.to_string(),
-            "api_key" => config.api_key = Some(value.to_string()),
+            "name" => config.name = value.to_string(),
+            "email" => config.email = value.to_string(),
+            "api_key" => {
+                // Reject empty API keys — they break all authenticated requests
+                if value.is_empty() {
+                    config.api_key = None;
+                    println!("Cleared api_key");
+                } else {
+                    config.api_key = Some(value.to_string());
+                    println!("Set {key} = ****");
+                }
+                crate::config::save_config(&config)?;
+                return Ok(());
+            }
             _ => anyhow::bail!("Unknown config key: {key}"),
         }
 
         crate::config::save_config(&config)?;
-        if key == "api_key" {
-            println!("Set {key} = ****");
-        } else {
-            println!("Set {key} = {value}");
-        }
+        println!("Set {key} = {value}");
         return Ok(());
     }
 
@@ -57,6 +86,22 @@ pub fn run(set: Option<String>, get: Option<String>) -> Result<()> {
     println!("Nemo CLI Configuration (~/.nemo/config.toml)");
     println!("  server_url: {}", config.server_url);
     println!("  engineer:   {}", config.engineer);
+    println!(
+        "  name:       {}",
+        if config.name.is_empty() {
+            "(not set)"
+        } else {
+            &config.name
+        }
+    );
+    println!(
+        "  email:      {}",
+        if config.email.is_empty() {
+            "(not set)"
+        } else {
+            &config.email
+        }
+    );
     println!(
         "  api_key:    {}",
         if config.api_key.is_some() {
