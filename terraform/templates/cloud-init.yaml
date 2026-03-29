@@ -1,0 +1,37 @@
+#cloud-config
+# Cloud-init for Nemo k3s server
+# Prepares the server for k3s installation via remote-exec provisioner
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - jq
+  - unzip
+  - open-iscsi
+  - nfs-common
+
+# Create backup directory for pg_dump CronJob (FR-55)
+runcmd:
+  - mkdir -p /data/backups
+  - chmod 755 /data/backups
+
+# Disable swap (required for k3s)
+swap:
+  filename: /dev/null
+  size: 0
+
+# Set up log rotation for container logs (FR-54)
+write_files:
+  - path: /etc/logrotate.d/containers
+    content: |
+      /var/log/containers/*.log {
+        daily
+        rotate 5
+        maxsize 50M
+        compress
+        missingok
+        notifempty
+        copytruncate
+      }
