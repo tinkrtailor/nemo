@@ -46,6 +46,7 @@ impl ConvergentLoopDriver {
             bare_repo_pvc: self.config.cluster.bare_repo_pvc.clone(),
             sessions_pvc: self.config.cluster.sessions_pvc.clone(),
             image_pull_secret: self.config.cluster.image_pull_secret.clone(),
+            git_repo_url: self.config.cluster.git_repo_url.clone(),
         }
     }
 
@@ -1183,9 +1184,15 @@ impl ConvergentLoopDriver {
             .map(|c| (c.provider, c.credential_ref))
             .collect();
 
+        // Engineer email from the engineers table (populated by `nemo auth`).
+        // When the engineers table is available (Lane B), look up the actual email.
+        // For now, derive from engineer name as a fallback.
+        let engineer_email = format!("{}@nemo.dev", record.engineer);
+
         Ok(LoopContext {
             loop_id: record.id,
             engineer: record.engineer.clone(),
+            engineer_email,
             spec_path: record.spec_path.clone(),
             branch: record.branch.clone(),
             current_sha: record.current_sha.clone().unwrap_or_default(),

@@ -193,6 +193,9 @@ pub enum LoopDecision {
 pub struct LoopContext {
     pub loop_id: Uuid,
     pub engineer: String,
+    /// Engineer email from the engineers table (populated by nemo auth).
+    /// Used for GIT_AUTHOR_EMAIL and GIT_COMMITTER_EMAIL (FR-27).
+    pub engineer_email: String,
     pub spec_path: String,
     pub branch: String,
     pub current_sha: String,

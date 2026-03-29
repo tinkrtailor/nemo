@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub severity: Severity,
-    pub category: String,
+    /// Category is optional per spec FR-40: not all reviewers produce categories.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -242,7 +244,7 @@ mod tests {
             confidence: Some(0.9),
             issues: vec![Issue {
                 severity: Severity::High,
-                category: "completeness".to_string(),
+                category: Some("completeness".to_string()),
                 file: Some("specs/feature/invoice-cancel.md".to_string()),
                 line: None,
                 description: "Missing error handling section".to_string(),
@@ -267,7 +269,7 @@ mod tests {
             source: FeedbackSource::Review,
             issues: Some(vec![Issue {
                 severity: Severity::High,
-                category: "correctness".to_string(),
+                category: Some("correctness".to_string()),
                 file: Some("api/src/invoice.rs".to_string()),
                 line: Some(42),
                 description: "Missing null check".to_string(),

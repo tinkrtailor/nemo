@@ -23,6 +23,8 @@ pub struct JobBuildConfig {
     pub bare_repo_pvc: String,
     pub sessions_pvc: String,
     pub image_pull_secret: Option<String>,
+    /// Git repository URL passed to the sidecar for SSH proxy host restriction (FR-18).
+    pub git_repo_url: String,
 }
 
 /// Build a K8s Job spec for a given stage.
@@ -84,8 +86,9 @@ pub fn build_job(
     // Build sidecar container volume mounts
     let sidecar_mounts = build_sidecar_mounts();
 
-    // FR-28: Resource limits per stage
-    let (agent_resources, sidecar_resources) = resource_limits(&stage.name, is_test);
+    // FR-28: Resource limits per stage (with JVM tag support for TEST)
+    let has_jvm_tag = ctx.credentials.iter().any(|(k, v)| k == "service_tags" && v.contains("jvm"));
+    let (agent_resources, sidecar_resources) = resource_limits(&stage.name, is_test, has_jvm_tag);
 
     // FR-25: Agent security context
     let agent_security_ctx = SecurityContext {
@@ -128,7 +131,7 @@ pub fn build_job(
 
     // Sidecar env vars
     let sidecar_env = vec![
-        env_var("GIT_REPO_URL", &ctx.branch), // Used by sidecar to know allowed git remote
+        env_var("GIT_REPO_URL", &cfg.git_repo_url), // Used by sidecar to know allowed git remote (FR-18)
     ];
 
     // Agent container
@@ -237,11 +240,11 @@ fn build_agent_env_vars(ctx: &LoopContext, stage: &StageConfig, is_test: bool) -
         env_var("OPENAI_BASE_URL", "http://localhost:9090/openai"),
     ];
 
-    // FR-10: Git identity
+    // FR-10, FR-27: Git identity from engineers table (populated by nemo auth)
     env.push(env_var("GIT_AUTHOR_NAME", &ctx.engineer));
-    env.push(env_var("GIT_AUTHOR_EMAIL", &format!("{}@nemo.dev", ctx.engineer)));
+    env.push(env_var("GIT_AUTHOR_EMAIL", &ctx.engineer_email));
     env.push(env_var("GIT_COMMITTER_NAME", &ctx.engineer));
-    env.push(env_var("GIT_COMMITTER_EMAIL", &format!("{}@nemo.dev", ctx.engineer)));
+    env.push(env_var("GIT_COMMITTER_EMAIL", &ctx.engineer_email));
 
     // FR-11: GIT_SSH_COMMAND to route through sidecar SSH proxy
     env.push(env_var(
@@ -501,10 +504,11 @@ iptables -A OUTPUT -p icmp -m owner --uid-owner 1000 -j DROP"#;
 }
 
 /// FR-28: Resource limits per job type.
-fn resource_limits(stage_name: &str, _is_test: bool) -> (ResourceRequirements, ResourceRequirements) {
-    let (cpu_req, cpu_lim, mem_req, mem_lim) = match stage_name {
-        "test" => ("500m", "1000m", "1Gi", "3Gi"),
-        _ => ("250m", "500m", "1Gi", "2Gi"),
+fn resource_limits(stage_name: &str, _is_test: bool, has_jvm_tag: bool) -> (ResourceRequirements, ResourceRequirements) {
+    let (cpu_req, cpu_lim, mem_req, mem_lim) = match (stage_name, has_jvm_tag) {
+        ("test", true) => ("1000m", "2000m", "2Gi", "6Gi"),  // TEST (jvm tag)
+        ("test", false) => ("500m", "1000m", "1Gi", "3Gi"),  // TEST (default)
+        _ => ("250m", "500m", "1Gi", "2Gi"),                  // IMPLEMENT/REVIEW/AUDIT/REVISE
     };
 
     let agent = ResourceRequirements {
@@ -552,6 +556,7 @@ mod tests {
         LoopContext {
             loop_id: Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap(),
             engineer: "alice".to_string(),
+            engineer_email: "alice@example.com".to_string(),
             spec_path: "specs/feature/invoice-cancel.md".to_string(),
             branch: "agent/alice/invoice-cancel-a1b2c3d4".to_string(),
             current_sha: "abc123".to_string(),
@@ -582,6 +587,7 @@ mod tests {
             bare_repo_pvc: "nemo-bare-repo".to_string(),
             sessions_pvc: "nemo-sessions".to_string(),
             image_pull_secret: None,
+            git_repo_url: "git@github.com:test-org/test-repo.git".to_string(),
         }
     }
 
@@ -768,6 +774,54 @@ mod tests {
         let limits = agent_res.limits.as_ref().unwrap();
         assert_eq!(limits["cpu"], Quantity("1000m".to_string()));
         assert_eq!(limits["memory"], Quantity("3Gi".to_string()));
+    }
+
+    #[test]
+    fn test_build_job_resource_limits_test_jvm() {
+        let mut ctx = test_ctx();
+        ctx.credentials = vec![("service_tags".to_string(), "[\"jvm\"]".to_string())];
+        let stage = StageConfig {
+            name: "test".to_string(),
+            timeout: Duration::from_secs(1800),
+            ..Default::default()
+        };
+        let cfg = test_cfg();
+        let job = build_job(&ctx, &stage, &cfg);
+        let containers = &job.spec.unwrap().template.spec.unwrap().containers;
+
+        // FR-28: TEST (jvm tag) gets elevated resources
+        let agent_res = containers[0].resources.as_ref().unwrap();
+        let limits = agent_res.limits.as_ref().unwrap();
+        assert_eq!(limits["cpu"], Quantity("2000m".to_string()));
+        assert_eq!(limits["memory"], Quantity("6Gi".to_string()));
+    }
+
+    #[test]
+    fn test_build_job_sidecar_git_repo_url() {
+        let ctx = test_ctx();
+        let stage = test_stage();
+        let cfg = test_cfg();
+        let job = build_job(&ctx, &stage, &cfg);
+        let sidecar = &job.spec.unwrap().template.spec.unwrap().containers[1];
+        let env = sidecar.env.as_ref().unwrap();
+        let git_url = env.iter().find(|e| e.name == "GIT_REPO_URL").unwrap();
+        // FR-18: Sidecar gets the actual git repo URL, not branch
+        assert_eq!(git_url.value.as_deref(), Some("git@github.com:test-org/test-repo.git"));
+    }
+
+    #[test]
+    fn test_build_job_engineer_email() {
+        let ctx = test_ctx();
+        let stage = test_stage();
+        let cfg = test_cfg();
+        let job = build_job(&ctx, &stage, &cfg);
+        let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let env = agent.env.as_ref().unwrap();
+        let author_email = env.iter().find(|e| e.name == "GIT_AUTHOR_EMAIL").unwrap();
+        let committer_email = env.iter().find(|e| e.name == "GIT_COMMITTER_EMAIL").unwrap();
+        // FR-27: Email comes from engineers table, not hardcoded
+        assert_eq!(author_email.value.as_deref(), Some("alice@example.com"));
+        assert_eq!(committer_email.value.as_deref(), Some("alice@example.com"));
     }
 
     #[test]

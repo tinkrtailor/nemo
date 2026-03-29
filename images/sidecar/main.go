@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +22,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // Structured log entry for egress logger (NFR-8).
@@ -295,10 +299,33 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- FR-18: Git SSH Proxy on :9091 ---
-// Note: A full SSH proxy implementation requires golang.org/x/crypto/ssh.
-// This is a simplified TCP proxy that forwards connections to the git remote.
+// Accepts SSH connections from the agent container, validates that only
+// git-upload-pack and git-receive-pack are executed, authenticates with
+// the mounted SSH key, and proxies the operation to the configured git remote.
+// Port forwarding, remote exec, environment passing, and PTY are disabled.
+
+// Allowed git SSH commands (FR-18).
+var allowedGitCommands = map[string]bool{
+	"git-upload-pack":  true,
+	"git-receive-pack": true,
+}
 
 func startGitProxy(ctx context.Context, gitRemoteHost string) error {
+	// Generate an ephemeral host key for the local SSH server.
+	_, hostPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("failed to generate host key: %w", err)
+	}
+	hostSigner, err := ssh.NewSignerFromKey(hostPriv)
+	if err != nil {
+		return fmt.Errorf("failed to create host signer: %w", err)
+	}
+
+	config := &ssh.ServerConfig{
+		NoClientAuth: true, // Agent on same pod, no auth needed for local proxy
+	}
+	config.AddHostKey(hostSigner)
+
 	listener, err := net.Listen("tcp", "127.0.0.1:9091")
 	if err != nil {
 		return fmt.Errorf("failed to listen on :9091: %w", err)
@@ -319,47 +346,158 @@ func startGitProxy(ctx context.Context, gitRemoteHost string) error {
 				logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("git proxy accept error: %v", err))
 				continue
 			}
-			go handleGitConnection(conn, gitRemoteHost)
+			go handleSSHConnection(conn, config, gitRemoteHost)
 		}
 	}()
 
 	return nil
 }
 
-func handleGitConnection(clientConn net.Conn, gitRemoteHost string) {
-	defer clientConn.Close()
+func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, gitRemoteHost string) {
+	defer nConn.Close()
 
-	// FR-18: SSH key auth to actual remote
+	// Perform SSH handshake with the agent
+	sshConn, chans, reqs, err := ssh.NewServerConn(nConn, config)
+	if err != nil {
+		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("SSH handshake failed: %v", err))
+		return
+	}
+	defer sshConn.Close()
+
+	// FR-18: Reject all global requests (port forwarding, etc.)
+	go ssh.DiscardRequests(reqs)
+
+	for newChan := range chans {
+		if newChan.ChannelType() != "session" {
+			newChan.Reject(ssh.UnknownChannelType, "only session channels allowed")
+			continue
+		}
+
+		channel, requests, err := newChan.Accept()
+		if err != nil {
+			logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("failed to accept channel: %v", err))
+			continue
+		}
+
+		go handleSSHSession(channel, requests, gitRemoteHost)
+	}
+}
+
+func handleSSHSession(channel ssh.Channel, requests <-chan *ssh.Request, gitRemoteHost string) {
+	defer channel.Close()
+
+	for req := range requests {
+		switch req.Type {
+		case "exec":
+			// Parse the command from the exec request
+			if len(req.Payload) < 4 {
+				req.Reply(false, nil)
+				continue
+			}
+			cmdLen := int(req.Payload[0])<<24 | int(req.Payload[1])<<16 | int(req.Payload[2])<<8 | int(req.Payload[3])
+			if cmdLen+4 > len(req.Payload) {
+				req.Reply(false, nil)
+				continue
+			}
+			fullCmd := string(req.Payload[4 : 4+cmdLen])
+
+			// FR-18: Only allow git-upload-pack and git-receive-pack
+			cmdParts := strings.SplitN(fullCmd, " ", 2)
+			cmdName := cmdParts[0]
+
+			if !allowedGitCommands[cmdName] {
+				logJSON("NEMO_SIDECAR", "warn", fmt.Sprintf("rejected SSH command: %s", cmdName))
+				req.Reply(false, nil)
+				channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
+				continue
+			}
+
+			logJSON("NEMO_SIDECAR", "info", fmt.Sprintf("proxying git command: %s to %s", cmdName, gitRemoteHost))
+			req.Reply(true, nil)
+
+			// Proxy the command to the actual git remote via SSH
+			proxyGitCommand(channel, fullCmd, gitRemoteHost)
+			return
+
+		case "env":
+			// FR-18: Reject environment variable passing
+			req.Reply(false, nil)
+
+		case "pty-req":
+			// FR-18: Reject PTY allocation
+			req.Reply(false, nil)
+
+		case "subsystem":
+			// Reject subsystem requests
+			req.Reply(false, nil)
+
+		default:
+			req.Reply(false, nil)
+		}
+	}
+}
+
+func proxyGitCommand(channel ssh.Channel, command string, gitRemoteHost string) {
+	// Read SSH key for authenticating to the real remote
 	sshKeyPath := filepath.Join("/secrets", "ssh-key", "id_ed25519")
-	if _, err := os.Stat(sshKeyPath); err != nil {
-		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("SSH key not found: %v", err))
+	keyData, err := os.ReadFile(sshKeyPath)
+	if err != nil {
+		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("failed to read SSH key: %v", err))
+		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
 		return
 	}
 
-	// Connect to the real git remote on port 22
+	signer, err := ssh.ParsePrivateKey(keyData)
+	if err != nil {
+		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("failed to parse SSH key: %v", err))
+		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
+		return
+	}
+
+	// Connect to the real git remote
+	clientConfig := &ssh.ClientConfig{
+		User: "git",
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(signer),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Known hosts checked at cluster level
+		Timeout:         10 * time.Second,
+	}
+
 	destAddr := gitRemoteHost + ":22"
-	destConn, err := net.DialTimeout("tcp", destAddr, 10*time.Second)
+	client, err := ssh.Dial("tcp", destAddr, clientConfig)
 	if err != nil {
 		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("failed to connect to git remote %s: %v", destAddr, err))
+		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
 		return
 	}
-	defer destConn.Close()
+	defer client.Close()
 
-	// Bidirectional proxy
-	var wg sync.WaitGroup
-	wg.Add(2)
+	session, err := client.NewSession()
+	if err != nil {
+		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("failed to create SSH session: %v", err))
+		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
+		return
+	}
+	defer session.Close()
 
-	go func() {
-		defer wg.Done()
-		io.Copy(destConn, clientConn)
-	}()
+	// Pipe stdin/stdout/stderr between agent channel and remote session
+	session.Stdin = channel
+	session.Stdout = channel
+	session.Stderr = channel.Stderr()
 
-	go func() {
-		defer wg.Done()
-		io.Copy(clientConn, destConn)
-	}()
+	err = session.Run(command)
+	exitCode := uint32(0)
+	if err != nil {
+		if exitErr, ok := err.(*ssh.ExitError); ok {
+			exitCode = uint32(exitErr.ExitStatus())
+		} else {
+			logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("git command error: %v", err))
+			exitCode = 1
+		}
+	}
 
-	wg.Wait()
+	channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{exitCode}))
 }
 
 // Extract git host from a git URL.

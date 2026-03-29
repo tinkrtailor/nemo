@@ -40,11 +40,13 @@ COPY --from=opencode-src /usr/local/bin/opencode /usr/local/bin/opencode
 RUN chmod +x /usr/local/bin/opencode
 
 # FR-4: Entrypoint script
-COPY nemo-agent-entry /usr/local/bin/nemo-agent-entry
+COPY images/base/nemo-agent-entry /usr/local/bin/nemo-agent-entry
 RUN chmod +x /usr/local/bin/nemo-agent-entry
 
 # Default prompt templates (FR-33)
-COPY --from=prompts . /etc/nemo/prompts/
+# Build context must be the repo root: docker build -f images/base/Dockerfile .
+# Prompts are embedded in the image as fallback defaults.
+COPY .nemo/prompts/ /etc/nemo/prompts/
 
 # Create agent user (UID 1000) for non-root execution (FR-25)
 RUN groupadd -g 1000 agent && \

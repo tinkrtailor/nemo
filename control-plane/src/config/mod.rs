@@ -287,6 +287,9 @@ pub struct ClusterConfig {
     /// Image pull secret name (optional, for private registries).
     #[serde(default)]
     pub image_pull_secret: Option<String>,
+    /// Git repository URL (SSH format, used for sidecar git proxy host restriction).
+    #[serde(default)]
+    pub git_repo_url: String,
     /// API server bind address.
     #[serde(default = "default_bind_addr")]
     pub bind_addr: String,
@@ -312,6 +315,7 @@ impl Default for ClusterConfig {
             sidecar_image: default_sidecar_image(),
             sessions_pvc: default_sessions_pvc(),
             image_pull_secret: None,
+            git_repo_url: String::new(),
             bind_addr: default_bind_addr(),
             port: default_port(),
             max_connections: default_max_connections(),

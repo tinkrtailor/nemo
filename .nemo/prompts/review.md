@@ -64,8 +64,17 @@ Field definitions:
 - `summary` (string): brief overall summary
 - `token_usage`: input/output token counts
 
+## Output
+
+When finished, write your result as a single JSON line to stdout prefixed with `NEMO_RESULT:`:
+
+```
+NEMO_RESULT:{"stage":"review","data":{"verdict":<your-verdict-json>,"token_usage":{"input":<n>,"output":<n>},"exit_code":0,"session_id":"<session-id>"}}
+```
+
 ## Important
 
-- Output ONLY the verdict JSON as your final message. No markdown, no commentary.
+- Output ONLY the `NEMO_RESULT:` line as your final message. No markdown, no commentary.
+- The verdict JSON goes inside the `data.verdict` field of the result envelope.
 - Be thorough but fair. Only flag real issues.
 - `clean: true` means the implementation fully satisfies the spec.
