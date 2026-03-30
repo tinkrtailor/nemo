@@ -106,7 +106,7 @@ impl ConvergentLoopDriver {
             updated.round = 1;
             updated.kind = LoopKind::Harden;
 
-            let stage_config = self.audit_stage_config();
+            let stage_config = self.audit_stage_config(record);
             let ctx = self.build_context(&updated).await?;
             let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
             self.persist_then_dispatch(&mut updated, "audit", &job)
@@ -230,7 +230,27 @@ impl ConvergentLoopDriver {
 
         match record.state {
             LoopState::Hardening => self.evaluate_harden_stage(&mut updated).await,
-            LoopState::Implementing => self.advance_to_testing(&mut updated).await,
+            LoopState::Implementing => {
+                // Validate implement output exists before advancing to test.
+                // A job that exits 0 but omits NEMO_RESULT should not advance.
+                let rounds = self.store.get_rounds(record.id).await?;
+                let impl_round = rounds
+                    .iter()
+                    .rfind(|r| r.round == updated.round && r.stage == "implement");
+                if impl_round.is_none() || impl_round.is_some_and(|r| r.output.is_none()) {
+                    tracing::warn!(
+                        loop_id = %record.id,
+                        "Implement stage completed without result output, treating as failure"
+                    );
+                    return self
+                        .handle_job_failed(
+                            &updated,
+                            "Implement stage exited successfully but produced no NEMO_RESULT",
+                        )
+                        .await;
+                }
+                self.advance_to_testing(&mut updated).await
+            }
             LoopState::Testing => self.evaluate_test_stage(&mut updated).await,
             LoopState::Reviewing => self.evaluate_review_stage(&mut updated).await,
             _ => {
@@ -390,14 +410,23 @@ impl ConvergentLoopDriver {
                             );
                             let pr_url = self
                                 .git
-                                .create_pr(&record.branch, &pr_title, &pr_body)
+                                .create_pr(
+                                    &record.branch,
+                                    &pr_title,
+                                    &pr_body,
+                                    &self.default_branch_for(record),
+                                )
                                 .await?;
                             record.spec_pr_url = Some(pr_url);
 
                             if self.config.harden.auto_merge_spec_pr {
                                 let merge_sha = self
                                     .git
-                                    .merge_pr(&record.branch, &self.config.harden.merge_strategy)
+                                    .merge_pr(
+                                        &record.branch,
+                                        &self.config.harden.merge_strategy,
+                                        &self.default_branch_for(record),
+                                    )
                                     .await?;
                                 record.merge_sha = Some(merge_sha);
                                 record.merged_at = Some(chrono::Utc::now());
@@ -506,7 +535,7 @@ impl ConvergentLoopDriver {
         // Compute from git diff: only services whose path prefix matches changed files.
         let diff_files = self
             .git
-            .changed_files(&record.branch)
+            .changed_files(&record.branch, &self.default_branch_for(record))
             .await
             .unwrap_or_default();
 
@@ -517,7 +546,21 @@ impl ConvergentLoopDriver {
             self.config
                 .services
                 .iter()
-                .filter(|(_, svc)| diff_files.iter().any(|f| f.starts_with(&svc.path)))
+                .filter(|(_, svc)| {
+                    // Use path + "/" for prefix matching to prevent false positives
+                    // (e.g., "cli" matching "client", "api" matching "api-gateway").
+                    // Root service (".") matches everything.
+                    let prefix = if svc.path == "." {
+                        String::new()
+                    } else if svc.path.ends_with('/') {
+                        svc.path.clone()
+                    } else {
+                        format!("{}/", svc.path)
+                    };
+                    diff_files
+                        .iter()
+                        .any(|f| prefix.is_empty() || f.starts_with(&prefix) || f == &svc.path)
+                })
                 .map(|(name, _)| name.clone())
                 .collect()
         };
@@ -674,7 +717,12 @@ impl ConvergentLoopDriver {
                     );
                     let pr_url = self
                         .git
-                        .create_pr(&record.branch, &pr_title, &pr_body)
+                        .create_pr(
+                            &record.branch,
+                            &pr_title,
+                            &pr_body,
+                            &self.default_branch_for(record),
+                        )
                         .await?;
                     record.spec_pr_url = Some(pr_url);
                     // Persist PR URL so next tick knows PR was already created
@@ -727,7 +775,11 @@ impl ConvergentLoopDriver {
                         // Within threshold + CI passed: merge the PR -> SHIPPED
                         let merge_sha = self
                             .git
-                            .merge_pr(&record.branch, &self.config.ship.merge_strategy)
+                            .merge_pr(
+                                &record.branch,
+                                &self.config.ship.merge_strategy,
+                                &self.default_branch_for(record),
+                            )
                             .await?;
 
                         record.state = LoopState::Shipped;
@@ -1042,7 +1094,7 @@ impl ConvergentLoopDriver {
         record.sub_state = Some(SubState::Dispatched);
         record.retry_count = 0;
 
-        let stage_config = self.audit_stage_config();
+        let stage_config = self.audit_stage_config(record);
         let ctx = self.build_context(record).await?;
         let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "audit", &job).await?;
@@ -1144,7 +1196,7 @@ impl ConvergentLoopDriver {
                     .map(|r| r.stage.as_str());
                 match last_stage {
                     Some("revise") => self.revise_stage_config(record),
-                    _ => self.audit_stage_config(),
+                    _ => self.audit_stage_config(record),
                 }
             }
             LoopState::Implementing => self.implement_stage_config(record),
@@ -1193,11 +1245,16 @@ impl ConvergentLoopDriver {
 
     // --- Stage config helpers ---
 
-    fn audit_stage_config(&self) -> StageConfig {
+    fn audit_stage_config(&self, record: &LoopRecord) -> StageConfig {
         StageConfig {
             name: "audit".to_string(),
-            model: Some(self.config.models.reviewer.clone()),
-            prompt_template: Some(".nemo/prompts/audit.md".to_string()),
+            model: Some(
+                record
+                    .model_reviewer
+                    .clone()
+                    .unwrap_or_else(|| self.config.models.reviewer.clone()),
+            ),
+            prompt_template: Some(".nemo/prompts/spec-audit.md".to_string()),
             timeout: self.config.timeouts.audit_duration(),
             max_retries: 2,
         }
@@ -1212,7 +1269,7 @@ impl ConvergentLoopDriver {
                     .clone()
                     .unwrap_or_else(|| self.config.models.implementor.clone()),
             ),
-            prompt_template: Some(".nemo/prompts/revise.md".to_string()),
+            prompt_template: Some(".nemo/prompts/spec-revise.md".to_string()),
             timeout: self.config.timeouts.revise_duration(),
             max_retries: 2,
         }
@@ -1256,6 +1313,14 @@ impl ConvergentLoopDriver {
             timeout: self.config.timeouts.review_duration(),
             max_retries: 2,
         }
+    }
+
+    /// Resolve the default branch for a loop record (frozen per-loop, fallback to config).
+    fn default_branch_for(&self, record: &LoopRecord) -> String {
+        record
+            .resolved_default_branch
+            .clone()
+            .unwrap_or_else(|| self.config.cluster.default_branch.clone())
     }
 
     fn max_retries_for_stage(&self, _state: LoopState) -> u32 {
@@ -1318,6 +1383,7 @@ impl ConvergentLoopDriver {
             feedback_path,
             worktree_path,
             credentials,
+            base_branch: self.default_branch_for(record),
         })
     }
 
@@ -1438,6 +1504,7 @@ mod tests {
             merged_at: None,
             hardened_spec_path: None,
             spec_pr_url: None,
+            resolved_default_branch: Some("main".to_string()),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

@@ -25,6 +25,11 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting Nemo control plane");
 
+    // TODO(V1.5): Replace flat NemoConfig with three-layer config merge
+    // (cluster -> repo nemo.toml -> engineer ~/.nemo/config.toml) using
+    // config::merged::MergedConfig. V1 uses flat NemoConfig; engineer-level
+    // model/limit overrides are deferred to V1.5. The merge modules exist
+    // in config/cluster.rs, config/engineer.rs, config/merged.rs, config/repo.rs.
     let config = NemoConfig::load().map_err(|e| anyhow::anyhow!(e))?;
     let config_arc = Arc::new(config.clone());
 

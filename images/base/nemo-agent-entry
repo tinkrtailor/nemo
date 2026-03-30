@@ -78,8 +78,9 @@ if [ -n "$STAGE_FILENAME" ]; then
 
     DIFF_CONTENT=""
     if [ "$STAGE" = "review" ] || [ "$STAGE" = "audit" ]; then
-        # Generate diff for review context
-        DIFF_CONTENT=$(cd /work && git diff "origin/main...$SHA" 2>/dev/null || echo "")
+        # Generate diff for review context using the resolved base branch
+        BASE_REF="origin/${NEMO_BASE_BRANCH:-main}"
+        DIFF_CONTENT=$(cd /work && git diff "${BASE_REF}...$SHA" 2>/dev/null || echo "")
     fi
 
     PROMPT_CONTENT="${PROMPT_CONTENT//\{\{SPEC\}\}/$SPEC_CONTENT}"

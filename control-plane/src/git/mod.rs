@@ -14,8 +14,8 @@ pub trait GitOperations: Send + Sync + 'static {
     /// Get the current SHA of a branch.
     async fn get_branch_sha(&self, branch: &str) -> Result<Option<String>>;
 
-    /// Create a new branch from the default branch HEAD.
-    async fn create_branch(&self, branch: &str) -> Result<String>;
+    /// Create a new branch from the given base ref (e.g., "origin/main").
+    async fn create_branch(&self, branch: &str, base_remote_ref: &str) -> Result<String>;
 
     /// Read a file's content from the repo at the given ref.
     async fn read_file(&self, path: &str, git_ref: &str) -> Result<String>;
@@ -42,20 +42,27 @@ pub trait GitOperations: Send + Sync + 'static {
     /// Ok(None) if still pending.
     async fn ci_status(&self, branch: &str) -> Result<Option<bool>>;
 
-    /// Create a pull request. Returns the PR URL.
-    async fn create_pr(&self, branch: &str, title: &str, body: &str) -> Result<String>;
+    /// Create a pull request targeting `base_branch`. Returns the PR URL.
+    async fn create_pr(
+        &self,
+        branch: &str,
+        title: &str,
+        body: &str,
+        base_branch: &str,
+    ) -> Result<String>;
 
     /// Merge a pull request by branch name using the given strategy. Returns merge SHA.
-    async fn merge_pr(&self, branch: &str, strategy: &str) -> Result<String>;
+    /// `default_branch` is the target branch name (e.g., "main").
+    async fn merge_pr(&self, branch: &str, strategy: &str, default_branch: &str) -> Result<String>;
 
     /// Ensure a persistent worktree exists for a branch at the given sub-path.
     /// Creates the worktree if it doesn't exist. Used before job dispatch so the
     /// agent pod can mount the worktree via subPath.
     async fn ensure_worktree(&self, branch: &str, worktree_path: &str) -> Result<()>;
 
-    /// List files changed on a branch relative to origin/main.
+    /// List files changed on a branch relative to the default branch.
     /// Used by the TEST stage to determine affected services (FR-42a).
-    async fn changed_files(&self, branch: &str) -> Result<Vec<String>>;
+    async fn changed_files(&self, branch: &str, default_branch: &str) -> Result<Vec<String>>;
 }
 
 /// Real git operations on a bare repository.
@@ -212,9 +219,9 @@ pub mod bare {
             }
         }
 
-        async fn create_branch(&self, branch: &str) -> Result<String> {
-            // Use origin/main (the fetched remote tip) not bare-repo HEAD
-            let base_ref = match self.run_git(&["rev-parse", "origin/main"]).await {
+        async fn create_branch(&self, branch: &str, base_remote_ref: &str) -> Result<String> {
+            // Use the configured remote ref (e.g., origin/main) not bare-repo HEAD
+            let base_ref = match self.run_git(&["rev-parse", base_remote_ref]).await {
                 Ok(sha) => sha,
                 Err(_) => self.run_git(&["rev-parse", "HEAD"]).await.map_err(|e| {
                     crate::error::NemoError::Git(format!("Failed to resolve base ref: {e}"))
@@ -283,20 +290,31 @@ pub mod bare {
         }
 
         async fn has_diverged(&self, branch: &str, expected_sha: &str) -> Result<bool> {
-            // Check ancestry: if expected_sha is an ancestor of the branch tip,
-            // the branch advanced normally (agent committed). If not, someone
-            // force-pushed or rewrote history -> diverged.
-            let tip = match self.get_branch_sha(branch).await? {
+            // Fetch first so we compare against the actual remote state,
+            // not stale local tracking refs.
+            let _ = self.run_git(&["fetch", "--prune", "origin"]).await;
+
+            // Check the remote branch tip, not the local branch.
+            // The local branch may be stale if the engineer pushed remotely.
+            let remote_ref = format!("origin/{branch}");
+            let tip = match self.get_branch_sha(&remote_ref).await? {
                 Some(sha) => sha,
+                // No remote tracking ref — branch not pushed yet or deleted
                 None => return Ok(false),
             };
+
+            // If remote tip equals expected, no divergence
+            if tip == expected_sha {
+                return Ok(false);
+            }
+
             // `merge-base --is-ancestor A B` exits 0 if A is ancestor of B.
             match self
                 .run_git(&["merge-base", "--is-ancestor", expected_sha, &tip])
                 .await
             {
-                Ok(_) => Ok(false), // expected is ancestor of tip -> not diverged
-                Err(_) => Ok(true), // not an ancestor -> diverged
+                Ok(_) => Ok(false), // expected is ancestor of remote tip -> not diverged
+                Err(_) => Ok(true), // not an ancestor -> diverged (force push)
             }
         }
 
@@ -494,7 +512,13 @@ pub mod bare {
             }
         }
 
-        async fn create_pr(&self, branch: &str, title: &str, body: &str) -> Result<String> {
+        async fn create_pr(
+            &self,
+            branch: &str,
+            title: &str,
+            body: &str,
+            base_branch: &str,
+        ) -> Result<String> {
             // Push branch to origin before creating PR
             self.run_git(&["push", "-u", "origin", branch])
                 .await
@@ -519,7 +543,16 @@ pub mod bare {
 
             let output = Command::new("gh")
                 .args([
-                    "pr", "create", "--head", branch, "--title", title, "--body", body,
+                    "pr",
+                    "create",
+                    "--head",
+                    branch,
+                    "--base",
+                    base_branch,
+                    "--title",
+                    title,
+                    "--body",
+                    body,
                 ])
                 .current_dir(&self.repo_path)
                 .output()
@@ -536,7 +569,12 @@ pub mod bare {
             }
         }
 
-        async fn merge_pr(&self, branch: &str, strategy: &str) -> Result<String> {
+        async fn merge_pr(
+            &self,
+            branch: &str,
+            strategy: &str,
+            default_branch: &str,
+        ) -> Result<String> {
             let merge_flag = match strategy {
                 "rebase" => "--rebase",
                 "merge" => "--merge",
@@ -560,7 +598,8 @@ pub mod bare {
 
             // Fetch to get the merge commit, then read the target branch SHA
             let _ = self.run_git(&["fetch", "origin"]).await;
-            let sha = match self.run_git(&["rev-parse", "origin/main"]).await {
+            let remote_ref = format!("origin/{default_branch}");
+            let sha = match self.run_git(&["rev-parse", &remote_ref]).await {
                 Ok(s) => s,
                 Err(_) => self.run_git(&["rev-parse", "HEAD"]).await?,
             };
@@ -591,10 +630,10 @@ pub mod bare {
             Ok(())
         }
 
-        async fn changed_files(&self, branch: &str) -> Result<Vec<String>> {
-            // git diff --name-only origin/main...<branch>
+        async fn changed_files(&self, branch: &str, default_branch: &str) -> Result<Vec<String>> {
+            let base_ref = format!("origin/{default_branch}");
             match self
-                .run_git(&["diff", "--name-only", &format!("origin/main...{branch}")])
+                .run_git(&["diff", "--name-only", &format!("{base_ref}...{branch}")])
                 .await
             {
                 Ok(output) => Ok(output.lines().map(|l| l.to_string()).collect()),
@@ -658,7 +697,7 @@ pub mod mock {
             Ok(branches.get(branch).cloned())
         }
 
-        async fn create_branch(&self, branch: &str) -> Result<String> {
+        async fn create_branch(&self, branch: &str, _base_remote_ref: &str) -> Result<String> {
             let sha = self.default_sha.clone();
             let mut branches = self.branches.write().await;
             branches.insert(branch.to_string(), sha.clone());
@@ -711,11 +750,22 @@ pub mod mock {
             Ok(Some(true))
         }
 
-        async fn create_pr(&self, branch: &str, _title: &str, _body: &str) -> Result<String> {
+        async fn create_pr(
+            &self,
+            branch: &str,
+            _title: &str,
+            _body: &str,
+            _base_branch: &str,
+        ) -> Result<String> {
             Ok(format!("https://github.com/mock/repo/pull/{branch}"))
         }
 
-        async fn merge_pr(&self, branch: &str, _strategy: &str) -> Result<String> {
+        async fn merge_pr(
+            &self,
+            branch: &str,
+            _strategy: &str,
+            _default_branch: &str,
+        ) -> Result<String> {
             let branches = self.branches.read().await;
             Ok(branches
                 .get(branch)
@@ -727,7 +777,7 @@ pub mod mock {
             Ok(())
         }
 
-        async fn changed_files(&self, _branch: &str) -> Result<Vec<String>> {
+        async fn changed_files(&self, _branch: &str, _default_branch: &str) -> Result<Vec<String>> {
             Ok(vec![])
         }
     }

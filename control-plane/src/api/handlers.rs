@@ -27,13 +27,19 @@ pub async fn start(
     // Validate engineer name: must be non-empty, lowercase alphanumeric + hyphens.
     // Lowercase enforced to prevent normalization collisions in K8s Secret names.
     if req.engineer.is_empty()
+        || req.engineer.len() > 63
         || !req
             .engineer
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || !req
+            .engineer
+            .starts_with(|c: char| c.is_ascii_alphanumeric())
+        || !req.engineer.ends_with(|c: char| c.is_ascii_alphanumeric())
     {
         return Err(NemoError::BadRequest(
-            "engineer must be non-empty, lowercase, and contain only a-z, 0-9, or hyphen"
+            "engineer must be 1-63 chars, lowercase alphanumeric with hyphens, \
+             starting and ending with alphanumeric"
                 .to_string(),
         ));
     }
@@ -46,11 +52,11 @@ pub async fn start(
     // Fetch latest from remote so spec validation and branch creation use current state
     state.git.fetch().await?;
 
-    // Validate spec exists and read content from origin/main (the ref we branch from).
-    // No HEAD fallback: if spec isn't in origin/main, it hasn't been pushed.
+    // Validate spec exists and read content from the configured default branch.
+    let default_ref = state.config.default_remote_ref();
     let spec_content = state
         .git
-        .read_file(&req.spec_path, "origin/main")
+        .read_file(&req.spec_path, &default_ref)
         .await
         .map_err(|_| NemoError::SpecNotFound {
             path: req.spec_path.clone(),
@@ -127,6 +133,12 @@ pub async fn start(
         merged_at: None,
         hardened_spec_path: None,
         spec_pr_url: None,
+        resolved_default_branch: Some(
+            default_ref
+                .strip_prefix("origin/")
+                .unwrap_or(&default_ref)
+                .to_string(),
+        ),
         created_at: now,
         updated_at: now,
     };
@@ -143,7 +155,7 @@ pub async fn start(
 
     // DB insert succeeded — we own this branch name. Now create the git branch.
     // If git fails, mark the loop as FAILED via narrow state update (no full record overwrite).
-    let branch_sha = match state.git.create_branch(&branch).await {
+    let branch_sha = match state.git.create_branch(&branch, &default_ref).await {
         Ok(sha) => sha,
         Err(e) => {
             let _ = state
@@ -410,13 +422,19 @@ pub async fn upsert_credentials(
     Json(req): Json<CredentialRequest>,
 ) -> Result<impl IntoResponse, NemoError> {
     if req.engineer.is_empty()
+        || req.engineer.len() > 63
         || !req
             .engineer
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || !req
+            .engineer
+            .starts_with(|c: char| c.is_ascii_alphanumeric())
+        || !req.engineer.ends_with(|c: char| c.is_ascii_alphanumeric())
     {
         return Err(NemoError::BadRequest(
-            "engineer must be non-empty, lowercase, and contain only a-z, 0-9, or hyphen"
+            "engineer must be 1-63 chars, lowercase alphanumeric with hyphens, \
+             starting and ending with alphanumeric"
                 .to_string(),
         ));
     }
@@ -686,6 +704,7 @@ mod tests {
             merged_at: None,
             hardened_spec_path: None,
             spec_pr_url: None,
+            resolved_default_branch: Some("main".to_string()),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -745,6 +764,7 @@ mod tests {
             merged_at: None,
             hardened_spec_path: None,
             spec_pr_url: None,
+            resolved_default_branch: Some("main".to_string()),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -798,6 +818,7 @@ mod tests {
             merged_at: None,
             hardened_spec_path: None,
             spec_pr_url: None,
+            resolved_default_branch: Some("main".to_string()),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

@@ -1,8 +1,7 @@
 // Three-layer config merge modules (cluster -> repo -> engineer).
-// Currently used by nemo init (repo.rs service detection) and available for
-// the loop engine to merge configs at dispatch time. The runtime NemoConfig
-// below is the operational config loaded on startup; MergedConfig is computed
-// per-loop from the three layers.
+// V1: Runtime uses NemoConfig (flat file). The merge modules are used by
+// nemo init (repo.rs service detection) and prepared for V1.5 where
+// MergedConfig will be computed per-loop at dispatch time from three layers.
 pub mod cluster;
 pub mod engineer;
 pub mod merged;
@@ -80,8 +79,19 @@ impl NemoConfig {
         let contents = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read config at {}: {e}", path.display()))?;
 
-        let config: NemoConfig = toml::from_str(&contents)
+        let mut config: NemoConfig = toml::from_str(&contents)
             .map_err(|e| format!("Failed to parse config at {}: {e}", path.display()))?;
+
+        // If [repo].default_branch is set in nemo.toml, use it as the runtime default.
+        // This closes the loop: nemo init writes it, the runtime reads it.
+        if let Ok(raw) = toml::from_str::<toml::Value>(&contents)
+            && let Some(branch) = raw
+                .get("repo")
+                .and_then(|r| r.get("default_branch"))
+                .and_then(|v| v.as_str())
+        {
+            config.cluster.default_branch = branch.to_string();
+        }
 
         tracing::info!(path = %path.display(), "Loaded config");
         Ok(config)
