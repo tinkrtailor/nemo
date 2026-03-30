@@ -1,5 +1,5 @@
 #cloud-config
-# Cloud-init for Nemo k3s server
+# Cloud-init for Nemo k3s server (Hetzner example)
 # Prepares the server for k3s installation via remote-exec provisioner
 
 package_update: true

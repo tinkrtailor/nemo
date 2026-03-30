@@ -1,14 +1,8 @@
-# FR-53: Terraform outputs
+# Root terraform outputs
 
 output "control_plane_url" {
-  description = "HTTPS URL of the running control plane"
-  value       = "https://${var.domain}"
-}
-
-output "kubeconfig" {
-  description = "Kubeconfig for the k3s cluster"
-  value       = file(local.kubeconfig_path)
-  sensitive   = true
+  description = "URL of the running control plane"
+  value       = module.nemo.server_url
 }
 
 output "server_ip" {
@@ -18,17 +12,16 @@ output "server_ip" {
 
 output "namespace_jobs" {
   description = "K8s namespace for agent jobs"
-  value       = "nemo-jobs"
+  value       = module.nemo.namespace_jobs
 }
 
 output "namespace_system" {
   description = "K8s namespace for control plane components"
-  value       = "nemo-system"
+  value       = module.nemo.namespace_system
 }
 
-# FR-52c: API key output (sensitive)
 output "api_key" {
-  description = "API key for CLI authentication (from nemo-api-key Secret)"
-  value       = random_password.api_key.result
+  description = "API key for CLI authentication"
+  value       = module.nemo.api_key
   sensitive   = true
 }

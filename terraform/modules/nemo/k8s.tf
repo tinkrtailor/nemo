@@ -1,13 +1,13 @@
-# FR-49: K8s namespaces
+# Kubernetes resources: namespaces, storage, secrets, RBAC, networking
+
+# --- Namespaces ---
 
 resource "kubernetes_namespace" "system" {
   depends_on = [null_resource.kubeconfig]
 
   metadata {
-    name = "nemo-system"
-    labels = {
-      "app" = "nemo"
-    }
+    name   = "nemo-system"
+    labels = { app = "nemo" }
   }
 }
 
@@ -15,31 +15,22 @@ resource "kubernetes_namespace" "jobs" {
   depends_on = [null_resource.kubeconfig]
 
   metadata {
-    name = "nemo-jobs"
-    labels = {
-      "app" = "nemo"
-    }
+    name   = "nemo-jobs"
+    labels = { app = "nemo" }
   }
 }
 
-# FR-47: Shared bare repo storage — single hostPath PV with PVCs in both namespaces.
-# V1 is single-node k3s, so hostPath is safe. Both control plane and agent jobs
-# see the same directory on disk.
-
+# --- Shared bare repo storage ---
 # Two PVs pointing to the same hostPath — one per namespace PVC.
-# A single PV can only bind to one PVC, so we need two.
+# Single-node k3s, so hostPath is safe.
 
 resource "kubernetes_persistent_volume" "bare_repo_system" {
   depends_on = [null_resource.kubeconfig]
 
-  metadata {
-    name = "nemo-bare-repo-system"
-  }
+  metadata { name = "nemo-bare-repo-system" }
   spec {
-    capacity = {
-      storage = "100Gi"
-    }
-    access_modes = ["ReadWriteMany"]
+    capacity                         = { storage = "100Gi" }
+    access_modes                     = ["ReadWriteMany"]
     persistent_volume_reclaim_policy = "Retain"
     storage_class_name               = "manual"
     persistent_volume_source {
@@ -54,14 +45,10 @@ resource "kubernetes_persistent_volume" "bare_repo_system" {
 resource "kubernetes_persistent_volume" "bare_repo_jobs" {
   depends_on = [null_resource.kubeconfig]
 
-  metadata {
-    name = "nemo-bare-repo-jobs"
-  }
+  metadata { name = "nemo-bare-repo-jobs" }
   spec {
-    capacity = {
-      storage = "100Gi"
-    }
-    access_modes = ["ReadWriteMany"]
+    capacity                         = { storage = "100Gi" }
+    access_modes                     = ["ReadWriteMany"]
     persistent_volume_reclaim_policy = "Retain"
     storage_class_name               = "manual"
     persistent_volume_source {
@@ -84,11 +71,7 @@ resource "kubernetes_persistent_volume_claim" "bare_repo" {
     access_modes       = ["ReadWriteMany"]
     storage_class_name = "manual"
     volume_name        = kubernetes_persistent_volume.bare_repo_system.metadata[0].name
-    resources {
-      requests = {
-        storage = "100Gi"
-      }
-    }
+    resources { requests = { storage = "100Gi" } }
   }
 }
 
@@ -103,15 +86,11 @@ resource "kubernetes_persistent_volume_claim" "bare_repo_jobs" {
     access_modes       = ["ReadWriteMany"]
     storage_class_name = "manual"
     volume_name        = kubernetes_persistent_volume.bare_repo_jobs.metadata[0].name
-    resources {
-      requests = {
-        storage = "100Gi"
-      }
-    }
+    resources { requests = { storage = "100Gi" } }
   }
 }
 
-# FR-47b: 10Gi PVC for session state
+# Session state PVC
 resource "kubernetes_persistent_volume_claim" "sessions" {
   depends_on = [kubernetes_namespace.jobs]
 
@@ -121,15 +100,12 @@ resource "kubernetes_persistent_volume_claim" "sessions" {
   }
   spec {
     access_modes = ["ReadWriteOnce"]
-    resources {
-      requests = {
-        storage = "10Gi"
-      }
-    }
+    resources { requests = { storage = "10Gi" } }
   }
 }
 
-# FR-56: Postgres credentials Secret (Finding 8: store full DSN, not just password)
+# --- Secrets ---
+
 resource "kubernetes_secret" "postgres_credentials" {
   depends_on = [kubernetes_namespace.system]
 
@@ -143,7 +119,6 @@ resource "kubernetes_secret" "postgres_credentials" {
   }
 }
 
-# FR-52b: API key Secret
 resource "kubernetes_secret" "api_key" {
   depends_on = [kubernetes_namespace.system]
 
@@ -151,12 +126,9 @@ resource "kubernetes_secret" "api_key" {
     name      = "nemo-api-key"
     namespace = "nemo-system"
   }
-  data = {
-    NEMO_API_KEY = random_password.api_key.result
-  }
+  data = { NEMO_API_KEY = random_password.api_key.result }
 }
 
-# FR-52b: Git host token Secret
 resource "kubernetes_secret" "git_host_token" {
   depends_on = [kubernetes_namespace.system]
 
@@ -164,12 +136,45 @@ resource "kubernetes_secret" "git_host_token" {
     name      = "nemo-git-host-token"
     namespace = "nemo-system"
   }
-  data = {
-    GIT_HOST_TOKEN = var.git_host_token
-  }
+  data = { GIT_HOST_TOKEN = var.git_host_token }
 }
 
-# Cluster config ConfigMap (FR-47)
+resource "kubernetes_secret" "repo_ssh_key" {
+  depends_on = [kubernetes_namespace.system]
+
+  metadata {
+    name      = "nemo-repo-ssh-key"
+    namespace = "nemo-system"
+  }
+  data = { id_ed25519 = var.repo_ssh_private_key }
+}
+
+resource "kubernetes_secret" "registry_creds" {
+  count      = var.image_pull_secret_dockerconfigjson != null ? 1 : 0
+  depends_on = [kubernetes_namespace.jobs]
+
+  metadata {
+    name      = "nemo-registry-creds"
+    namespace = "nemo-jobs"
+  }
+  type = "kubernetes.io/dockerconfigjson"
+  data = { ".dockerconfigjson" = var.image_pull_secret_dockerconfigjson }
+}
+
+resource "kubernetes_secret" "registry_creds_system" {
+  count      = var.image_pull_secret_dockerconfigjson != null ? 1 : 0
+  depends_on = [kubernetes_namespace.system]
+
+  metadata {
+    name      = "nemo-registry-creds"
+    namespace = "nemo-system"
+  }
+  type = "kubernetes.io/dockerconfigjson"
+  data = { ".dockerconfigjson" = var.image_pull_secret_dockerconfigjson }
+}
+
+# --- ConfigMaps ---
+
 resource "kubernetes_config_map" "cluster_config" {
   depends_on = [kubernetes_namespace.system]
 
@@ -179,11 +184,10 @@ resource "kubernetes_config_map" "cluster_config" {
   }
   data = {
     git_repo_url = var.git_repo_url
-    domain       = var.domain
+    domain       = local.has_domain ? var.domain : var.server_ip
   }
 }
 
-# FR-51b: SSH known hosts ConfigMap (in nemo-system for repo-init)
 resource "kubernetes_config_map" "ssh_known_hosts" {
   depends_on = [kubernetes_namespace.system]
 
@@ -191,12 +195,9 @@ resource "kubernetes_config_map" "ssh_known_hosts" {
     name      = "nemo-ssh-known-hosts"
     namespace = "nemo-system"
   }
-  data = {
-    known_hosts = var.ssh_known_hosts
-  }
+  data = { known_hosts = var.ssh_known_hosts }
 }
 
-# SSH known hosts ConfigMap in nemo-jobs for agent job pods
 resource "kubernetes_config_map" "ssh_known_hosts_jobs" {
   depends_on = [kubernetes_namespace.jobs]
 
@@ -204,12 +205,10 @@ resource "kubernetes_config_map" "ssh_known_hosts_jobs" {
     name      = "nemo-ssh-known-hosts"
     namespace = "nemo-jobs"
   }
-  data = {
-    known_hosts = var.ssh_known_hosts
-  }
+  data = { known_hosts = var.ssh_known_hosts }
 }
 
-# FR-51b: Fallback ssh-keyscan if ssh_known_hosts not provided
+# Fallback ssh-keyscan if ssh_known_hosts not provided
 resource "null_resource" "ssh_keyscan" {
   count = var.ssh_known_hosts == "" ? 1 : 0
 
@@ -219,7 +218,6 @@ resource "null_resource" "ssh_keyscan" {
     command = <<-EOT
       GITHOST=$(echo "${var.git_repo_url}" | sed -E 's/.*@([^:]+):.*/\1/' | sed -E 's|https?://([^/]+).*|\1|')
       KNOWN_HOSTS=$(ssh-keyscan "$GITHOST" 2>/dev/null)
-      # Update in both namespaces so repo-init (nemo-system) and agent jobs (nemo-jobs) get it
       for NS in nemo-system nemo-jobs; do
         kubectl --kubeconfig ${local.kubeconfig_path} -n "$NS" \
           create configmap nemo-ssh-known-hosts \
@@ -231,55 +229,10 @@ resource "null_resource" "ssh_keyscan" {
   }
 }
 
-# Finding 9: SSH key Secret for repo-init (and engineer bootstrap).
-# repo_init mounts nemo-repo-ssh-key — this must be created from user input.
-resource "kubernetes_secret" "repo_ssh_key" {
-  depends_on = [kubernetes_namespace.system]
-
-  metadata {
-    name      = "nemo-repo-ssh-key"
-    namespace = "nemo-system"
-  }
-  data = {
-    id_ed25519 = var.repo_ssh_private_key
-  }
-}
-
-# FR-52: Image pull secret for private registries (optional)
-resource "kubernetes_secret" "registry_creds" {
-  count      = var.image_pull_secret_dockerconfigjson != null ? 1 : 0
-  depends_on = [kubernetes_namespace.jobs]
-
-  metadata {
-    name      = "nemo-registry-creds"
-    namespace = "nemo-jobs"
-  }
-  type = "kubernetes.io/dockerconfigjson"
-  data = {
-    ".dockerconfigjson" = var.image_pull_secret_dockerconfigjson
-  }
-}
-
-# Registry creds in nemo-system (for control plane image pulls)
-resource "kubernetes_secret" "registry_creds_system" {
-  count      = var.image_pull_secret_dockerconfigjson != null ? 1 : 0
-  depends_on = [kubernetes_namespace.system]
-
-  metadata {
-    name      = "nemo-registry-creds"
-    namespace = "nemo-system"
-  }
-  type = "kubernetes.io/dockerconfigjson"
-  data = {
-    ".dockerconfigjson" = var.image_pull_secret_dockerconfigjson
-  }
-}
-
-# FR-46b: RBAC for loop engine ServiceAccount
+# --- RBAC ---
 
 resource "kubernetes_service_account" "loop_engine" {
   depends_on = [kubernetes_namespace.system]
-
   metadata {
     name      = "nemo-loop-engine"
     namespace = "nemo-system"
@@ -288,14 +241,12 @@ resource "kubernetes_service_account" "loop_engine" {
 
 resource "kubernetes_service_account" "api_server" {
   depends_on = [kubernetes_namespace.system]
-
   metadata {
     name      = "nemo-api-server"
     namespace = "nemo-system"
   }
 }
 
-# Loop engine Role in nemo-jobs namespace
 resource "kubernetes_role" "loop_engine_jobs" {
   depends_on = [kubernetes_namespace.jobs]
 
@@ -343,13 +294,11 @@ resource "kubernetes_role_binding" "loop_engine_jobs" {
     name      = "nemo-loop-engine"
     namespace = "nemo-jobs"
   }
-
   role_ref {
     api_group = "rbac.authorization.k8s.io"
     kind      = "Role"
     name      = "nemo-loop-engine"
   }
-
   subject {
     kind      = "ServiceAccount"
     name      = "nemo-loop-engine"
@@ -357,7 +306,6 @@ resource "kubernetes_role_binding" "loop_engine_jobs" {
   }
 }
 
-# API server Role in nemo-jobs namespace (limited to Secrets for nemo auth)
 resource "kubernetes_role" "api_server_jobs" {
   depends_on = [kubernetes_namespace.jobs]
 
@@ -365,7 +313,6 @@ resource "kubernetes_role" "api_server_jobs" {
     name      = "nemo-api-server"
     namespace = "nemo-jobs"
   }
-
   rule {
     api_groups = [""]
     resources  = ["secrets"]
@@ -380,13 +327,11 @@ resource "kubernetes_role_binding" "api_server_jobs" {
     name      = "nemo-api-server"
     namespace = "nemo-jobs"
   }
-
   role_ref {
     api_group = "rbac.authorization.k8s.io"
     kind      = "Role"
     name      = "nemo-api-server"
   }
-
   subject {
     kind      = "ServiceAccount"
     name      = "nemo-api-server"
@@ -394,9 +339,10 @@ resource "kubernetes_role_binding" "api_server_jobs" {
   }
 }
 
-# FR-48: Traefik (k3s built-in) + cert-manager for TLS
+# --- Networking: TLS (conditional on domain) ---
 
 resource "helm_release" "cert_manager" {
+  count      = local.has_domain ? 1 : 0
   depends_on = [null_resource.kubeconfig]
 
   name             = "cert-manager"
@@ -412,37 +358,29 @@ resource "helm_release" "cert_manager" {
   }
 }
 
-# ClusterIssuer for Let's Encrypt
 resource "kubernetes_manifest" "cluster_issuer" {
+  count      = local.has_domain ? 1 : 0
   depends_on = [helm_release.cert_manager]
 
   manifest = {
     apiVersion = "cert-manager.io/v1"
     kind       = "ClusterIssuer"
-    metadata = {
-      name = "letsencrypt-prod"
-    }
+    metadata   = { name = "letsencrypt-prod" }
     spec = {
       acme = {
-        server = "https://acme-v2.api.letsencrypt.org/directory"
-        email  = var.acme_email
-        privateKeySecretRef = {
-          name = "letsencrypt-prod-key"
-        }
+        server              = "https://acme-v2.api.letsencrypt.org/directory"
+        email               = var.acme_email
+        privateKeySecretRef = { name = "letsencrypt-prod-key" }
         solvers = [{
-          http01 = {
-            ingress = {
-              class = "traefik"
-            }
-          }
+          http01 = { ingress = { class = "traefik" } }
         }]
       }
     }
   }
 }
 
-# HTTP → HTTPS redirect middleware
 resource "kubernetes_manifest" "redirect_https" {
+  count      = local.has_domain ? 1 : 0
   depends_on = [kubernetes_namespace.system]
 
   manifest = {
@@ -461,8 +399,9 @@ resource "kubernetes_manifest" "redirect_https" {
   }
 }
 
-# HTTP entrypoint: redirect all traffic to HTTPS
+# HTTP entrypoint with domain: redirect to HTTPS (except ACME challenges)
 resource "kubernetes_manifest" "api_ingress_http" {
+  count      = local.has_domain ? 1 : 0
   depends_on = [kubernetes_manifest.redirect_https, kubernetes_namespace.system]
 
   manifest = {
@@ -476,16 +415,10 @@ resource "kubernetes_manifest" "api_ingress_http" {
       entryPoints = ["web"]
       routes = [
         {
-          # Let ACME HTTP-01 challenges through without redirect.
-          # cert-manager creates temporary Ingress for this path;
-          # this rule ensures our redirect doesn't intercept it.
           match    = "Host(`${var.domain}`) && PathPrefix(`/.well-known/acme-challenge/`)"
           kind     = "Rule"
           priority = 100
-          services = [{
-            name = "nemo-api-server"
-            port = 8080
-          }]
+          services = [{ name = "nemo-api-server", port = 8080 }]
         },
         {
           match = "Host(`${var.domain}`)"
@@ -494,20 +427,16 @@ resource "kubernetes_manifest" "api_ingress_http" {
             name      = "redirect-https"
             namespace = "nemo-system"
           }]
-          services = [{
-            name = "nemo-api-server"
-            port = 8080
-          }]
+          services = [{ name = "nemo-api-server", port = 8080 }]
         },
       ]
     }
   }
 }
 
-# HTTPS entrypoint: serve API, exclude /health from public access.
-# /health is NOT routed — Traefik returns 404 for unmatched paths.
-# K8s probes hit pod IP directly and bypass ingress entirely.
+# HTTPS entrypoint with domain
 resource "kubernetes_manifest" "api_ingress" {
+  count      = local.has_domain ? 1 : 0
   depends_on = [kubernetes_manifest.cluster_issuer, kubernetes_namespace.system]
 
   manifest = {
@@ -519,25 +448,18 @@ resource "kubernetes_manifest" "api_ingress" {
     }
     spec = {
       entryPoints = ["websecure"]
-      routes = [
-        {
-          match = "Host(`${var.domain}`) && !Path(`/health`)"
-          kind  = "Rule"
-          services = [{
-            name = "nemo-api-server"
-            port = 8080
-          }]
-        },
-      ]
-      tls = {
-        secretName = "nemo-tls"
-      }
+      routes = [{
+        match    = "Host(`${var.domain}`) && !Path(`/health`)"
+        kind     = "Rule"
+        services = [{ name = "nemo-api-server", port = 8080 }]
+      }]
+      tls = { secretName = "nemo-tls" }
     }
   }
 }
 
-# Certificate for the domain (cert-manager watches this and provisions via Let's Encrypt)
 resource "kubernetes_manifest" "api_certificate" {
+  count      = local.has_domain ? 1 : 0
   depends_on = [kubernetes_manifest.cluster_issuer, kubernetes_namespace.system]
 
   manifest = {
@@ -554,6 +476,29 @@ resource "kubernetes_manifest" "api_certificate" {
         kind = "ClusterIssuer"
       }
       dnsNames = [var.domain]
+    }
+  }
+}
+
+# HTTP entrypoint without domain: route all traffic on port 80 to API server
+resource "kubernetes_manifest" "api_ingress_http_ip" {
+  count      = local.has_domain ? 0 : 1
+  depends_on = [kubernetes_namespace.system]
+
+  manifest = {
+    apiVersion = "traefik.io/v1alpha1"
+    kind       = "IngressRoute"
+    metadata = {
+      name      = "nemo-api-http"
+      namespace = "nemo-system"
+    }
+    spec = {
+      entryPoints = ["web"]
+      routes = [{
+        match    = "PathPrefix(`/`) && !Path(`/health`)"
+        kind     = "Rule"
+        services = [{ name = "nemo-api-server", port = 8080 }]
+      }]
     }
   }
 }

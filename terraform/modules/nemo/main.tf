@@ -1,0 +1,88 @@
+# Install k3s on the provided server and fetch kubeconfig.
+# The module does NOT provision the server — it takes a server IP + SSH access.
+
+resource "null_resource" "k3s_install" {
+  triggers = {
+    k3s_version = var.k3s_version
+    server_ip   = var.server_ip
+  }
+
+  connection {
+    type        = "ssh"
+    host        = var.server_ip
+    user        = var.ssh_user
+    private_key = var.ssh_private_key
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "cloud-init status --wait 2>/dev/null || true",
+      "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${var.k3s_version} sh -s - server",
+      "until kubectl get nodes 2>/dev/null | grep -q ' Ready'; do sleep 2; done",
+      # Configure container log rotation
+      "mkdir -p /etc/rancher/k3s",
+      "cat > /etc/rancher/k3s/config.yaml <<'EOF'",
+      "kubelet-arg:",
+      "  - container-log-max-size=50Mi",
+      "  - container-log-max-files=5",
+      "EOF",
+      "systemctl restart k3s",
+      "until kubectl get nodes 2>/dev/null | grep -q ' Ready'; do sleep 2; done",
+      # Wait for Traefik CRDs and deployment (k3s deploys AddOns asynchronously)
+      "TRIES=0; until kubectl get crd ingressroutes.traefik.io 2>/dev/null || [ $TRIES -ge 60 ]; do sleep 2; TRIES=$((TRIES+1)); done",
+      "kubectl get crd ingressroutes.traefik.io || { echo 'ERROR: Traefik CRDs not registered after 120s'; exit 1; }",
+      "kubectl -n kube-system rollout status deployment/traefik --timeout=120s",
+    ]
+  }
+}
+
+# Fetch kubeconfig from server via SSH
+resource "null_resource" "kubeconfig" {
+  depends_on = [null_resource.k3s_install]
+
+  triggers = {
+    server_ip = var.server_ip
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      mkdir -p ${path.module}/.state
+      ssh -o StrictHostKeyChecking=accept-new \
+        -o "UserKnownHostsFile=/dev/null" \
+        -i "$SSH_KEY_FILE" \
+        ${var.ssh_user}@${var.server_ip} \
+        'cat /etc/rancher/k3s/k3s.yaml' | \
+        sed "s/127.0.0.1/${var.server_ip}/" > ${local.kubeconfig_path}
+    EOT
+
+    environment = {
+      SSH_KEY_FILE = local.ssh_key_file
+    }
+  }
+}
+
+# Write SSH key to temp file for local-exec (ssh -i needs a file, not stdin)
+resource "local_sensitive_file" "ssh_key" {
+  content         = var.ssh_private_key
+  filename        = "${path.module}/.state/ssh_key"
+  file_permission = "0600"
+}
+
+# Generate random passwords
+resource "random_password" "postgres" {
+  length  = 32
+  special = false
+}
+
+resource "random_password" "api_key" {
+  length  = 64
+  special = false
+}
+
+locals {
+  postgres_password = var.postgres_password != "" ? var.postgres_password : random_password.postgres.result
+  kubeconfig_path   = "${path.module}/.state/kubeconfig.yaml"
+  ssh_key_file      = "${path.module}/.state/ssh_key"
+  has_domain        = var.domain != null && var.domain != ""
+  server_url        = local.has_domain ? "https://${var.domain}" : "http://${var.server_ip}"
+}

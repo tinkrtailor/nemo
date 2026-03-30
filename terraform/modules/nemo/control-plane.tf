@@ -1,5 +1,5 @@
-# Control plane runtime config — mounted as /etc/nemo/nemo.toml in both deployments.
-# The binary loads this via its fallback path when ./nemo.toml doesn't exist.
+# Control plane: nemo.toml config, repo-init job, API server, loop engine
+
 resource "kubernetes_config_map" "nemo_config" {
   depends_on = [kubernetes_namespace.system]
 
@@ -18,348 +18,14 @@ resource "kubernetes_config_map" "nemo_config" {
   }
 }
 
-# FR-46: Control plane Deployments (API server + Loop engine)
+# --- Repo Init Job ---
 
-# FR-46: API Server Deployment
-resource "kubernetes_deployment" "api_server" {
-  depends_on = [
-    kubernetes_service.postgres,
-    kubernetes_secret.api_key,
-    kubernetes_secret.git_host_token,
-    kubernetes_service_account.api_server,
-    kubernetes_persistent_volume_claim.bare_repo,
-    kubernetes_job.repo_init,
-    kubernetes_config_map.nemo_config,
-    kubernetes_secret.registry_creds_system,
-  ]
-
-  metadata {
-    name      = "nemo-api-server"
-    namespace = "nemo-system"
-    labels = {
-      app = "nemo-api-server"
-    }
-  }
-
-  spec {
-    replicas = 1
-
-    selector {
-      match_labels = {
-        app = "nemo-api-server"
-      }
-    }
-
-    template {
-      metadata {
-        labels = {
-          app = "nemo-api-server"
-        }
-        annotations = {
-          # Trigger pod rollout when ConfigMap changes (sidecar_image, git_repo_url, etc.)
-          "config-checksum" = sha256(kubernetes_config_map.nemo_config.data["nemo.toml"])
-        }
-      }
-
-      spec {
-        service_account_name = "nemo-api-server"
-
-        dynamic "image_pull_secrets" {
-          for_each = var.image_pull_secret_dockerconfigjson != null ? [1] : []
-          content {
-            name = "nemo-registry-creds"
-          }
-        }
-
-        security_context {
-          fs_group = 1000
-        }
-
-        container {
-          name  = "api-server"
-          image = var.control_plane_image
-
-          args = ["api-server"]
-
-          port {
-            container_port = 8080
-          }
-
-          # FR-56: Database URL from Secret (Finding 8: K8s does not shell-expand env refs)
-          env {
-            name = "DATABASE_URL"
-            value_from {
-              secret_key_ref {
-                name = "nemo-postgres-credentials"
-                key  = "DATABASE_URL"
-              }
-            }
-          }
-          env {
-            name = "NEMO_API_KEY"
-            value_from {
-              secret_key_ref {
-                name = "nemo-api-key"
-                key  = "NEMO_API_KEY"
-              }
-            }
-          }
-          env {
-            name = "GIT_HOST_TOKEN"
-            value_from {
-              secret_key_ref {
-                name = "nemo-git-host-token"
-                key  = "GIT_HOST_TOKEN"
-              }
-            }
-          }
-
-          resources {
-            requests = {
-              cpu    = "100m"
-              memory = "256Mi"
-            }
-            limits = {
-              cpu    = "500m"
-              memory = "512Mi"
-            }
-          }
-
-          env {
-            name  = "BARE_REPO_PATH"
-            value = "/bare-repo"
-          }
-
-          volume_mount {
-            name       = "bare-repo"
-            mount_path = "/bare-repo"
-          }
-
-          volume_mount {
-            name       = "nemo-config"
-            mount_path = "/etc/nemo"
-            read_only  = true
-          }
-
-          startup_probe {
-            http_get {
-              path = "/health"
-              port = 8080
-            }
-            failure_threshold = 30
-            period_seconds    = 2
-            timeout_seconds   = 3
-          }
-
-          # Liveness: lightweight TCP check — don't consume DB pool connections.
-          # Only restarts pod if the process is completely dead.
-          liveness_probe {
-            tcp_socket {
-              port = 8080
-            }
-            period_seconds  = 15
-            timeout_seconds = 3
-          }
-
-          # Readiness: deep check via /health (verifies Postgres).
-          # Removes pod from service if DB is unreachable.
-          readiness_probe {
-            http_get {
-              path = "/health"
-              port = 8080
-            }
-            period_seconds  = 10
-            timeout_seconds = 3
-          }
-        }
-
-        volume {
-          name = "bare-repo"
-          persistent_volume_claim {
-            claim_name = "nemo-bare-repo"
-          }
-        }
-
-        volume {
-          name = "nemo-config"
-          config_map {
-            name = "nemo-config"
-          }
-        }
-      }
-    }
-  }
-}
-
-# API Server Service
-resource "kubernetes_service" "api_server" {
-  depends_on = [kubernetes_deployment.api_server]
-
-  metadata {
-    name      = "nemo-api-server"
-    namespace = "nemo-system"
-  }
-
-  spec {
-    selector = {
-      app = "nemo-api-server"
-    }
-
-    port {
-      port        = 8080
-      target_port = 8080
-    }
-  }
-}
-
-# FR-46: Loop Engine Deployment
-resource "kubernetes_deployment" "loop_engine" {
-  depends_on = [
-    kubernetes_service.postgres,
-    kubernetes_secret.api_key,
-    kubernetes_secret.git_host_token,
-    kubernetes_service_account.loop_engine,
-    kubernetes_persistent_volume_claim.bare_repo,
-    kubernetes_job.repo_init,
-    kubernetes_config_map.nemo_config,
-    kubernetes_secret.registry_creds_system,
-  ]
-
-  metadata {
-    name      = "nemo-loop-engine"
-    namespace = "nemo-system"
-    labels = {
-      app = "nemo-loop-engine"
-    }
-  }
-
-  spec {
-    replicas = 1
-
-    selector {
-      match_labels = {
-        app = "nemo-loop-engine"
-      }
-    }
-
-    template {
-      metadata {
-        labels = {
-          app = "nemo-loop-engine"
-        }
-        annotations = {
-          "config-checksum" = sha256(kubernetes_config_map.nemo_config.data["nemo.toml"])
-        }
-      }
-
-      spec {
-        service_account_name = "nemo-loop-engine"
-
-        dynamic "image_pull_secrets" {
-          for_each = var.image_pull_secret_dockerconfigjson != null ? [1] : []
-          content {
-            name = "nemo-registry-creds"
-          }
-        }
-
-        security_context {
-          fs_group = 1000
-        }
-
-        container {
-          name  = "loop-engine"
-          image = var.control_plane_image
-
-          args = ["loop-engine"]
-
-          env {
-            name = "DATABASE_URL"
-            value_from {
-              secret_key_ref {
-                name = "nemo-postgres-credentials"
-                key  = "DATABASE_URL"
-              }
-            }
-          }
-          env {
-            name = "GIT_HOST_TOKEN"
-            value_from {
-              secret_key_ref {
-                name = "nemo-git-host-token"
-                key  = "GIT_HOST_TOKEN"
-              }
-            }
-          }
-          env {
-            name  = "BARE_REPO_PATH"
-            value = "/bare-repo"
-          }
-          env {
-            name  = "AGENT_IMAGE"
-            value = var.agent_base_image
-          }
-
-          volume_mount {
-            name       = "bare-repo"
-            mount_path = "/bare-repo"
-          }
-
-          volume_mount {
-            name       = "nemo-config"
-            mount_path = "/etc/nemo"
-            read_only  = true
-          }
-
-          resources {
-            requests = {
-              cpu    = "100m"
-              memory = "256Mi"
-            }
-            limits = {
-              cpu    = "500m"
-              memory = "512Mi"
-            }
-          }
-
-          # Liveness: verify the process is still alive and responsive.
-          # The loop engine doesn't serve HTTP, so use exec-based check.
-          # kill -0 checks PID 1 (tini) is alive without sending a signal.
-          liveness_probe {
-            exec {
-              command = ["kill", "-0", "1"]
-            }
-            initial_delay_seconds = 15
-            period_seconds        = 30
-            timeout_seconds       = 3
-          }
-        }
-
-        volume {
-          name = "bare-repo"
-          persistent_volume_claim {
-            claim_name = "nemo-bare-repo"
-          }
-        }
-
-        volume {
-          name = "nemo-config"
-          config_map {
-            name = "nemo-config"
-          }
-        }
-      }
-    }
-  }
-}
-
-# FR-47: Repo init Job
 resource "kubernetes_job" "repo_init" {
   depends_on = [
     kubernetes_persistent_volume_claim.bare_repo,
     kubernetes_config_map.cluster_config,
     kubernetes_config_map.ssh_known_hosts,
     kubernetes_secret.repo_ssh_key,
-    # Finding 12: Wait for ssh-keyscan fallback to complete before fetching
     null_resource.ssh_keyscan,
   ]
 
@@ -400,7 +66,6 @@ resource "kubernetes_job" "repo_init" {
           EOT
           ]
 
-          # HOME=/tmp so non-root UID 1000 can write ~/.ssh on alpine/git
           env {
             name  = "HOME"
             value = "/tmp"
@@ -433,9 +98,7 @@ resource "kubernetes_job" "repo_init" {
 
         volume {
           name = "bare-repo"
-          persistent_volume_claim {
-            claim_name = "nemo-bare-repo"
-          }
+          persistent_volume_claim { claim_name = "nemo-bare-repo" }
         }
         volume {
           name = "ssh-key"
@@ -446,9 +109,7 @@ resource "kubernetes_job" "repo_init" {
         }
         volume {
           name = "ssh-known-hosts"
-          config_map {
-            name = "nemo-ssh-known-hosts"
-          }
+          config_map { name = "nemo-ssh-known-hosts" }
         }
 
         restart_policy = "OnFailure"
@@ -457,7 +118,268 @@ resource "kubernetes_job" "repo_init" {
   }
 
   wait_for_completion = true
-  timeouts {
-    create = "10m"
+  timeouts { create = "10m" }
+}
+
+# --- API Server ---
+
+resource "kubernetes_deployment" "api_server" {
+  depends_on = [
+    kubernetes_service.postgres,
+    kubernetes_secret.api_key,
+    kubernetes_secret.git_host_token,
+    kubernetes_service_account.api_server,
+    kubernetes_persistent_volume_claim.bare_repo,
+    kubernetes_job.repo_init,
+    kubernetes_config_map.nemo_config,
+    kubernetes_secret.registry_creds_system,
+  ]
+
+  metadata {
+    name      = "nemo-api-server"
+    namespace = "nemo-system"
+    labels    = { app = "nemo-api-server" }
+  }
+
+  spec {
+    replicas = 1
+
+    selector { match_labels = { app = "nemo-api-server" } }
+
+    template {
+      metadata {
+        labels = { app = "nemo-api-server" }
+        annotations = {
+          "config-checksum" = sha256(kubernetes_config_map.nemo_config.data["nemo.toml"])
+        }
+      }
+
+      spec {
+        service_account_name = "nemo-api-server"
+
+        dynamic "image_pull_secrets" {
+          for_each = var.image_pull_secret_dockerconfigjson != null ? [1] : []
+          content { name = "nemo-registry-creds" }
+        }
+
+        security_context { fs_group = 1000 }
+
+        container {
+          name  = "api-server"
+          image = var.control_plane_image
+          args  = ["api-server"]
+
+          port { container_port = 8080 }
+
+          env {
+            name = "DATABASE_URL"
+            value_from {
+              secret_key_ref {
+                name = "nemo-postgres-credentials"
+                key  = "DATABASE_URL"
+              }
+            }
+          }
+          env {
+            name = "NEMO_API_KEY"
+            value_from {
+              secret_key_ref {
+                name = "nemo-api-key"
+                key  = "NEMO_API_KEY"
+              }
+            }
+          }
+          env {
+            name = "GIT_HOST_TOKEN"
+            value_from {
+              secret_key_ref {
+                name = "nemo-git-host-token"
+                key  = "GIT_HOST_TOKEN"
+              }
+            }
+          }
+          env {
+            name  = "BARE_REPO_PATH"
+            value = "/bare-repo"
+          }
+
+          resources {
+            requests = { cpu = "100m", memory = "256Mi" }
+            limits   = { cpu = "500m", memory = "512Mi" }
+          }
+
+          volume_mount {
+            name       = "bare-repo"
+            mount_path = "/bare-repo"
+          }
+          volume_mount {
+            name       = "nemo-config"
+            mount_path = "/etc/nemo"
+            read_only  = true
+          }
+
+          startup_probe {
+            http_get {
+              path = "/health"
+              port = 8080
+            }
+            failure_threshold = 30
+            period_seconds    = 2
+            timeout_seconds   = 3
+          }
+
+          liveness_probe {
+            tcp_socket { port = 8080 }
+            period_seconds  = 15
+            timeout_seconds = 3
+          }
+
+          readiness_probe {
+            http_get {
+              path = "/health"
+              port = 8080
+            }
+            period_seconds  = 10
+            timeout_seconds = 3
+          }
+        }
+
+        volume {
+          name = "bare-repo"
+          persistent_volume_claim { claim_name = "nemo-bare-repo" }
+        }
+        volume {
+          name = "nemo-config"
+          config_map { name = "nemo-config" }
+        }
+      }
+    }
+  }
+}
+
+resource "kubernetes_service" "api_server" {
+  depends_on = [kubernetes_deployment.api_server]
+
+  metadata {
+    name      = "nemo-api-server"
+    namespace = "nemo-system"
+  }
+  spec {
+    selector = { app = "nemo-api-server" }
+    port {
+      port        = 8080
+      target_port = 8080
+    }
+  }
+}
+
+# --- Loop Engine ---
+
+resource "kubernetes_deployment" "loop_engine" {
+  depends_on = [
+    kubernetes_service.postgres,
+    kubernetes_secret.api_key,
+    kubernetes_secret.git_host_token,
+    kubernetes_service_account.loop_engine,
+    kubernetes_persistent_volume_claim.bare_repo,
+    kubernetes_job.repo_init,
+    kubernetes_config_map.nemo_config,
+    kubernetes_secret.registry_creds_system,
+  ]
+
+  metadata {
+    name      = "nemo-loop-engine"
+    namespace = "nemo-system"
+    labels    = { app = "nemo-loop-engine" }
+  }
+
+  spec {
+    replicas = 1
+
+    selector { match_labels = { app = "nemo-loop-engine" } }
+
+    template {
+      metadata {
+        labels = { app = "nemo-loop-engine" }
+        annotations = {
+          "config-checksum" = sha256(kubernetes_config_map.nemo_config.data["nemo.toml"])
+        }
+      }
+
+      spec {
+        service_account_name = "nemo-loop-engine"
+
+        dynamic "image_pull_secrets" {
+          for_each = var.image_pull_secret_dockerconfigjson != null ? [1] : []
+          content { name = "nemo-registry-creds" }
+        }
+
+        security_context { fs_group = 1000 }
+
+        container {
+          name  = "loop-engine"
+          image = var.control_plane_image
+          args  = ["loop-engine"]
+
+          env {
+            name = "DATABASE_URL"
+            value_from {
+              secret_key_ref {
+                name = "nemo-postgres-credentials"
+                key  = "DATABASE_URL"
+              }
+            }
+          }
+          env {
+            name = "GIT_HOST_TOKEN"
+            value_from {
+              secret_key_ref {
+                name = "nemo-git-host-token"
+                key  = "GIT_HOST_TOKEN"
+              }
+            }
+          }
+          env {
+            name  = "BARE_REPO_PATH"
+            value = "/bare-repo"
+          }
+          env {
+            name  = "AGENT_IMAGE"
+            value = var.agent_base_image
+          }
+
+          volume_mount {
+            name       = "bare-repo"
+            mount_path = "/bare-repo"
+          }
+          volume_mount {
+            name       = "nemo-config"
+            mount_path = "/etc/nemo"
+            read_only  = true
+          }
+
+          resources {
+            requests = { cpu = "100m", memory = "256Mi" }
+            limits   = { cpu = "500m", memory = "512Mi" }
+          }
+
+          liveness_probe {
+            exec { command = ["kill", "-0", "1"] }
+            initial_delay_seconds = 15
+            period_seconds        = 30
+            timeout_seconds       = 3
+          }
+        }
+
+        volume {
+          name = "bare-repo"
+          persistent_volume_claim { claim_name = "nemo-bare-repo" }
+        }
+        volume {
+          name = "nemo-config"
+          config_map { name = "nemo-config" }
+        }
+      }
+    }
   }
 }
