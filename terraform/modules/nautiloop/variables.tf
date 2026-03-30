@@ -25,6 +25,11 @@ variable "ssh_user" {
 variable "git_repo_url" {
   description = "Git repository URL (SSH format: git@github.com:user/repo.git)"
   type        = string
+
+  validation {
+    condition     = can(regex("^git@", var.git_repo_url))
+    error_message = "git_repo_url must be in SSH format (git@host:user/repo.git). HTTPS URLs are not supported."
+  }
 }
 
 variable "git_host_token" {

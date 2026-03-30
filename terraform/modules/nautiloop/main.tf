@@ -103,8 +103,7 @@ locals {
     Next steps:
     1. Add this deploy key to your repo (Settings > Deploy keys, enable write access):
        ${local.deploy_public_key != null ? trimspace(local.deploy_public_key) : ""}
-    2. Trigger initial repo sync: kubectl -n nemo-system delete job nemo-repo-init
-       (The job will be recreated and fetch the repo with the new key)
+    2. Run terraform apply again to sync the repo (the repo-init job will fetch with the new key)
     3. Install the CLI: cargo install --git https://github.com/tinkrtailor/nemo nemo-cli
     4. Configure: nemo init && nemo auth
   EOT

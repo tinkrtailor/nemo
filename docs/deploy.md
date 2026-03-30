@@ -114,10 +114,10 @@ All outputs are machine-readable via `terraform output -json`.
 
 See `terraform/examples/hetzner/` — hardened setup with Tailscale VPN.
 
-- SSH only via Tailscale (not exposed publicly)
+- SSH open (key-only, fail2ban protected). Day-to-day: `ssh root@nautiloop` (Tailscale)
 - API (8080) only via Tailscale — `http://nautiloop:8080` (MagicDNS)
-- Hetzner firewall blocks everything except Tailscale + optional HTTPS
-- fail2ban, unattended-upgrades, password auth disabled
+- Hetzner firewall: no public 8080, SSH + Tailscale UDP + optional HTTPS
+- unattended-upgrades, password auth disabled
 
 ```bash
 cd terraform/examples/hetzner

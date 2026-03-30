@@ -11,6 +11,11 @@ variable "hetzner_api_token" {
 variable "ssh_public_keys" {
   description = "SSH public keys for server access"
   type        = list(string)
+
+  validation {
+    condition     = length(var.ssh_public_keys) > 0
+    error_message = "At least one SSH public key is required for server bootstrap."
+  }
 }
 
 variable "ssh_private_key_path" {
