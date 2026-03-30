@@ -96,4 +96,24 @@ locals {
   ssh_key_file       = "${path.module}/.state/ssh_key"
   has_domain         = var.domain != null && var.domain != ""
   server_url         = local.has_domain ? "https://${var.domain}" : "http://${var.server_ip}:8080"
+
+  post_apply_instructions_with_key = <<-EOT
+    Nemo deployed at ${local.server_url}
+
+    Next steps:
+    1. Add this deploy key to your repo (Settings > Deploy keys, enable write access):
+       ${local.deploy_public_key != null ? trimspace(local.deploy_public_key) : ""}
+    2. Trigger initial repo sync: kubectl -n nemo-system delete job nemo-repo-init
+       (The job will be recreated and fetch the repo with the new key)
+    3. Install the CLI: cargo install --git https://github.com/tinkrtailor/nemo nemo-cli
+    4. Configure: nemo init && nemo auth
+  EOT
+
+  post_apply_instructions_no_key = <<-EOT
+    Nemo deployed at ${local.server_url}
+
+    Next steps:
+    1. Install the CLI: cargo install --git https://github.com/tinkrtailor/nemo nemo-cli
+    2. Configure: nemo init && nemo auth
+  EOT
 }

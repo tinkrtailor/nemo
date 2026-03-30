@@ -212,7 +212,7 @@ resource "kubernetes_config_map" "ssh_known_hosts_jobs" {
 resource "null_resource" "ssh_keyscan" {
   count = var.ssh_known_hosts == "" ? 1 : 0
 
-  depends_on = [kubernetes_config_map.ssh_known_hosts]
+  depends_on = [kubernetes_config_map.ssh_known_hosts, kubernetes_namespace.jobs]
 
   triggers = {
     git_repo_url = var.git_repo_url

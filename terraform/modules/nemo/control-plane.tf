@@ -62,7 +62,10 @@ resource "kubernetes_job" "repo_init" {
             cp /secrets/ssh-key/id_ed25519 "$HOME/.ssh/id_ed25519"
             chmod 600 "$HOME/.ssh/id_ed25519"
             cp /secrets/ssh-known-hosts/known_hosts "$HOME/.ssh/known_hosts"
-            git -C /bare-repo fetch --all
+            # Fetch may fail on first apply if the deploy key hasn't been added
+            # to the repo yet (auto-generated key). This is non-fatal — the
+            # control plane will fetch on first task submission.
+            git -C /bare-repo fetch --all || echo "WARN: git fetch failed (deploy key may not be configured yet)"
           EOT
           ]
 
@@ -396,6 +399,8 @@ resource "null_resource" "health_check" {
 
   triggers = {
     api_server_image = var.control_plane_image
+    server_ip        = var.server_ip
+    has_domain       = tostring(local.has_domain)
   }
 
   connection {

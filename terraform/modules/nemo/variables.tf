@@ -46,6 +46,11 @@ variable "domain" {
   description = "Domain for the control plane. null = HTTP on raw IP, no TLS."
   type        = string
   default     = null
+
+  validation {
+    condition     = var.domain == null || var.domain == "" || can(regex("^[a-zA-Z0-9][a-zA-Z0-9.-]+[a-zA-Z0-9]$", var.domain))
+    error_message = "domain must be a valid hostname (e.g., nemo.example.com). Do not include http:// or https://."
+  }
 }
 
 variable "acme_email" {

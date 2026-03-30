@@ -33,11 +33,5 @@ output "namespace_jobs" {
 
 output "post_apply_instructions" {
   description = "Post-apply next steps for the user"
-  value       = <<-EOT
-    Nemo deployed at ${local.server_url}
-
-    Next steps:
-    ${local.deploy_public_key != null ? "1. Add this deploy key to your repo (Settings > Deploy keys, enable write access):\n   ${trimspace(local.deploy_public_key)}\n2" : "1"}. Install the CLI: cargo install --git https://github.com/tinkrtailor/nemo nemo-cli
-    ${local.deploy_public_key != null ? "3" : "2"}. Configure: nemo init && nemo auth
-  EOT
+  value       = local.deploy_public_key != null ? local.post_apply_instructions_with_key : local.post_apply_instructions_no_key
 }
