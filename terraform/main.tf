@@ -36,7 +36,7 @@ resource "null_resource" "k3s_install" {
   provisioner "remote-exec" {
     inline = [
       "cloud-init status --wait || true",
-      "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${var.k3s_version} sh -s - server --disable traefik",
+      "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${var.k3s_version} sh -s - server",
       "until kubectl get nodes 2>/dev/null | grep -q ' Ready'; do sleep 2; done",
       # FR-54: Configure container log rotation
       "mkdir -p /etc/rancher/k3s",

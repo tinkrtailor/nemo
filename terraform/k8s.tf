@@ -379,7 +379,7 @@ resource "kubernetes_role_binding" "api_server_jobs" {
   }
 }
 
-# FR-48: nginx-ingress with cert-manager for TLS
+# FR-48: Traefik (k3s built-in) + cert-manager for TLS
 
 resource "helm_release" "cert_manager" {
   depends_on = [null_resource.kubeconfig]
@@ -394,21 +394,6 @@ resource "helm_release" "cert_manager" {
   set {
     name  = "installCRDs"
     value = "true"
-  }
-}
-
-resource "helm_release" "nginx_ingress" {
-  depends_on = [null_resource.kubeconfig]
-
-  name             = "ingress-nginx"
-  repository       = "https://kubernetes.github.io/ingress-nginx"
-  chart            = "ingress-nginx"
-  namespace        = "ingress-nginx"
-  create_namespace = true
-
-  set {
-    name  = "controller.ingressClassResource.name"
-    value = var.ingress_class
   }
 }
 
@@ -432,7 +417,7 @@ resource "kubernetes_manifest" "cluster_issuer" {
         solvers = [{
           http01 = {
             ingress = {
-              class = var.ingress_class
+              class = "traefik"
             }
           }
         }]
@@ -441,49 +426,92 @@ resource "kubernetes_manifest" "cluster_issuer" {
   }
 }
 
-# Ingress for control plane API
-resource "kubernetes_ingress_v1" "api" {
-  depends_on = [helm_release.nginx_ingress, kubernetes_manifest.cluster_issuer]
+# Traefik middleware: block /health from external access.
+# K8s probes hit pod IP directly; this prevents unauthenticated
+# DB pool exhaustion via the public endpoint.
+resource "kubernetes_manifest" "block_health" {
+  depends_on = [kubernetes_namespace.system]
 
-  metadata {
-    name      = "nemo-api"
-    namespace = "nemo-system"
-    annotations = {
-      "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
-      # Block /health from external access — probes hit pod IP directly.
-      # Prevents unauthenticated DB pool exhaustion via public endpoint.
-      "nginx.ingress.kubernetes.io/server-snippet" = <<-EOT
-        location = /health {
-          return 404;
-        }
-      EOT
+  manifest = {
+    apiVersion = "traefik.io/v1alpha1"
+    kind       = "Middleware"
+    metadata = {
+      name      = "block-health"
+      namespace = "nemo-system"
+    }
+    spec = {
+      replacePath = {
+        path = "/blocked"
+      }
     }
   }
+}
 
-  spec {
-    ingress_class_name = var.ingress_class
+# IngressRoute for control plane API (Traefik CRD)
+# Using IngressRoute instead of standard Ingress for native Traefik
+# middleware support (blocking /health from external access).
+resource "kubernetes_manifest" "api_ingress" {
+  depends_on = [kubernetes_manifest.cluster_issuer, kubernetes_namespace.system]
 
-    tls {
-      hosts       = [var.domain]
-      secret_name = "nemo-tls"
-    }
-
-    rule {
-      host = var.domain
-      http {
-        path {
-          path      = "/"
-          path_type = "Prefix"
-          backend {
-            service {
-              name = "nemo-api-server"
-              port {
-                number = 8080
-              }
-            }
-          }
-        }
+  manifest = {
+    apiVersion = "traefik.io/v1alpha1"
+    kind       = "IngressRoute"
+    metadata = {
+      name      = "nemo-api"
+      namespace = "nemo-system"
+      annotations = {
+        "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
       }
+    }
+    spec = {
+      entryPoints = ["websecure"]
+      routes = [
+        {
+          match = "Host(`${var.domain}`) && Path(`/health`)"
+          kind  = "Rule"
+          middlewares = [{
+            name      = "block-health"
+            namespace = "nemo-system"
+          }]
+          services = [{
+            name = "nemo-api-server"
+            port = 8080
+          }]
+        },
+        {
+          match = "Host(`${var.domain}`)"
+          kind  = "Rule"
+          services = [{
+            name = "nemo-api-server"
+            port = 8080
+          }]
+        },
+      ]
+      tls = {
+        secretName = "nemo-tls"
+      }
+    }
+  }
+}
+
+# Certificate for the domain (cert-manager watches this and provisions via Let's Encrypt)
+resource "kubernetes_manifest" "api_certificate" {
+  depends_on = [kubernetes_manifest.cluster_issuer]
+
+  manifest = {
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "nemo-tls"
+      namespace = "nemo-system"
+    }
+    spec = {
+      secretName = "nemo-tls"
+      issuerRef = {
+        name = "letsencrypt-prod"
+        kind = "ClusterIssuer"
+      }
+      dnsNames = [var.domain]
     }
   }
 }

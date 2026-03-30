@@ -100,22 +100,10 @@ variable "k3s_version" {
   default     = "v1.30.4+k3s1"
 }
 
-variable "nginx_ingress_version" {
-  description = "nginx-ingress controller version"
-  type        = string
-  default     = "v1.10.0"
-}
-
 variable "cert_manager_version" {
   description = "cert-manager version"
   type        = string
   default     = "v1.14.0"
-}
-
-variable "ingress_class" {
-  description = "Ingress class name"
-  type        = string
-  default     = "nginx"
 }
 
 variable "image_pull_secret_dockerconfigjson" {
