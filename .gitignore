@@ -34,6 +34,10 @@ node_modules/
 
 # Terraform
 terraform/.terraform/
+terraform/**/.terraform/
 terraform/*.tfstate*
+terraform/**/*.tfstate*
 terraform/kubeconfig.yaml
 terraform/*.tfvars
+terraform/**/*.tfvars
+terraform/modules/nautiloop/.state/

@@ -1,4 +1,5 @@
-# FR-43: Provision a Hetzner Cloud server
+# Root terraform — provisions Hetzner VPS + installs Nemo via module.
+# For other cloud providers, see terraform/examples/.
 
 resource "hcloud_ssh_key" "nemo" {
   count      = length(var.ssh_public_keys)
@@ -13,101 +14,34 @@ resource "hcloud_server" "nemo" {
   image       = "ubuntu-22.04"
   ssh_keys    = hcloud_ssh_key.nemo[*].id
 
-  labels = {
-    "app" = "nemo"
-  }
+  labels = { app = "nemo" }
 
-  user_data = templatefile("${path.module}/templates/cloud-init.yaml", {
-    k3s_version = var.k3s_version
-  })
+  user_data = file("${path.module}/templates/cloud-init.yaml")
 }
 
-# FR-44: Install k3s via remote-exec after cloud-init
-resource "null_resource" "k3s_install" {
-  depends_on = [hcloud_server.nemo, hcloud_volume_attachment.nemo_data]
+module "nautiloop" {
+  source = "./modules/nautiloop"
 
-  # Re-run if k3s version changes (ensures Traefik is enabled on existing clusters)
-  triggers = {
-    k3s_version = var.k3s_version
-    server_id   = hcloud_server.nemo.id
-  }
+  server_ip       = hcloud_server.nemo.ipv4_address
+  ssh_private_key = file(pathexpand(var.ssh_private_key_path))
+  ssh_user        = "root"
 
-  connection {
-    type        = "ssh"
-    host        = hcloud_server.nemo.ipv4_address
-    user        = "root"
-    private_key = file(pathexpand(var.ssh_private_key_path))
-  }
+  git_repo_url         = var.git_repo_url
+  git_host_token       = var.git_host_token
+  repo_ssh_private_key = var.repo_ssh_private_key
 
-  provisioner "remote-exec" {
-    inline = [
-      "cloud-init status --wait || true",
-      "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${var.k3s_version} sh -s - server",
-      "until kubectl get nodes 2>/dev/null | grep -q ' Ready'; do sleep 2; done",
-      # FR-54: Configure container log rotation
-      "mkdir -p /etc/rancher/k3s",
-      "cat > /etc/rancher/k3s/config.yaml <<'EOF'",
-      "kubelet-arg:",
-      "  - container-log-max-size=50Mi",
-      "  - container-log-max-files=5",
-      "EOF",
-      "systemctl restart k3s",
-      "until kubectl get nodes 2>/dev/null | grep -q ' Ready'; do sleep 2; done",
-      # Wait for Traefik CRDs and deployment (k3s deploys AddOns asynchronously).
-      # Timeout after 120s — if Traefik doesn't come up, fail fast.
-      "TRIES=0; until kubectl get crd ingressroutes.traefik.io 2>/dev/null || [ $TRIES -ge 60 ]; do sleep 2; TRIES=$((TRIES+1)); done",
-      "kubectl get crd ingressroutes.traefik.io || { echo 'ERROR: Traefik CRDs not registered after 120s'; exit 1; }",
-      "kubectl -n kube-system rollout status deployment/traefik --timeout=120s",
-    ]
-  }
-}
+  domain     = var.domain
+  acme_email = var.acme_email
 
-# Fetch kubeconfig from server
-resource "null_resource" "kubeconfig" {
-  depends_on = [null_resource.k3s_install]
+  control_plane_image = var.control_plane_image
+  agent_base_image    = var.agent_base_image
+  sidecar_image       = var.sidecar_image
 
-  connection {
-    type        = "ssh"
-    host        = hcloud_server.nemo.ipv4_address
-    user        = "root"
-    private_key = file(pathexpand(var.ssh_private_key_path))
-  }
+  k3s_version          = var.k3s_version
+  cert_manager_version = var.cert_manager_version
+  postgres_password    = var.postgres_password
+  postgres_volume_size = var.postgres_volume_size
+  ssh_known_hosts      = var.ssh_known_hosts
 
-  provisioner "local-exec" {
-    command = <<-EOT
-      ssh -o StrictHostKeyChecking=accept-new \
-        -i ${pathexpand(var.ssh_private_key_path)} \
-        root@${hcloud_server.nemo.ipv4_address} \
-        'cat /etc/rancher/k3s/k3s.yaml' | \
-        sed "s/127.0.0.1/${hcloud_server.nemo.ipv4_address}/" > ${path.module}/kubeconfig.yaml
-    EOT
-  }
-}
-
-# Generate random passwords
-resource "random_password" "postgres" {
-  length  = 32
-  special = false
-}
-
-# FR-52c: Generate random API key
-resource "random_password" "api_key" {
-  length  = 64
-  special = false
-}
-
-locals {
-  postgres_password = var.postgres_password != "" ? var.postgres_password : random_password.postgres.result
-  kubeconfig_path   = "${path.module}/kubeconfig.yaml"
-}
-
-# Configure K8s provider after k3s is ready
-provider "kubernetes" {
-  config_path = local.kubeconfig_path
-}
-
-provider "helm" {
-  kubernetes {
-    config_path = local.kubeconfig_path
-  }
+  image_pull_secret_dockerconfigjson = var.image_pull_secret_dockerconfigjson
 }

@@ -1,0 +1,67 @@
+#cloud-config
+# Cloud-init for Nemo k3s server (Hetzner + Tailscale hardened example)
+#
+# - Installs Tailscale and joins tailnet (SSH over Tailscale only)
+# - Hardens: fail2ban, unattended-upgrades, password auth disabled
+# - Prepares directories for k3s + Nemo data
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - jq
+  - unzip
+  - open-iscsi
+  - nfs-common
+  - unattended-upgrades
+  - fail2ban
+
+runcmd:
+  # --- Directories for Nemo persistence ---
+  - mkdir -p /data/backups /data/nemo-postgres /data/nemo-bare-repo
+  - chmod 700 /data/backups
+  - chown 1000:1000 /data/nemo-bare-repo
+
+  # --- Tailscale ---
+  - curl -fsSL https://tailscale.com/install.sh | sh
+  - tailscale up --authkey=${tailscale_auth_key} --hostname=${hostname} --ssh
+
+  # --- Hardening ---
+  - systemctl enable unattended-upgrades
+  - systemctl start unattended-upgrades
+  - systemctl enable fail2ban
+  - systemctl start fail2ban
+  # Disable password auth (key-only SSH + Tailscale SSH)
+  - sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+  - sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+  - systemctl restart sshd
+
+# Disable swap (required for k3s)
+swap:
+  filename: /dev/null
+  size: 0
+
+write_files:
+  # fail2ban SSH jail
+  - path: /etc/fail2ban/jail.local
+    content: |
+      [sshd]
+      enabled = true
+      port = ssh
+      filter = sshd
+      maxretry = 5
+      bantime = 3600
+
+  # Container log rotation
+  - path: /etc/logrotate.d/containers
+    content: |
+      /var/log/containers/*.log {
+        daily
+        rotate 5
+        maxsize 50M
+        compress
+        missingok
+        notifempty
+        copytruncate
+      }

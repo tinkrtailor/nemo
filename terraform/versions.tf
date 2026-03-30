@@ -14,21 +14,23 @@ terraform {
       source  = "hashicorp/helm"
       version = "~> 2.12"
     }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.6"
-    }
-    null = {
-      source  = "hashicorp/null"
-      version = "~> 3.2"
-    }
-    local = {
-      source  = "hashicorp/local"
-      version = "~> 2.4"
-    }
   }
 }
 
 provider "hcloud" {
   token = var.hetzner_api_token
+}
+
+# Providers configured with kubeconfig that the module generates.
+# The file won't exist until k3s_install runs, but terraform only
+# evaluates the provider when it creates k8s resources (which all
+# depend_on the kubeconfig null_resource in the module).
+provider "kubernetes" {
+  config_path = "${path.module}/modules/nautiloop/.state/kubeconfig.yaml"
+}
+
+provider "helm" {
+  kubernetes {
+    config_path = "${path.module}/modules/nautiloop/.state/kubeconfig.yaml"
+  }
 }

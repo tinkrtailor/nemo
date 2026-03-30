@@ -15,29 +15,16 @@ packages:
 # Create directories for persistence
 runcmd:
   - mkdir -p /data/backups
-  - chmod 755 /data/backups
-  # Wait for Hetzner Volume to be attached and mount it.
-  # Only format if the volume has no filesystem (blkid returns non-zero).
-  # Never blindly mkfs — a transient mount error must NOT destroy data.
-  # Use stable /dev/disk/by-id/ symlink in fstab — NOT the volatile /dev/sdX
-  # that readlink resolves to. Device letters can change across reboots.
-  - DISK_STABLE="/dev/disk/by-id/scsi-0HC_Volume_$(echo "${volume_name}" | tr ' ' '_')"
-  - TRIES=0; until [ -L "$DISK_STABLE" ] || [ "$TRIES" -ge 60 ]; do sleep 1; TRIES=$((TRIES+1)); done
-  - "[ -L \"$DISK_STABLE\" ] || { echo 'ERROR: Hetzner volume not attached after 60s'; exit 1; }"
-  - blkid "$DISK_STABLE" || mkfs.ext4 "$DISK_STABLE"
-  - mkdir -p /var/lib/postgresql/data
-  - mount "$DISK_STABLE" /var/lib/postgresql/data
-  # Sentinel file proves volume is actually mounted (not just an empty dir).
-  # Postgres PV initContainer checks for this before starting.
-  - touch /var/lib/postgresql/data/.nemo-volume-mounted
-  - grep -q "$DISK_STABLE" /etc/fstab || echo "$DISK_STABLE /var/lib/postgresql/data ext4 defaults 0 2" >> /etc/fstab
+  - chmod 700 /data/backups
+  - mkdir -p /data/nemo-postgres
+  - chmod 755 /data/nemo-postgres
 
 # Disable swap (required for k3s)
 swap:
   filename: /dev/null
   size: 0
 
-# Set up log rotation for container logs (FR-54)
+# Set up log rotation for container logs
 write_files:
   - path: /etc/logrotate.d/containers
     content: |
