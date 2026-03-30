@@ -2,7 +2,7 @@
 # Produces a minimal image with the nemo-server binary.
 # Same binary runs as API server or loop engine based on args.
 
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.85-bookworm AS builder
 
 WORKDIR /build
 

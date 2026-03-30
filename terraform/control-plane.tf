@@ -206,6 +206,8 @@ resource "kubernetes_deployment" "loop_engine" {
     kubernetes_secret.git_host_token,
     kubernetes_service_account.loop_engine,
     kubernetes_persistent_volume_claim.bare_repo,
+    kubernetes_job.repo_init,
+    kubernetes_config_map.nemo_config,
   ]
 
   metadata {
@@ -301,6 +303,18 @@ resource "kubernetes_deployment" "loop_engine" {
               cpu    = "500m"
               memory = "512Mi"
             }
+          }
+
+          # Liveness: verify the process is still alive and responsive.
+          # The loop engine doesn't serve HTTP, so use exec-based check.
+          # kill -0 checks PID 1 (tini) is alive without sending a signal.
+          liveness_probe {
+            exec {
+              command = ["kill", "-0", "1"]
+            }
+            initial_delay_seconds = 15
+            period_seconds        = 30
+            timeout_seconds       = 3
           }
         }
 
@@ -411,7 +425,7 @@ resource "kubernetes_job" "repo_init" {
           name = "ssh-key"
           secret {
             secret_name  = "nemo-repo-ssh-key"
-            default_mode = "0600"
+            default_mode = "0444"
           }
         }
         volume {

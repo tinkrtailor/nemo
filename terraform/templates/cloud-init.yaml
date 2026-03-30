@@ -26,6 +26,9 @@ runcmd:
   - blkid "$DISK_STABLE" || mkfs.ext4 "$DISK_STABLE"
   - mkdir -p /var/lib/postgresql/data
   - mount "$DISK_STABLE" /var/lib/postgresql/data
+  # Sentinel file proves volume is actually mounted (not just an empty dir).
+  # Postgres PV initContainer checks for this before starting.
+  - touch /var/lib/postgresql/data/.nemo-volume-mounted
   - grep -q "$DISK_STABLE" /etc/fstab || echo "$DISK_STABLE /var/lib/postgresql/data ext4 defaults 0 2" >> /etc/fstab
 
 # Disable swap (required for k3s)

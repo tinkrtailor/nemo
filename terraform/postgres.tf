@@ -75,6 +75,19 @@ resource "kubernetes_deployment" "postgres" {
       }
 
       spec {
+        # Fail fast if the Hetzner volume is not actually mounted.
+        # The sentinel file is created by cloud-init after successful mount.
+        init_container {
+          name    = "check-volume-mounted"
+          image   = "busybox:1.36"
+          command = ["sh", "-c", "test -f /data/.nemo-volume-mounted || (echo 'ERROR: Postgres volume not mounted — refusing to start on root disk' && exit 1)"]
+
+          volume_mount {
+            name       = "postgres-data"
+            mount_path = "/data"
+          }
+        }
+
         container {
           name  = "postgres"
           image = "postgres:16-alpine"

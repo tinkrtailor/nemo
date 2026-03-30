@@ -450,6 +450,13 @@ resource "kubernetes_ingress_v1" "api" {
     namespace = "nemo-system"
     annotations = {
       "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
+      # Block /health from external access — probes hit pod IP directly.
+      # Prevents unauthenticated DB pool exhaustion via public endpoint.
+      "nginx.ingress.kubernetes.io/server-snippet" = <<-EOT
+        location = /health {
+          return 404;
+        }
+      EOT
     }
   }
 
