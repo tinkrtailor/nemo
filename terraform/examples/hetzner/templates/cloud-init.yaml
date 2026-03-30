@@ -15,7 +15,7 @@ packages:
 # Create directories for persistence
 runcmd:
   - mkdir -p /data/backups
-  - chmod 755 /data/backups
+  - chmod 700 /data/backups
   - mkdir -p /data/nemo-postgres
   - chmod 755 /data/nemo-postgres
 

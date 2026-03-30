@@ -51,6 +51,11 @@ variable "acme_email" {
   description = "Email for Let's Encrypt certificate registration. Required if domain is set."
   type        = string
   default     = null
+
+  validation {
+    condition     = var.domain == null || var.domain == "" || (var.acme_email != null && var.acme_email != "")
+    error_message = "acme_email is required when domain is set."
+  }
 }
 
 # --- Optional: images ---

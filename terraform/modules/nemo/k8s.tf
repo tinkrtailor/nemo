@@ -214,10 +214,18 @@ resource "null_resource" "ssh_keyscan" {
 
   depends_on = [kubernetes_config_map.ssh_known_hosts]
 
+  triggers = {
+    git_repo_url = var.git_repo_url
+  }
+
   provisioner "local-exec" {
     command = <<-EOT
-      GITHOST=$(echo "${var.git_repo_url}" | sed -E 's/.*@([^:]+):.*/\1/' | sed -E 's|https?://([^/]+).*|\1|')
+      GITHOST=$(echo "$GIT_REPO_URL" | sed -E 's/.*@([^:]+):.*/\1/' | sed -E 's|https?://([^/]+).*|\1|')
       KNOWN_HOSTS=$(ssh-keyscan "$GITHOST" 2>/dev/null)
+      if [ -z "$KNOWN_HOSTS" ]; then
+        echo "ERROR: ssh-keyscan returned empty for $GITHOST" >&2
+        exit 1
+      fi
       for NS in nemo-system nemo-jobs; do
         kubectl --kubeconfig ${local.kubeconfig_path} -n "$NS" \
           create configmap nemo-ssh-known-hosts \
@@ -226,6 +234,10 @@ resource "null_resource" "ssh_keyscan" {
           kubectl --kubeconfig ${local.kubeconfig_path} apply -f -
       done
     EOT
+
+    environment = {
+      GIT_REPO_URL = var.git_repo_url
+    }
   }
 }
 
@@ -489,7 +501,7 @@ resource "kubernetes_manifest" "api_ingress_http_ip" {
     apiVersion = "traefik.io/v1alpha1"
     kind       = "IngressRoute"
     metadata = {
-      name      = "nemo-api-http"
+      name      = "nemo-api-http-ip"
       namespace = "nemo-system"
     }
     spec = {

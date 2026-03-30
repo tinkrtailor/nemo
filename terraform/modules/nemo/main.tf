@@ -32,6 +32,9 @@ resource "null_resource" "k3s_install" {
       "TRIES=0; until kubectl get crd ingressroutes.traefik.io 2>/dev/null || [ $TRIES -ge 60 ]; do sleep 2; TRIES=$((TRIES+1)); done",
       "kubectl get crd ingressroutes.traefik.io || { echo 'ERROR: Traefik CRDs not registered after 120s'; exit 1; }",
       "kubectl -n kube-system rollout status deployment/traefik --timeout=120s",
+      # Pre-create hostPath directories with correct ownership for non-root pods (UID 1000)
+      "mkdir -p /data/nemo-bare-repo /data/nemo-postgres /data/backups",
+      "chown 1000:1000 /data/nemo-bare-repo",
     ]
   }
 }

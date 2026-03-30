@@ -104,7 +104,7 @@ resource "kubernetes_job" "repo_init" {
           name = "ssh-key"
           secret {
             secret_name  = "nemo-repo-ssh-key"
-            default_mode = "0444"
+            default_mode = "0400"
           }
         }
         volume {
