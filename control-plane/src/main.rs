@@ -156,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
             );
 
             let reconciler_rx = shutdown_rx.clone();
-            let reconciler_handle = tokio::spawn(async move {
+            let mut reconciler_handle = tokio::spawn(async move {
                 reconciler.run(reconciler_rx).await;
             });
 
@@ -164,16 +164,28 @@ async fn main() -> anyhow::Result<()> {
             let job_watcher = JobWatcher::new(wake);
             let watcher_namespace = config.cluster.jobs_namespace.clone();
             let watcher_rx = shutdown_rx.clone();
-            let watcher_handle = tokio::spawn(async move {
+            let mut watcher_handle = tokio::spawn(async move {
                 job_watcher
                     .run(watcher_client, &watcher_namespace, watcher_rx)
                     .await;
             });
 
-            wait_for_shutdown().await?;
-            tracing::info!("Received shutdown signal");
+            // Supervise: exit if shutdown signal OR any background task dies.
+            // A dead reconciler/watcher means the pod is inert — must restart.
+            tokio::select! {
+                _ = wait_for_shutdown() => {
+                    tracing::info!("Received shutdown signal");
+                }
+                result = &mut reconciler_handle => {
+                    tracing::error!(?result, "Reconciler task exited unexpectedly");
+                }
+                result = &mut watcher_handle => {
+                    tracing::error!(?result, "Job watcher task exited unexpectedly");
+                }
+            }
             shutdown_tx.send(true)?;
-            let _ = tokio::join!(reconciler_handle, watcher_handle);
+            // Give remaining tasks a moment to drain
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
 

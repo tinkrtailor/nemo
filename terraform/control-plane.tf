@@ -7,6 +7,8 @@ resource "kubernetes_deployment" "api_server" {
     kubernetes_secret.api_key,
     kubernetes_secret.git_host_token,
     kubernetes_service_account.api_server,
+    kubernetes_persistent_volume_claim.bare_repo,
+    kubernetes_job.repo_init,
   ]
 
   metadata {
@@ -38,6 +40,17 @@ resource "kubernetes_deployment" "api_server" {
 
         security_context {
           fs_group = 1000
+        }
+
+        init_container {
+          name    = "fix-permissions"
+          image   = "busybox:1.36"
+          command = ["sh", "-c", "chown -R 1000:1000 /bare-repo"]
+
+          volume_mount {
+            name       = "bare-repo"
+            mount_path = "/bare-repo"
+          }
         }
 
         container {
@@ -100,13 +113,21 @@ resource "kubernetes_deployment" "api_server" {
             mount_path = "/bare-repo"
           }
 
+          startup_probe {
+            http_get {
+              path = "/health"
+              port = 8080
+            }
+            failure_threshold     = 30
+            period_seconds        = 2
+          }
+
           liveness_probe {
             http_get {
               path = "/health"
               port = 8080
             }
-            initial_delay_seconds = 10
-            period_seconds        = 15
+            period_seconds = 15
           }
 
           readiness_probe {
@@ -114,8 +135,7 @@ resource "kubernetes_deployment" "api_server" {
               path = "/health"
               port = 8080
             }
-            initial_delay_seconds = 5
-            period_seconds        = 5
+            period_seconds = 5
           }
         }
 
@@ -190,6 +210,17 @@ resource "kubernetes_deployment" "loop_engine" {
 
         security_context {
           fs_group = 1000
+        }
+
+        init_container {
+          name    = "fix-permissions"
+          image   = "busybox:1.36"
+          command = ["sh", "-c", "chown -R 1000:1000 /bare-repo"]
+
+          volume_mount {
+            name       = "bare-repo"
+            mount_path = "/bare-repo"
+          }
         }
 
         container {

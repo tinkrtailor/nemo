@@ -50,3 +50,4 @@ RUN groupadd -g 1000 nemo && \
 USER nemo
 
 ENTRYPOINT ["tini", "--", "/usr/local/bin/nemo-server"]
+CMD ["api-server"]
