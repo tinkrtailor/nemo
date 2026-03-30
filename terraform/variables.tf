@@ -95,9 +95,9 @@ variable "agent_base_image" {
 }
 
 variable "k3s_version" {
-  description = "k3s version to install"
+  description = "k3s version to install (v1.32+ required for Traefik v3 CRDs)"
   type        = string
-  default     = "v1.30.4+k3s1"
+  default     = "v1.32.13+k3s1"
 }
 
 variable "cert_manager_version" {

@@ -426,11 +426,60 @@ resource "kubernetes_manifest" "cluster_issuer" {
   }
 }
 
-# IngressRoute for control plane API (Traefik CRD).
+# HTTP → HTTPS redirect middleware
+resource "kubernetes_manifest" "redirect_https" {
+  depends_on = [kubernetes_namespace.system]
+
+  manifest = {
+    apiVersion = "traefik.io/v1alpha1"
+    kind       = "Middleware"
+    metadata = {
+      name      = "redirect-https"
+      namespace = "nemo-system"
+    }
+    spec = {
+      redirectScheme = {
+        scheme    = "https"
+        permanent = true
+      }
+    }
+  }
+}
+
+# HTTP entrypoint: redirect all traffic to HTTPS
+resource "kubernetes_manifest" "api_ingress_http" {
+  depends_on = [kubernetes_manifest.redirect_https, kubernetes_namespace.system]
+
+  manifest = {
+    apiVersion = "traefik.io/v1alpha1"
+    kind       = "IngressRoute"
+    metadata = {
+      name      = "nemo-api-http"
+      namespace = "nemo-system"
+    }
+    spec = {
+      entryPoints = ["web"]
+      routes = [
+        {
+          match = "Host(`${var.domain}`)"
+          kind  = "Rule"
+          middlewares = [{
+            name      = "redirect-https"
+            namespace = "nemo-system"
+          }]
+          services = [{
+            name = "nemo-api-server"
+            port = 8080
+          }]
+        },
+      ]
+    }
+  }
+}
+
+# HTTPS entrypoint: serve API, exclude /health from public access.
 # /health is NOT routed — Traefik returns 404 for unmatched paths.
 # K8s probes hit pod IP directly and bypass ingress entirely.
-# PathPrefix excludes /health so it can't be used for unauthenticated
-# DB pool exhaustion from the public internet.
 resource "kubernetes_manifest" "api_ingress" {
   depends_on = [kubernetes_manifest.cluster_issuer, kubernetes_namespace.system]
 
