@@ -25,5 +25,13 @@ node_modules/
 # Secrets
 .env
 .env.*
+!.env.1password
 *.pem
 *.key
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate*
+terraform/kubeconfig.yaml
+terraform/*.tfvars
+!terraform/.env.1password

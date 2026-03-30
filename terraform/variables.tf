@@ -85,13 +85,13 @@ variable "postgres_password" {
 variable "control_plane_image" {
   description = "Control plane container image"
   type        = string
-  default     = "ghcr.io/nemo/control-plane:latest"
+  default     = "ghcr.io/tinkrtailor/nemo-control-plane:latest"
 }
 
 variable "agent_base_image" {
   description = "Agent base container image"
   type        = string
-  default     = "ghcr.io/nemo/agent-base:latest"
+  default     = "ghcr.io/tinkrtailor/nemo-agent-base:latest"
 }
 
 variable "k3s_version" {
