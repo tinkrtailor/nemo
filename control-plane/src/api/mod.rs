@@ -24,10 +24,19 @@ pub struct AppState {
 }
 
 /// Build the axum router with all endpoints and auth middleware.
+/// The /health endpoint is outside the auth layer so K8s probes work without an API key.
 pub fn build_router(state: AppState) -> Router {
-    build_routes(state.clone())
-        .layer(middleware::from_fn(auth::auth_middleware))
+    let authed = build_routes(state.clone())
+        .layer(middleware::from_fn(auth::auth_middleware));
+
+    Router::new()
+        .route("/health", get(health))
+        .merge(authed)
         .with_state(state)
+}
+
+async fn health() -> axum::http::StatusCode {
+    axum::http::StatusCode::OK
 }
 
 /// Build the axum router without auth middleware (for testing).
