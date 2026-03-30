@@ -158,6 +158,7 @@ fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
         merged_at: row.get("merged_at"),
         hardened_spec_path: row.get("hardened_spec_path"),
         spec_pr_url: row.get("spec_pr_url"),
+        resolved_default_branch: row.try_get("resolved_default_branch").ok().flatten(),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -212,6 +213,7 @@ impl StateStore for PgStateStore {
                 paused_from_state, reauth_from_state, failure_reason, current_sha,
                 session_id, active_job_name, retry_count, model_implementor,
                 model_reviewer, merge_sha, merged_at, hardened_spec_path, spec_pr_url,
+                resolved_default_branch,
                 created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6::loop_kind,
@@ -220,7 +222,8 @@ impl StateStore for PgStateStore {
                 $18::loop_state, $19::loop_state, $20, $21,
                 $22, $23, $24, $25,
                 $26, $27, $28, $29, $30,
-                $31, $32
+                $31,
+                $32, $33
             )
             RETURNING *
             "#,
@@ -255,6 +258,7 @@ impl StateStore for PgStateStore {
         .bind(record.merged_at)
         .bind(&record.hardened_spec_path)
         .bind(&record.spec_pr_url)
+        .bind(&record.resolved_default_branch)
         .bind(record.created_at)
         .bind(record.updated_at)
         .fetch_one(&self.pool)

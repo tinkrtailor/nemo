@@ -1,3 +1,4 @@
+use crate::types::{LoopContext, Stage, StageConfig};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::batch::v1::JobSpec;
 use k8s_openapi::api::core::v1::{
@@ -9,9 +10,6 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use std::collections::BTreeMap;
-use uuid::Uuid;
-
-use crate::types::{LoopContext, Stage, StageConfig};
 
 /// Configuration for building a K8s Job, encapsulating all cluster-level settings.
 #[derive(Debug, Clone)]
@@ -221,12 +219,6 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
     }
 }
 
-/// Generate a unique job name for a loop stage.
-pub fn job_name(loop_id: Uuid, stage: &str, round: u32) -> String {
-    let short_id = &loop_id.to_string()[..8];
-    format!("nemo-{short_id}-{stage}-r{round}")
-}
-
 /// Build all environment variables for the agent container (FR-27, FR-8, FR-9, FR-10, FR-11).
 fn build_agent_env_vars(ctx: &LoopContext, stage: &StageConfig, is_test: bool) -> Vec<EnvVar> {
     let mut env = vec![
@@ -254,6 +246,8 @@ fn build_agent_env_vars(ctx: &LoopContext, stage: &StageConfig, is_test: bool) -
         env_var("OPENAI_BASE_URL", "http://localhost:9090/openai"),
         // Note: ANTHROPIC_BASE_URL is NOT set. Claude Code authenticates via the
         // mounted ~/.claude/ session directory (FR-25b), not via the sidecar proxy.
+        // Base branch for diff context in review/audit stages
+        env_var("NEMO_BASE_BRANCH", &ctx.base_branch),
     ];
 
     // FR-10, FR-27: Git identity from engineer identity (populated by nemo auth)
@@ -571,6 +565,7 @@ fn env_var(name: &str, value: &str) -> EnvVar {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use uuid::Uuid;
 
     fn test_ctx() -> LoopContext {
         LoopContext {
@@ -588,6 +583,7 @@ mod tests {
             feedback_path: Some(".agent/review-feedback-round-1.json".to_string()),
             worktree_path: "wt/agent-alice-invoice-cancel-a1b2c3d4".to_string(),
             credentials: vec![],
+            base_branch: "main".to_string(),
         }
     }
 
@@ -1051,13 +1047,6 @@ mod tests {
         let job = build_job(&ctx, &stage, &cfg);
         let pod_spec = job.spec.unwrap().template.spec.unwrap();
         assert!(pod_spec.image_pull_secrets.is_none());
-    }
-
-    #[test]
-    fn test_job_name_generation() {
-        let id = Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
-        assert_eq!(job_name(id, "implement", 2), "nemo-a1b2c3d4-implement-r2");
-        assert_eq!(job_name(id, "review", 1), "nemo-a1b2c3d4-review-r1");
     }
 
     #[test]

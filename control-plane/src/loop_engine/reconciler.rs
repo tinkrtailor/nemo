@@ -217,6 +217,7 @@ mod tests {
             merged_at: None,
             hardened_spec_path: None,
             spec_pr_url: None,
+            resolved_default_branch: Some("main".to_string()),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

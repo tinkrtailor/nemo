@@ -215,6 +215,9 @@ pub struct LoopContext {
     /// Injected into job pods so agents can authenticate with model APIs.
     #[serde(default)]
     pub credentials: Vec<(String, String)>,
+    /// Resolved default branch for the target repo (e.g., "main").
+    /// Used by the entrypoint for git diff context in review/audit stages.
+    pub base_branch: String,
 }
 
 /// Configuration for a single stage.
@@ -272,6 +275,9 @@ pub struct LoopRecord {
     pub merged_at: Option<DateTime<Utc>>,
     pub hardened_spec_path: Option<String>,
     pub spec_pr_url: Option<String>,
+    /// Resolved default branch name (e.g., "main"), frozen at loop creation.
+    /// Used for PR --base and merge SHA resolution.
+    pub resolved_default_branch: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
