@@ -1,12 +1,18 @@
 # Example: Hetzner VPS + Tailscale + Nemo
 #
 # Provisions a Hetzner server with:
-# - Hetzner firewall (no public SSH, no public 8080)
-# - Tailscale for private access (SSH + API)
+# - Hetzner firewall (SSH + Tailscale UDP for bootstrap, optional 80/443)
+# - Tailscale for private access (API only reachable via tailnet)
 # - Optional public HTTPS via domain + cert-manager
 #
-# The Nemo module gets the Tailscale IP, not the public IP.
-# Engineers reach the API at http://nemo:8080 (Tailscale MagicDNS).
+# Bootstrap flow:
+# 1. Hetzner creates server with cloud-init (installs Tailscale, hardens SSH)
+# 2. Terraform SSHes to public IP to wait for Tailscale and get the tailnet IP
+# 3. Nemo module provisions over the Tailscale IP (not public)
+# 4. After apply, API is only reachable via tailnet: http://nemo:8080
+#
+# SSH is open in the firewall for bootstrap provisioning. After Tailscale is up,
+# engineers should use `ssh root@nemo` (Tailscale SSH) instead of the public IP.
 #
 # This example uses Tailscale. If you use a different VPN or want public
 # access, pass the appropriate IP to server_ip and manage firewall rules
@@ -50,10 +56,22 @@ provider "helm" {
   }
 }
 
-# --- Hetzner firewall: no public SSH, no public 8080 ---
+# --- Hetzner firewall ---
+# SSH open for terraform bootstrap provisioning.
+# No public 8080 — API only reachable via Tailscale.
+# 80/443 only when domain is set (public HTTPS).
 
 resource "hcloud_firewall" "nemo" {
   name = "nemo-${var.server_location}"
+
+  # SSH (needed for terraform provisioning over public IP during bootstrap)
+  rule {
+    description = "SSH (bootstrap)"
+    direction   = "in"
+    protocol    = "tcp"
+    port        = "22"
+    source_ips  = ["0.0.0.0/0", "::/0"]
+  }
 
   # HTTP (only if domain is set for public HTTPS)
   dynamic "rule" {
@@ -141,7 +159,7 @@ resource "hcloud_server" "nemo" {
   })
 }
 
-# --- Wait for Tailscale to come up, then get the Tailscale IP ---
+# --- Wait for Tailscale, get IPv4 tailnet address ---
 
 resource "null_resource" "tailscale_wait" {
   depends_on = [hcloud_server.nemo]
@@ -156,8 +174,12 @@ resource "null_resource" "tailscale_wait" {
   provisioner "remote-exec" {
     inline = [
       "cloud-init status --wait || true",
+      # Wait for Tailscale to get an IP (up to 120s)
       "TRIES=0; until tailscale status --json 2>/dev/null | jq -e '.Self.TailscaleIPs[0]' >/dev/null 2>&1 || [ $TRIES -ge 60 ]; do sleep 2; TRIES=$((TRIES+1)); done",
-      "tailscale status --json | jq -r '.Self.TailscaleIPs[0]' > /tmp/tailscale_ip",
+      # Extract IPv4 specifically (filter out IPv6)
+      "tailscale status --json | jq -r '[.Self.TailscaleIPs[] | select(test(\"^[0-9]+\\\\.\"))] | .[0] // empty' > /tmp/tailscale_ip",
+      # Validate we got an IP
+      "IP=$(cat /tmp/tailscale_ip); [ -n \"$IP\" ] && echo \"Tailscale IPv4: $IP\" || { echo 'ERROR: Tailscale did not get an IPv4 address'; exit 1; }",
     ]
   }
 }
@@ -171,6 +193,10 @@ data "external" "tailscale_ip" {
       -i ${pathexpand(var.ssh_private_key_path)} \
       root@${hcloud_server.nemo.ipv4_address} \
       'cat /tmp/tailscale_ip' 2>/dev/null)
+    if [ -z "$IP" ] || [ "$IP" = "null" ]; then
+      echo '{"error": "Tailscale IP not available"}' >&2
+      exit 1
+    fi
     echo "{\"ip\": \"$IP\"}"
   EOT
   ]
@@ -208,7 +234,7 @@ module "nemo" {
 # --- Outputs ---
 
 output "public_ip" {
-  description = "Public IP (HTTP/HTTPS only — SSH and API via Tailscale)"
+  description = "Public IP (HTTP/HTTPS only — API and daily SSH via Tailscale)"
   value       = hcloud_server.nemo.ipv4_address
 }
 
@@ -223,7 +249,7 @@ output "nemo_server_url" {
 }
 
 output "ssh_command" {
-  description = "SSH into the server via Tailscale"
+  description = "SSH into the server via Tailscale MagicDNS"
   value       = "ssh root@nemo"
 }
 

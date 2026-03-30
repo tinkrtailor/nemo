@@ -4,14 +4,21 @@ Provisions a Hetzner VPS with hardened networking and installs Nemo via the reus
 
 ## Networking model
 
-- **SSH**: Tailscale only. Not exposed publicly.
-- **API (8080)**: Tailscale only. Engineers reach it at `http://nemo:8080` (MagicDNS) or `http://100.x.x.x:8080`.
+- **SSH**: Open in firewall for terraform bootstrap. After setup, use Tailscale SSH (`ssh root@nemo`).
+- **API (8080)**: Not exposed publicly. Engineers reach it at `http://nemo:8080` (MagicDNS) or `http://100.x.x.x:8080`.
 - **HTTP/HTTPS (80/443)**: Public, only when `domain` is set. Traefik serves HTTPS with Let's Encrypt.
 - **Tailscale UDP (41641)**: Public, required for WireGuard direct connections.
 
+## Bootstrap flow
+
+1. Hetzner creates the server with cloud-init (installs Tailscale, hardens SSH)
+2. Terraform SSHes to the public IP to wait for Tailscale and capture the tailnet IPv4
+3. The Nemo module provisions over the Tailscale IP (k3s, postgres, control plane)
+4. After apply, the API is only reachable via the tailnet
+
 ## Hardening
 
-- Hetzner firewall blocks all inbound except 80/443 (if domain) + Tailscale 41641
+- Hetzner firewall: no public 8080 (API), SSH open for bootstrap only
 - fail2ban (SSH brute-force protection)
 - unattended-upgrades (automatic security patches)
 - Password auth disabled (key-only SSH + Tailscale SSH)
@@ -19,8 +26,8 @@ Provisions a Hetzner VPS with hardened networking and installs Nemo via the reus
 ## Prerequisites
 
 1. [Hetzner Cloud account](https://www.hetzner.com/cloud)
-2. [Tailscale account](https://tailscale.com) with an [auth key](https://login.tailscale.com/admin/settings/keys) (reusable, ephemeral recommended)
-3. Tailscale installed on your local machine (to reach the server)
+2. [Tailscale account](https://tailscale.com) with an [auth key](https://login.tailscale.com/admin/settings/keys) (ephemeral recommended)
+3. Tailscale installed on your local machine (to reach the server after bootstrap)
 
 ## Usage
 

@@ -9,7 +9,7 @@ variable "hetzner_api_token" {
 }
 
 variable "tailscale_auth_key" {
-  description = "Tailscale auth key (reusable, ephemeral recommended). Generate at https://login.tailscale.com/admin/settings/keys"
+  description = "Tailscale auth key (ephemeral, single-use recommended). Generate at https://login.tailscale.com/admin/settings/keys"
   type        = string
   sensitive   = true
 }
