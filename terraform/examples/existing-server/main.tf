@@ -61,3 +61,11 @@ output "nemo_api_key" {
   value     = module.nemo.api_key
   sensitive = true
 }
+
+output "nemo_deploy_key_public" {
+  value = module.nemo.deploy_key_public
+}
+
+output "nemo_post_apply_instructions" {
+  value = module.nemo.post_apply_instructions
+}

@@ -45,8 +45,9 @@ variable "git_host_token" {
 }
 
 variable "repo_ssh_private_key" {
-  description = "SSH private key for git repo access (used by repo-init and sidecar). PEM format."
+  description = "SSH private key for git repo access. If null, the module generates an ED25519 key."
   type        = string
+  default     = null
   sensitive   = true
 }
 

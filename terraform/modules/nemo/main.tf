@@ -71,6 +71,12 @@ resource "local_sensitive_file" "ssh_key" {
   file_permission = "0600"
 }
 
+# Generate deploy key if not provided
+resource "tls_private_key" "deploy_key" {
+  count     = var.repo_ssh_private_key == null ? 1 : 0
+  algorithm = "ED25519"
+}
+
 # Generate random passwords
 resource "random_password" "postgres" {
   length  = 32
@@ -83,9 +89,11 @@ resource "random_password" "api_key" {
 }
 
 locals {
-  postgres_password = var.postgres_password != "" ? var.postgres_password : random_password.postgres.result
-  kubeconfig_path   = "${path.module}/.state/kubeconfig.yaml"
-  ssh_key_file      = "${path.module}/.state/ssh_key"
-  has_domain        = var.domain != null && var.domain != ""
-  server_url        = local.has_domain ? "https://${var.domain}" : "http://${var.server_ip}"
+  deploy_private_key = var.repo_ssh_private_key != null ? var.repo_ssh_private_key : tls_private_key.deploy_key[0].private_key_openssh
+  deploy_public_key  = var.repo_ssh_private_key != null ? null : tls_private_key.deploy_key[0].public_key_openssh
+  postgres_password  = var.postgres_password != "" ? var.postgres_password : random_password.postgres.result
+  kubeconfig_path    = "${path.module}/.state/kubeconfig.yaml"
+  ssh_key_file       = "${path.module}/.state/ssh_key"
+  has_domain         = var.domain != null && var.domain != ""
+  server_url         = local.has_domain ? "https://${var.domain}" : "http://${var.server_ip}:8080"
 }

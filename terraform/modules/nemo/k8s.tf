@@ -146,7 +146,7 @@ resource "kubernetes_secret" "repo_ssh_key" {
     name      = "nemo-repo-ssh-key"
     namespace = "nemo-system"
   }
-  data = { id_ed25519 = var.repo_ssh_private_key }
+  data = { id_ed25519 = local.deploy_private_key }
 }
 
 resource "kubernetes_secret" "registry_creds" {
@@ -492,25 +492,21 @@ resource "kubernetes_manifest" "api_certificate" {
   }
 }
 
-# HTTP entrypoint without domain: route all traffic on port 80 to API server
-resource "kubernetes_manifest" "api_ingress_http_ip" {
+# IP-only mode: expose API server directly on port 8080 via LoadBalancer (k3s Klipper LB)
+resource "kubernetes_service" "api_server_lb" {
   count      = local.has_domain ? 0 : 1
   depends_on = [kubernetes_namespace.system]
 
-  manifest = {
-    apiVersion = "traefik.io/v1alpha1"
-    kind       = "IngressRoute"
-    metadata = {
-      name      = "nemo-api-http-ip"
-      namespace = "nemo-system"
-    }
-    spec = {
-      entryPoints = ["web"]
-      routes = [{
-        match    = "PathPrefix(`/`) && !Path(`/health`)"
-        kind     = "Rule"
-        services = [{ name = "nemo-api-server", port = 8080 }]
-      }]
+  metadata {
+    name      = "nemo-api-server-lb"
+    namespace = "nemo-system"
+  }
+  spec {
+    type     = "LoadBalancer"
+    selector = { app = "nemo-api-server" }
+    port {
+      port        = 8080
+      target_port = 8080
     }
   }
 }

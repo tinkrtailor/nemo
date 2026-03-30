@@ -2,41 +2,35 @@
 
 Nemo ships as a reusable Terraform module that installs on any Linux server with SSH access. You provision the server (Hetzner, AWS, DigitalOcean, bare metal) — the module handles k3s, Postgres, and the control plane.
 
-## Quick start (module)
+## Quick start (minimal)
+
+Four required variables. Everything else has sane defaults.
 
 ```hcl
 module "nemo" {
   source = "github.com/tinkrtailor/nemo//terraform/modules/nemo"
 
-  # Required: give me a server, I'll install nemo on it
-  server_ip       = "203.0.113.10"          # or hcloud_server.x.ipv4_address, aws_instance.x.public_ip, etc.
+  server_ip       = "203.0.113.10"
   ssh_private_key = file("~/.ssh/id_ed25519")
-  ssh_user        = "root"
-
-  # Required: repo + credentials
-  git_repo_url         = "git@github.com:me/myproject.git"
-  git_host_token       = var.github_pat
-  repo_ssh_private_key = var.deploy_key
-
-  # Optional: domain + TLS (skip for IP-only)
-  domain     = "nemo.mydomain.com"   # or null for http://IP
-  acme_email = "me@mydomain.com"     # required if domain is set
-
-  # Optional: images (defaults to latest public GHCR)
-  control_plane_image = "ghcr.io/tinkrtailor/nemo-control-plane:0.1.0"
-  agent_base_image    = "ghcr.io/tinkrtailor/nemo-agent-base:0.1.0"
-  sidecar_image       = "ghcr.io/tinkrtailor/nemo-sidecar:0.1.0"
+  git_repo_url    = "git@github.com:me/myproject.git"
+  git_host_token  = var.github_pat
 }
 
 output "nemo_server_url" {
-  value = module.nemo.server_url  # http://IP or https://domain
+  value = module.nemo.server_url  # http://IP:8080
 }
 
 output "nemo_api_key" {
   value     = module.nemo.api_key
   sensitive = true
 }
+
+output "nemo_deploy_key_public" {
+  value = module.nemo.deploy_key_public  # add to GitHub deploy keys
+}
 ```
+
+The module auto-generates a deploy key. After `terraform apply`, add the public key to your repo's deploy keys (with write access), then you're done.
 
 **Important:** The module needs `kubernetes` and `helm` providers configured in the caller. Point them at the kubeconfig the module generates:
 
@@ -52,6 +46,35 @@ provider "helm" {
 }
 ```
 
+## Full example (all options)
+
+```hcl
+module "nemo" {
+  source = "github.com/tinkrtailor/nemo//terraform/modules/nemo"
+
+  # Required: give me a server, I'll install nemo on it
+  server_ip       = hcloud_server.x.ipv4_address  # or aws_instance, digitalocean_droplet, etc.
+  ssh_private_key = file("~/.ssh/id_ed25519")
+  ssh_user        = "root"
+
+  # Required: repo + credentials
+  git_repo_url   = "git@github.com:me/myproject.git"
+  git_host_token = var.github_pat
+
+  # Optional: deploy key (auto-generated ED25519 if null)
+  repo_ssh_private_key = null
+
+  # Optional: domain + TLS (skip for IP-only)
+  domain     = "nemo.mydomain.com"   # or null for http://IP:8080
+  acme_email = "me@mydomain.com"     # required if domain is set
+
+  # Optional: images (defaults to latest public GHCR)
+  control_plane_image = "ghcr.io/tinkrtailor/nemo-control-plane:0.1.0"
+  agent_base_image    = "ghcr.io/tinkrtailor/nemo-agent-base:0.1.0"
+  sidecar_image       = "ghcr.io/tinkrtailor/nemo-sidecar:0.1.0"
+}
+```
+
 ## Module inputs
 
 | Variable | Required | Default | Description |
@@ -61,8 +84,8 @@ provider "helm" {
 | `ssh_user` | no | `root` | SSH user |
 | `git_repo_url` | yes | — | Git repo URL (SSH format) |
 | `git_host_token` | yes | — | GitHub PAT for PR creation/merge |
-| `repo_ssh_private_key` | yes | — | SSH deploy key (PEM format) |
-| `domain` | no | `null` | Domain for TLS. null = HTTP on raw IP |
+| `repo_ssh_private_key` | no | auto-generated | SSH deploy key. If null, generates ED25519 |
+| `domain` | no | `null` | Domain for TLS. null = HTTP on raw IP:8080 |
 | `acme_email` | no | `null` | Let's Encrypt email. Required if domain is set |
 | `control_plane_image` | no | `ghcr.io/tinkrtailor/nemo-control-plane:0.1.0` | Control plane image |
 | `agent_base_image` | no | `ghcr.io/tinkrtailor/nemo-agent-base:0.1.0` | Agent base image |
@@ -73,10 +96,14 @@ provider "helm" {
 
 ## Module outputs
 
+All outputs are machine-readable via `terraform output -json`.
+
 | Output | Description |
 |--------|-------------|
-| `server_url` | `http://IP` or `https://domain` |
+| `server_url` | `http://IP:8080` or `https://domain` |
 | `api_key` | Generated API key for CLI auth (sensitive) |
+| `deploy_key_public` | Public key to add as repo deploy key. Null if you provided your own. |
+| `post_apply_instructions` | Human-readable next steps |
 | `kubeconfig_path` | Path to the kubeconfig file |
 | `namespace_system` | `nemo-system` |
 | `namespace_jobs` | `nemo-jobs` |
@@ -102,12 +129,15 @@ See `terraform/examples/existing-server/` — bring your own IP.
 ```bash
 cd terraform/examples/existing-server
 terraform init
-terraform apply -var="server_ip=203.0.113.10" -var="git_repo_url=git@github.com:me/repo.git" ...
+terraform apply \
+  -var="server_ip=203.0.113.10" \
+  -var="git_repo_url=git@github.com:me/repo.git" \
+  -var="git_host_token=ghp_..."
 ```
 
 ### IP-only (no domain)
 
-Set `domain = null` (the default). The control plane runs on HTTP at `http://IP`. No cert-manager, no TLS.
+Set `domain = null` (the default). The control plane runs on HTTP at `http://IP:8080`. No cert-manager, no TLS.
 
 ### With domain + TLS
 
@@ -119,7 +149,6 @@ Set `domain = "nemo.mydomain.com"` and `acme_email = "you@example.com"`. The mod
 - [Docker](https://docs.docker.com/get-docker/) with buildx (for building images)
 - A Linux server with SSH access (Ubuntu 22.04 recommended)
 - GitHub PAT with repo + PR permissions
-- SSH deploy key for your repo
 - Optional: [1Password CLI](https://developer.1password.com/docs/cli) for secrets
 
 ## Build and push images

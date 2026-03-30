@@ -383,3 +383,37 @@ resource "kubernetes_deployment" "loop_engine" {
     }
   }
 }
+
+# --- Health check: wait for API server to be ready ---
+# terraform apply only succeeds when Nemo is actually serving, not just scheduled.
+
+resource "null_resource" "health_check" {
+  depends_on = [
+    kubernetes_deployment.api_server,
+    kubernetes_service.api_server,
+    kubernetes_deployment.loop_engine,
+  ]
+
+  triggers = {
+    api_server_image = var.control_plane_image
+  }
+
+  connection {
+    type        = "ssh"
+    host        = var.server_ip
+    user        = var.ssh_user
+    private_key = var.ssh_private_key
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "echo 'Waiting for Nemo API server to be ready...'",
+      "kubectl -n nemo-system rollout status deployment/nemo-api-server --timeout=180s",
+      "kubectl -n nemo-system rollout status deployment/nemo-loop-engine --timeout=180s",
+      "SVC_IP=$(kubectl -n nemo-system get svc nemo-api-server -o jsonpath='{.spec.clusterIP}')",
+      "TRIES=0; until curl -sf http://$SVC_IP:8080/health >/dev/null 2>&1 || [ $TRIES -ge 60 ]; do sleep 2; TRIES=$((TRIES+1)); done",
+      "curl -sf http://$SVC_IP:8080/health || { echo 'ERROR: API server health check failed after 120s'; exit 1; }",
+      "echo 'Nemo is ready.'",
+    ]
+  }
+}
