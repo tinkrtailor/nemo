@@ -407,8 +407,8 @@ resource "null_resource" "health_check" {
   provisioner "remote-exec" {
     inline = [
       "echo 'Waiting for Nemo API server to be ready...'",
-      "kubectl -n nemo-system rollout status deployment/nemo-api-server --timeout=180s",
-      "kubectl -n nemo-system rollout status deployment/nemo-loop-engine --timeout=180s",
+      "kubectl -n nemo-system rollout status deployment/nemo-api-server --timeout=600s",
+      "kubectl -n nemo-system rollout status deployment/nemo-loop-engine --timeout=600s",
       "SVC_IP=$(kubectl -n nemo-system get svc nemo-api-server -o jsonpath='{.spec.clusterIP}')",
       "TRIES=0; until curl -sf http://$SVC_IP:8080/health >/dev/null 2>&1 || [ $TRIES -ge 60 ]; do sleep 2; TRIES=$((TRIES+1)); done",
       "curl -sf http://$SVC_IP:8080/health || { echo 'ERROR: API server health check failed after 120s'; exit 1; }",

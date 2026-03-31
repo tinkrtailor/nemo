@@ -134,7 +134,7 @@ resource "null_resource" "k8s_postgres" {
   provisioner "remote-exec" {
     inline = [
       "echo '${base64encode(local.postgres_yaml)}' | base64 -d | kubectl apply -f -",
-      "kubectl -n nemo-system rollout status deployment/nemo-postgres --timeout=120s",
+      "kubectl -n nemo-system rollout status deployment/nemo-postgres --timeout=300s",
     ]
   }
 }

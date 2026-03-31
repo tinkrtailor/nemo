@@ -429,6 +429,10 @@ resource "null_resource" "k8s_secrets" {
     private_key = var.ssh_private_key
   }
 
+  # NOTE: Secrets pass through a remote-exec inline command as base64.
+  # Terraform's SSH provisioner writes inline commands to a temp script that
+  # is removed after execution. On this module's single-tenant k3s node,
+  # root (the SSH user) already has full access to all k8s secrets via kubectl.
   provisioner "remote-exec" {
     inline = [
       "echo '${base64encode(local.secrets_yaml)}' | base64 -d | kubectl apply -f -",
