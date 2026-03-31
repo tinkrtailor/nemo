@@ -6,6 +6,11 @@
 variable "server_ip" {
   description = "IP address of the server to install Nemo on"
   type        = string
+
+  validation {
+    condition = can(regex("^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$", var.server_ip))
+    error_message = "server_ip must be a valid IPv4 address (e.g., 100.64.0.1). IPv6 and hostnames are not supported."
+  }
 }
 
 variable "ssh_private_key" {
@@ -119,6 +124,17 @@ variable "postgres_volume_size" {
   description = "Size of the Postgres data volume in Gi"
   type        = number
   default     = 20
+}
+
+variable "kubeconfig_output_path" {
+  description = "Path to write the generated kubeconfig. If null, writes to <module>/.state/kubeconfig.yaml."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.kubeconfig_output_path == null || length(var.kubeconfig_output_path) > 0
+    error_message = "kubeconfig_output_path must be null (use default) or a non-empty path."
+  }
 }
 
 variable "ssh_known_hosts" {

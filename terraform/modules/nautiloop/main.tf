@@ -17,11 +17,13 @@ resource "null_resource" "k3s_install" {
   provisioner "remote-exec" {
     inline = [
       "cloud-init status --wait 2>/dev/null || true",
-      "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${var.k3s_version} sh -s - server",
+      "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${var.k3s_version} sh -s - server --tls-san ${var.server_ip}",
       "until kubectl get nodes 2>/dev/null | grep -q ' Ready'; do sleep 2; done",
       # Configure container log rotation
       "mkdir -p /etc/rancher/k3s",
-      "cat > /etc/rancher/k3s/config.yaml <<'EOF'",
+      "cat > /etc/rancher/k3s/config.yaml <<EOF",
+      "tls-san:",
+      "  - ${var.server_ip}",
       "kubelet-arg:",
       "  - container-log-max-size=50Mi",
       "  - container-log-max-files=5",
@@ -44,18 +46,23 @@ resource "null_resource" "kubeconfig" {
   depends_on = [null_resource.k3s_install]
 
   triggers = {
-    server_ip = var.server_ip
+    server_ip       = var.server_ip
+    kubeconfig_path = local.kubeconfig_path
   }
 
   provisioner "local-exec" {
     command = <<-EOT
-      mkdir -p ${path.module}/.state
+      set -eo pipefail
+      KUBECONFIG_OUT="${local.kubeconfig_path}"
+      mkdir -p "$(dirname "$KUBECONFIG_OUT")"
       ssh -o StrictHostKeyChecking=accept-new \
         -o "UserKnownHostsFile=/dev/null" \
         -i "$SSH_KEY_FILE" \
         ${var.ssh_user}@${var.server_ip} \
         'cat /etc/rancher/k3s/k3s.yaml' | \
-        sed "s/127.0.0.1/${var.server_ip}/" > ${local.kubeconfig_path}
+        sed '/server:/s/127.0.0.1/${var.server_ip}/' > "$KUBECONFIG_OUT.tmp"
+      chmod 600 "$KUBECONFIG_OUT.tmp"
+      mv "$KUBECONFIG_OUT.tmp" "$KUBECONFIG_OUT"
     EOT
 
     environment = {
@@ -92,7 +99,7 @@ locals {
   deploy_private_key = var.repo_ssh_private_key != null ? var.repo_ssh_private_key : tls_private_key.deploy_key[0].private_key_openssh
   deploy_public_key  = var.repo_ssh_private_key != null ? null : tls_private_key.deploy_key[0].public_key_openssh
   postgres_password  = var.postgres_password != "" ? var.postgres_password : random_password.postgres.result
-  kubeconfig_path    = "${path.module}/.state/kubeconfig.yaml"
+  kubeconfig_path    = var.kubeconfig_output_path != null ? var.kubeconfig_output_path : "${path.module}/.state/kubeconfig.yaml"
   ssh_key_file       = "${path.module}/.state/ssh_key"
   has_domain         = var.domain != null && var.domain != ""
   server_url         = local.has_domain ? "https://${var.domain}" : "http://${var.server_ip}:8080"
@@ -103,7 +110,7 @@ locals {
     Next steps:
     1. Add this deploy key to your repo (Settings > Deploy keys, enable write access):
        ${local.deploy_public_key != null ? trimspace(local.deploy_public_key) : ""}
-    2. Run terraform apply again to sync the repo (the repo-init job will fetch with the new key)
+    2. Re-run terraform apply to sync the repo (the repo-init job will fetch with the new key)
     3. Install the CLI: cargo install --git https://github.com/tinkrtailor/nemo nemo-cli
     4. Configure: nemo init && nemo auth
   EOT

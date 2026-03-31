@@ -21,12 +21,12 @@ terraform {
 }
 
 provider "kubernetes" {
-  config_path = "${path.module}/../../modules/nautiloop/.state/kubeconfig.yaml"
+  config_path = module.nautiloop.kubeconfig_path
 }
 
 provider "helm" {
   kubernetes {
-    config_path = "${path.module}/../../modules/nautiloop/.state/kubeconfig.yaml"
+    config_path = module.nautiloop.kubeconfig_path
   }
 }
 
