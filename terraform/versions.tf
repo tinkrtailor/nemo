@@ -26,11 +26,11 @@ provider "hcloud" {
 # evaluates the provider when it creates k8s resources (which all
 # depend_on the kubeconfig null_resource in the module).
 provider "kubernetes" {
-  config_path = "${path.module}/modules/nautiloop/.state/kubeconfig.yaml"
+  config_path = module.nautiloop.kubeconfig_path
 }
 
 provider "helm" {
   kubernetes {
-    config_path = "${path.module}/modules/nautiloop/.state/kubeconfig.yaml"
+    config_path = module.nautiloop.kubeconfig_path
   }
 }

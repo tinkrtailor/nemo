@@ -17,11 +17,13 @@ resource "null_resource" "k3s_install" {
   provisioner "remote-exec" {
     inline = [
       "cloud-init status --wait 2>/dev/null || true",
-      "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${var.k3s_version} sh -s - server",
+      "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${var.k3s_version} sh -s - server --tls-san ${var.server_ip}",
       "until kubectl get nodes 2>/dev/null | grep -q ' Ready'; do sleep 2; done",
       # Configure container log rotation
       "mkdir -p /etc/rancher/k3s",
-      "cat > /etc/rancher/k3s/config.yaml <<'EOF'",
+      "cat > /etc/rancher/k3s/config.yaml <<EOF",
+      "tls-san:",
+      "  - ${var.server_ip}",
       "kubelet-arg:",
       "  - container-log-max-size=50Mi",
       "  - container-log-max-files=5",
@@ -92,7 +94,7 @@ locals {
   deploy_private_key = var.repo_ssh_private_key != null ? var.repo_ssh_private_key : tls_private_key.deploy_key[0].private_key_openssh
   deploy_public_key  = var.repo_ssh_private_key != null ? null : tls_private_key.deploy_key[0].public_key_openssh
   postgres_password  = var.postgres_password != "" ? var.postgres_password : random_password.postgres.result
-  kubeconfig_path    = "${path.module}/.state/kubeconfig.yaml"
+  kubeconfig_path    = var.kubeconfig_output_path != null ? var.kubeconfig_output_path : "${path.module}/.state/kubeconfig.yaml"
   ssh_key_file       = "${path.module}/.state/ssh_key"
   has_domain         = var.domain != null && var.domain != ""
   server_url         = local.has_domain ? "https://${var.domain}" : "http://${var.server_ip}:8080"

@@ -121,6 +121,12 @@ variable "postgres_volume_size" {
   default     = 20
 }
 
+variable "kubeconfig_output_path" {
+  description = "Path to write the generated kubeconfig. If null, writes to <module>/.state/kubeconfig.yaml."
+  type        = string
+  default     = null
+}
+
 variable "ssh_known_hosts" {
   description = "Known hosts entries for git remote (from ssh-keyscan). If empty, ssh-keyscan runs automatically."
   type        = string
