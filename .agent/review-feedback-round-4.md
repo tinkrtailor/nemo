@@ -1,6 +1,0 @@
-Read all Rust source in `control-plane/src` and `cli/src`. Not converged: 4 real production bugs.
-
-- High - `control-plane/src/api/handlers.rs:376`, `control-plane/src/loop_engine/driver.rs:810` - `force_resume` is set on forced resume but never cleared after success. One acknowledged force-resume permanently arms later `paused_force_deviated` resumptions, bypassing the explicit data-loss acknowledgement gate.
-- Medium - `control-plane/src/api/handlers.rs:471` - `credential_ref` validation does not enforce Kubernetes Secret naming rules. Invalid names like uppercase, `/`, `:` or leading/trailing `-` are accepted, stored, and then fail later when the job/sidecar tries to use that Secret.
-- Medium - `control-plane/src/types/mod.rs:366`, `control-plane/src/git/mod.rs:211`, `control-plane/src/git/mod.rs:449` - branch names are deterministic across reruns, but stale remote branches are only locally reset in the “no PR / PR lookup failed” path. `create_pr()` then does a normal `git push -u`, so a non-fast-forward remote blocks PR creation and wedges convergence on restarted loops.
-- High - `cli/src/main.rs:155` - `--insecure` localhost protection uses substring matching instead of URL host parsing. A remote host like `https://localhost.attacker.tld` passes the check, so the CLI disables TLS verification for a non-local server. That's a real MITM/security bug.

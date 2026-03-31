@@ -108,19 +108,19 @@ test = "cd web && npm test"
 # ~/.nemo/config.toml (per engineer)
 server_url = "http://nautiloop:8080"   # Tailscale hostname or IP
 api_key = "your-api-key"
-
-[identity]
+engineer = "alice"
 name = "Alice"
 email = "alice@example.com"
 ```
 
 ## Security model
 
-Agent containers get open internet but **no secrets**. Model API auth and git push go through a localhost sidecar that injects credentials at the network level. Secrets never touch the agent filesystem.
+Agent containers get open internet but **no direct access to secrets**. Model API auth and git push go through a localhost sidecar that injects credentials at the network level.
 
-- **Auth sidecar** proxies all model API calls and git pushes
+- **Auth sidecar** proxies model API calls and git pushes, injecting credentials without exposing them as env vars or files
 - **Read-only reviewer** mounts the worktree read-only in review stage
-- **Per-engineer credentials** scoped to each engineer's jobs
+- **Shared API key** (V1): all authenticated users have full access. Designed for single-tenant / small-team deployments. Per-engineer RBAC is planned for V2.
+- **Session data**: implement/revise jobs mount Claude session data (`.claude/`) into the agent container for session continuity. This is internal tool state, not user secrets.
 - **Egress logging** on all outbound traffic from agent pods
 - **Tailscale recommended** for private API access (no public endpoints)
 
