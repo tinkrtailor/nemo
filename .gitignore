@@ -40,4 +40,4 @@ terraform/**/*.tfstate*
 terraform/kubeconfig.yaml
 terraform/*.tfvars
 terraform/**/*.tfvars
-terraform/modules/nemo/.state/
+terraform/modules/nautiloop/.state/

@@ -1,4 +1,4 @@
-# Example: Install Nemo on an existing Linux server (any provider)
+# Example: Install Nautiloop on an existing Linux server (any provider)
 #
 # Usage:
 #   cd terraform/examples/existing-server
@@ -21,17 +21,17 @@ terraform {
 }
 
 provider "kubernetes" {
-  config_path = "${path.module}/../../modules/nemo/.state/kubeconfig.yaml"
+  config_path = module.nautiloop.kubeconfig_path
 }
 
 provider "helm" {
   kubernetes {
-    config_path = "${path.module}/../../modules/nemo/.state/kubeconfig.yaml"
+    config_path = module.nautiloop.kubeconfig_path
   }
 }
 
-module "nemo" {
-  source = "../../modules/nemo"
+module "nautiloop" {
+  source = "../../modules/nautiloop"
 
   # Required: give me a server, I'll install nemo on it
   server_ip       = var.server_ip
@@ -54,18 +54,18 @@ module "nemo" {
 }
 
 output "nemo_server_url" {
-  value = module.nemo.server_url
+  value = module.nautiloop.server_url
 }
 
 output "nemo_api_key" {
-  value     = module.nemo.api_key
+  value     = module.nautiloop.api_key
   sensitive = true
 }
 
 output "nemo_deploy_key_public" {
-  value = module.nemo.deploy_key_public
+  value = module.nautiloop.deploy_key_public
 }
 
 output "nemo_post_apply_instructions" {
-  value = module.nemo.post_apply_instructions
+  value = module.nautiloop.post_apply_instructions
 }

@@ -1,10 +1,8 @@
 # Nemo
 
-**Push a spec, get a clean PR.** Nemo is a convergent loop that pits AI models against each other until your code is right.
+**Push a spec, get a clean PR.** Nemo runs a convergent loop where AI models review each other's work until the code is right.
 
-Claude implements. OpenAI reviews. If the reviewer finds issues, the implementer fixes them. The loop runs until the reviewer finds nothing wrong. Then you get a PR.
-
-Different models have different blind spots. Claude never reviews its own work.
+Claude implements. OpenAI reviews. Findings go back to Claude. Claude fixes. OpenAI reviews again. Repeat until clean. Different models have different blind spots. Claude never reviews its own work.
 
 ```bash
 nemo start spec.md       # implement + PR
@@ -21,12 +19,14 @@ Round 3: Claude fixes       -->  tests run  -->  OpenAI reviews  -->  clean
 --> PR created
 ```
 
-The exit condition is quality, not iteration count. If it takes 2 rounds, great. If it takes 12, that's fine too. The reviewer decides when the code is ready.
+The exit condition is quality, not iteration count.
 
 ## How it works
 
+`nemo` is the CLI. A **nautiloop** is the server environment where convergent loops run. You provision a nautiloop on any Linux server using the Terraform module, then `nemo` talks to it.
+
 ```
-Your machine                         Your cluster (k3s)
+Your machine                         Nautiloop (k3s server)
 +----------+                         +-----------------------------+
 | nemo CLI | -------- HTTPS -------> | API Server                  |
 |          |                         | Loop Engine                 |
@@ -39,27 +39,39 @@ Your machine                         Your cluster (k3s)
                                      +-----------------------------+
 ```
 
-Your agents keep working when you close your laptop. The control plane runs on a VPS, dispatches agent jobs as K8s pods, and watches them until convergence.
+Your agents keep working when you close your laptop.
 
-## Quick start
+## Deploy a nautiloop
+
+The nautiloop Terraform module installs on any Linux server with SSH access. You provision the server, the module handles k3s, Postgres, and the control plane.
+
+```hcl
+module "nautiloop" {
+  source = "github.com/tinkrtailor/nemo//terraform/modules/nautiloop"
+
+  server_ip       = "100.64.0.1"                          # any server with SSH
+  ssh_private_key = file("~/.ssh/id_ed25519")
+  git_repo_url    = "git@github.com:you/your-repo.git"
+  git_host_token  = var.github_pat
+}
+```
+
+Four required variables. `terraform apply`. Done.
+
+The module auto-generates a deploy key (or accepts yours). After apply, add the public key to your repo's deploy keys with write access.
+
+See [docs/deploy.md](docs/deploy.md) for the full guide, examples, and all options.
+
+## Set up your repo
 
 ```bash
-# Deploy (once)
-./build-images.sh --tag 0.1.0
-cd terraform && op run --env-file=.env.1password -- terraform apply
-
-# Set up your repo (once)
-cd ~/your-repo
 nemo init                    # generates nemo.toml
 nemo auth                    # pushes Claude + OpenAI + SSH credentials
 
-# Use it (daily)
 nemo start spec.md           # PR appears when it converges
 nemo status                  # watch progress
 nemo logs <id>               # stream agent output
 ```
-
-See [docs/deploy.md](docs/deploy.md) for full deployment guide.
 
 ## Three verbs
 
@@ -94,7 +106,7 @@ test = "cd web && npm test"
 
 ```toml
 # ~/.nemo/config.toml (per engineer)
-server_url = "https://nemo.yourdomain.com"
+server_url = "http://nautiloop:8080"   # Tailscale hostname or IP
 api_key = "your-api-key"
 
 [identity]
@@ -110,14 +122,15 @@ Agent containers get open internet but **no secrets**. Model API auth and git pu
 - **Read-only reviewer** mounts the worktree read-only in review stage
 - **Per-engineer credentials** scoped to each engineer's jobs
 - **Egress logging** on all outbound traffic from agent pods
+- **Tailscale recommended** for private API access (no public endpoints)
 
 ## Architecture
 
-- **Control plane** (Rust): API server (axum) + loop engine, two k3s Deployments
-- **CLI** (Rust): `nemo` binary on your machine
-- **Agent jobs** (K8s pods): each stage runs as a separate pod
-- **Auth sidecar** (Go): credential injection + egress proxy
-- **Terraform**: provisions Hetzner VPS, k3s, Postgres, Traefik, cert-manager
+- **`nemo`** (Rust CLI): runs on your machine, talks to the nautiloop
+- **Nautiloop** (k3s server): API server (axum) + loop engine, Postgres, Traefik
+- **Agent jobs** (K8s pods): each stage runs as a separate pod with an auth sidecar
+- **Auth sidecar** (Go): credential injection + git push proxy + egress logging
+- **Terraform module**: `terraform/modules/nautiloop/` -- installs on any Linux server
 
 ```
 control-plane/          Rust: API server + loop engine
@@ -137,7 +150,10 @@ images/
   sidecar/              Auth sidecar (Go, ~10MB static binary)
   control-plane/        Control plane image (Rust, multi-stage build)
 
-terraform/              Hetzner + k3s + Traefik + Postgres + control plane
+terraform/
+  modules/nautiloop/    Reusable module (k3s + control plane + Postgres)
+  examples/hetzner/     Reference: Hetzner VPS + Tailscale + nautiloop
+
 .nemo/prompts/          Agent prompt templates
 ```
 
@@ -157,7 +173,7 @@ Nemo was built through the exact process it automates. Three parallel implementa
 
 ## Documentation
 
-- [Deployment guide](docs/deploy.md) -- full setup with 1Password or env vars
+- [Deployment guide](docs/deploy.md) -- full setup, module reference, examples
 - [Architecture](docs/architecture.md) -- system design and component interaction
 - [Design document](docs/design.md) -- product decisions and rationale
 - [Convergence data](docs/convergence-learnings.md) -- what we learned from 81 rounds

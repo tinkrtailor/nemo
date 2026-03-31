@@ -7,8 +7,8 @@ Nemo ships as a reusable Terraform module that installs on any Linux server with
 Four required variables. Everything else has sane defaults.
 
 ```hcl
-module "nemo" {
-  source = "github.com/tinkrtailor/nemo//terraform/modules/nemo"
+module "nautiloop" {
+  source = "github.com/tinkrtailor/nemo//terraform/modules/nautiloop"
 
   server_ip       = "203.0.113.10"
   ssh_private_key = file("~/.ssh/id_ed25519")
@@ -17,16 +17,16 @@ module "nemo" {
 }
 
 output "nemo_server_url" {
-  value = module.nemo.server_url  # http://IP:8080
+  value = module.nautiloop.server_url  # http://IP:8080
 }
 
 output "nemo_api_key" {
-  value     = module.nemo.api_key
+  value     = module.nautiloop.api_key
   sensitive = true
 }
 
 output "nemo_deploy_key_public" {
-  value = module.nemo.deploy_key_public  # add to GitHub deploy keys
+  value = module.nautiloop.deploy_key_public  # add to GitHub deploy keys
 }
 ```
 
@@ -49,8 +49,8 @@ provider "helm" {
 ## Full example (all options)
 
 ```hcl
-module "nemo" {
-  source = "github.com/tinkrtailor/nemo//terraform/modules/nemo"
+module "nautiloop" {
+  source = "github.com/tinkrtailor/nemo//terraform/modules/nautiloop"
 
   # Required: give me a server, I'll install nemo on it
   server_ip       = hcloud_server.x.ipv4_address  # or aws_instance, digitalocean_droplet, etc.
@@ -114,10 +114,10 @@ All outputs are machine-readable via `terraform output -json`.
 
 See `terraform/examples/hetzner/` — hardened setup with Tailscale VPN.
 
-- SSH only via Tailscale (not exposed publicly)
-- API (8080) only via Tailscale — `http://nemo:8080` (MagicDNS)
-- Hetzner firewall blocks everything except Tailscale + optional HTTPS
-- fail2ban, unattended-upgrades, password auth disabled
+- SSH open (key-only, fail2ban protected). Day-to-day: `ssh root@nautiloop` (Tailscale)
+- API (8080) only via Tailscale — `http://nautiloop:8080` (MagicDNS)
+- Hetzner firewall: no public 8080, SSH + Tailscale UDP + optional HTTPS
+- unattended-upgrades, password auth disabled
 
 ```bash
 cd terraform/examples/hetzner
@@ -145,7 +145,7 @@ terraform apply \
 
 ### IP-only (no domain)
 
-Set `domain = null` (the default). The control plane runs on HTTP at `http://IP:8080`. With Tailscale, this is `http://nemo:8080`. No cert-manager, no TLS.
+Set `domain = null` (the default). The control plane runs on HTTP at `http://IP:8080`. With Tailscale, this is `http://nautiloop:8080`. No cert-manager, no TLS.
 
 ### With domain + TLS
 

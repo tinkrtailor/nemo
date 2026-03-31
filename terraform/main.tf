@@ -19,8 +19,8 @@ resource "hcloud_server" "nemo" {
   user_data = file("${path.module}/templates/cloud-init.yaml")
 }
 
-module "nemo" {
-  source = "./modules/nemo"
+module "nautiloop" {
+  source = "./modules/nautiloop"
 
   server_ip       = hcloud_server.nemo.ipv4_address
   ssh_private_key = file(pathexpand(var.ssh_private_key_path))

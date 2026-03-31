@@ -51,6 +51,12 @@ images/         # Dockerfiles for agent job images (base + per-monorepo extensio
 - **Subagent strategy**: Use subagents for expensive operations (search, read) to preserve main context. Limit build/test to single subagent to avoid backpressure.
 - **Capture learnings**: Document general discoveries in `.claude/learnings.md` (persists across all work). Document spec-specific findings in impl-plan.md.
 
+## Design System
+Always read DESIGN.md before making any visual or UI decisions.
+All font choices, colors, spacing, and aesthetic direction are defined there.
+Do not deviate without explicit user approval.
+In QA mode, flag any code that doesn't match DESIGN.md.
+
 ## Adding new enforced rules
 
 We use a two-layer pattern:

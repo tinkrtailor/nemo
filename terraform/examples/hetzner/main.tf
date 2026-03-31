@@ -1,4 +1,4 @@
-# Example: Hetzner VPS + Tailscale + Nemo
+# Example: Hetzner VPS + Tailscale + Nautiloop
 #
 # Provisions a Hetzner server with:
 # - Hetzner firewall (SSH + Tailscale UDP for bootstrap, optional 80/443)
@@ -8,11 +8,11 @@
 # Bootstrap flow:
 # 1. Hetzner creates server with cloud-init (installs Tailscale, hardens SSH)
 # 2. Terraform SSHes to public IP to wait for Tailscale and get the tailnet IP
-# 3. Nemo module provisions over the Tailscale IP (not public)
-# 4. After apply, API is only reachable via tailnet: http://nemo:8080
+# 3. Nautiloop module provisions over the Tailscale IP (not public)
+# 4. After apply, API is only reachable via tailnet: http://nautiloop:8080
 #
 # SSH is open in the firewall for bootstrap provisioning. After Tailscale is up,
-# engineers should use `ssh root@nemo` (Tailscale SSH) instead of the public IP.
+# engineers should use `ssh root@nautiloop` (Tailscale SSH) instead of the public IP.
 #
 # This example uses Tailscale. If you use a different VPN or want public
 # access, pass the appropriate IP to server_ip and manage firewall rules
@@ -47,12 +47,12 @@ provider "hcloud" {
 }
 
 provider "kubernetes" {
-  config_path = "${path.module}/../../modules/nemo/.state/kubeconfig.yaml"
+  config_path = module.nautiloop.kubeconfig_path
 }
 
 provider "helm" {
   kubernetes {
-    config_path = "${path.module}/../../modules/nemo/.state/kubeconfig.yaml"
+    config_path = module.nautiloop.kubeconfig_path
   }
 }
 
@@ -75,7 +75,7 @@ resource "hcloud_firewall" "nemo" {
 
   # HTTP (only if domain is set for public HTTPS)
   dynamic "rule" {
-    for_each = var.domain != null ? [1] : []
+    for_each = var.domain != null && var.domain != "" ? [1] : []
     content {
       description = "HTTP (ACME + redirect)"
       direction   = "in"
@@ -87,7 +87,7 @@ resource "hcloud_firewall" "nemo" {
 
   # HTTPS (only if domain is set)
   dynamic "rule" {
-    for_each = var.domain != null ? [1] : []
+    for_each = var.domain != null && var.domain != "" ? [1] : []
     content {
       description = "HTTPS"
       direction   = "in"
@@ -155,7 +155,7 @@ resource "hcloud_server" "nemo" {
 
   user_data = templatefile("${path.module}/templates/cloud-init.yaml", {
     tailscale_auth_key = var.tailscale_auth_key
-    hostname           = "nemo"
+    hostname           = "nautiloop"
   })
 }
 
@@ -202,10 +202,10 @@ data "external" "tailscale_ip" {
   ]
 }
 
-# --- Install Nemo on the server via Tailscale IP ---
+# --- Install Nautiloop on the server via Tailscale IP ---
 
-module "nemo" {
-  source = "../../modules/nemo"
+module "nautiloop" {
+  source = "../../modules/nautiloop"
 
   # SSH over Tailscale — not the public IP
   server_ip       = data.external.tailscale_ip.result["ip"]
@@ -245,26 +245,26 @@ output "tailscale_ip" {
 
 output "nemo_server_url" {
   description = "URL of the Nemo control plane"
-  value       = module.nemo.server_url
+  value       = module.nautiloop.server_url
 }
 
 output "ssh_command" {
   description = "SSH into the server via Tailscale MagicDNS"
-  value       = "ssh root@nemo"
+  value       = "ssh root@nautiloop"
 }
 
 output "nemo_api_key" {
   description = "API key for CLI authentication"
-  value       = module.nemo.api_key
+  value       = module.nautiloop.api_key
   sensitive   = true
 }
 
 output "nemo_deploy_key_public" {
   description = "Public key to add as a deploy key (null if you provided your own)"
-  value       = module.nemo.deploy_key_public
+  value       = module.nautiloop.deploy_key_public
 }
 
 output "nemo_post_apply_instructions" {
   description = "Post-apply next steps"
-  value       = module.nemo.post_apply_instructions
+  value       = module.nautiloop.post_apply_instructions
 }

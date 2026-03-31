@@ -1,11 +1,11 @@
 # Hetzner + Tailscale Example
 
-Provisions a Hetzner VPS with hardened networking and installs Nemo via the reusable module.
+Provisions a Hetzner VPS with hardened networking and installs Nautiloop via the reusable module.
 
 ## Networking model
 
-- **SSH**: Open in firewall for terraform bootstrap. After setup, use Tailscale SSH (`ssh root@nemo`).
-- **API (8080)**: Not exposed publicly. Engineers reach it at `http://nemo:8080` (MagicDNS) or `http://100.x.x.x:8080`.
+- **SSH (22)**: Open in firewall (needed for terraform provisioning). Day-to-day, use Tailscale SSH (`ssh root@nautiloop`). Password auth is disabled, key-only.
+- **API (8080)**: Not exposed publicly. Engineers reach it at `http://nautiloop:8080` (MagicDNS) or `http://100.x.x.x:8080`.
 - **HTTP/HTTPS (80/443)**: Public, only when `domain` is set. Traefik serves HTTPS with Let's Encrypt.
 - **Tailscale UDP (41641)**: Public, required for WireGuard direct connections.
 
@@ -13,12 +13,12 @@ Provisions a Hetzner VPS with hardened networking and installs Nemo via the reus
 
 1. Hetzner creates the server with cloud-init (installs Tailscale, hardens SSH)
 2. Terraform SSHes to the public IP to wait for Tailscale and capture the tailnet IPv4
-3. The Nemo module provisions over the Tailscale IP (k3s, postgres, control plane)
+3. The Nautiloop module provisions over the Tailscale IP (k3s, postgres, control plane)
 4. After apply, the API is only reachable via the tailnet
 
 ## Hardening
 
-- Hetzner firewall: no public 8080 (API), SSH open for bootstrap only
+- Hetzner firewall: no public 8080 (API). SSH open (key-only, fail2ban protected)
 - fail2ban (SSH brute-force protection)
 - unattended-upgrades (automatic security patches)
 - Password auth disabled (key-only SSH + Tailscale SSH)
