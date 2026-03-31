@@ -130,6 +130,11 @@ variable "kubeconfig_output_path" {
   description = "Path to write the generated kubeconfig. If null, writes to <module>/.state/kubeconfig.yaml."
   type        = string
   default     = null
+
+  validation {
+    condition     = var.kubeconfig_output_path == null || length(var.kubeconfig_output_path) > 0
+    error_message = "kubeconfig_output_path must be null (use default) or a non-empty path."
+  }
 }
 
 variable "ssh_known_hosts" {

@@ -46,11 +46,13 @@ resource "null_resource" "kubeconfig" {
   depends_on = [null_resource.k3s_install]
 
   triggers = {
-    server_ip = var.server_ip
+    server_ip       = var.server_ip
+    kubeconfig_path = local.kubeconfig_path
   }
 
   provisioner "local-exec" {
     command = <<-EOT
+      set -eo pipefail
       KUBECONFIG_OUT="${local.kubeconfig_path}"
       mkdir -p "$(dirname "$KUBECONFIG_OUT")"
       ssh -o StrictHostKeyChecking=accept-new \
