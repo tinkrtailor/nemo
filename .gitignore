@@ -22,8 +22,9 @@ node_modules/
 # Internal agent review artifacts
 .agent/
 
-# Claude local settings (contains permission grants, not shared)
+# Claude local settings and ephemeral state
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # Secrets — NEVER commit resolved env files
 .env

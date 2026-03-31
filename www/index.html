@@ -181,11 +181,11 @@
   <section id="security">
     <div class="container">
       <h2>Security model</h2>
-      <p class="security-lead text-secondary">Agent containers get open internet but <strong>no secrets</strong>. Credentials never touch the agent filesystem.</p>
+      <p class="security-lead text-secondary">Agent containers get open internet but <strong>no direct access to secrets</strong>. Credentials are injected by a localhost sidecar.</p>
       <ul class="security-list">
-        <li>Auth sidecar proxies all model API calls and git pushes</li>
+        <li>Auth sidecar proxies model API calls and git pushes, injecting credentials without exposing them as env vars or files</li>
         <li>Read-only reviewer mounts the worktree read-only in review stage</li>
-        <li>Per-engineer credentials scoped to each engineer's jobs</li>
+        <li>Shared API key auth (V1) — designed for single-tenant / small-team deployments</li>
         <li>Egress logging on all outbound traffic from agent pods</li>
         <li>Tailscale recommended for private API access</li>
       </ul>
