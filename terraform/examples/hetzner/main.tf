@@ -1,5 +1,8 @@
 # Example: Hetzner VPS + Tailscale + Nautiloop
 #
+# Single terraform apply — no kubernetes/helm provider needed.
+# The module handles k8s resource creation via SSH+kubectl on the server.
+#
 # Provisions a Hetzner server with:
 # - Hetzner firewall (SSH + Tailscale UDP for bootstrap, optional 80/443)
 # - Tailscale for private access (API only reachable via tailnet)
@@ -14,10 +17,6 @@
 # SSH is open in the firewall for bootstrap provisioning. After Tailscale is up,
 # engineers should use `ssh root@nautiloop` (Tailscale SSH) instead of the public IP.
 #
-# This example uses Tailscale. If you use a different VPN or want public
-# access, pass the appropriate IP to server_ip and manage firewall rules
-# in your own terraform.
-#
 # Usage:
 #   cd terraform/examples/hetzner
 #   terraform init
@@ -31,29 +30,11 @@ terraform {
       source  = "hetznercloud/hcloud"
       version = "~> 1.45"
     }
-    kubernetes = {
-      source  = "hashicorp/kubernetes"
-      version = "~> 2.25"
-    }
-    helm = {
-      source  = "hashicorp/helm"
-      version = "~> 2.12"
-    }
   }
 }
 
 provider "hcloud" {
   token = var.hetzner_api_token
-}
-
-provider "kubernetes" {
-  config_path = module.nautiloop.kubeconfig_path
-}
-
-provider "helm" {
-  kubernetes {
-    config_path = module.nautiloop.kubeconfig_path
-  }
 }
 
 # --- Hetzner firewall ---

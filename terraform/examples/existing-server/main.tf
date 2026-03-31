@@ -1,5 +1,8 @@
 # Example: Install Nautiloop on an existing Linux server (any provider)
 #
+# Single terraform apply — no kubernetes/helm provider needed.
+# The module handles k8s resource creation via SSH+kubectl on the server.
+#
 # Usage:
 #   cd terraform/examples/existing-server
 #   terraform init
@@ -7,27 +10,6 @@
 
 terraform {
   required_version = ">= 1.5"
-
-  required_providers {
-    kubernetes = {
-      source  = "hashicorp/kubernetes"
-      version = "~> 2.25"
-    }
-    helm = {
-      source  = "hashicorp/helm"
-      version = "~> 2.12"
-    }
-  }
-}
-
-provider "kubernetes" {
-  config_path = module.nautiloop.kubeconfig_path
-}
-
-provider "helm" {
-  kubernetes {
-    config_path = module.nautiloop.kubeconfig_path
-  }
 }
 
 module "nautiloop" {

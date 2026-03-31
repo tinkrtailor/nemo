@@ -8,7 +8,7 @@ variable "server_ip" {
   type        = string
 
   validation {
-    condition = can(regex("^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$", var.server_ip))
+    condition     = can(regex("^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$", var.server_ip))
     error_message = "server_ip must be a valid IPv4 address (e.g., 100.64.0.1). IPv6 and hostnames are not supported."
   }
 }
@@ -111,6 +111,11 @@ variable "cert_manager_version" {
   description = "cert-manager version (only used when domain is set)"
   type        = string
   default     = "v1.14.0"
+
+  validation {
+    condition     = can(regex("^v[0-9]+\\.[0-9]+\\.[0-9]+$", var.cert_manager_version))
+    error_message = "cert_manager_version must be a semver tag (e.g., v1.14.0). No extra flags or characters."
+  }
 }
 
 variable "postgres_password" {
