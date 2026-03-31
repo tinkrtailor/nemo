@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none" stroke="#1B6B5A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Nautilus spiral: golden ratio approximation -->
+  <path d="M 50 20
+    C 67 20, 80 33, 80 50
+    C 80 67, 67 80, 50 80
+    C 33 80, 22 69, 22 55
+    C 22 41, 31 32, 43 32
+    C 55 32, 63 40, 63 50
+    C 63 60, 56 66, 48 66
+    C 40 66, 35 61, 35 54
+    C 35 47, 40 43, 46 43
+    C 52 43, 55 47, 55 51
+    C 55 55, 52 58, 49 58
+    C 46 58, 44 56, 44 53
+    C 44 50, 46 48, 48 48" />
+</svg>

@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nautiloop — Push a spec, get a clean PR</title>
+  <meta name="description" content="Convergent loop engine. Claude implements, OpenAI reviews, repeat until clean. Self-hosted, open source, Apache 2.0.">
+  <meta property="og:title" content="Nautiloop — Push a spec, get a clean PR">
+  <meta property="og:description" content="Claude implements. OpenAI reviews. Repeat until clean. Different models, different blind spots.">
+  <meta property="og:url" content="https://nautiloop.dev">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="assets/nautiloop.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://api.fontshare.com">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://api.fontshare.com/v2/css?f[]=satoshi@700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Nav -->
+  <nav>
+    <div class="container">
+      <a href="/" class="nav-brand">
+        <svg viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M 50 20 C 67 20, 80 33, 80 50 C 80 67, 67 80, 50 80 C 33 80, 22 69, 22 55 C 22 41, 31 32, 43 32 C 55 32, 63 40, 63 50 C 63 60, 56 66, 48 66 C 40 66, 35 61, 35 54 C 35 47, 40 43, 46 43 C 52 43, 55 47, 55 51 C 55 55, 52 58, 49 58 C 46 58, 44 56, 44 53 C 44 50, 46 48, 48 48"/>
+        </svg>
+        Nautiloop
+      </a>
+      <ul class="nav-links">
+        <li><a href="https://github.com/tinkrtailor/nemo/blob/main/docs/deploy.md">Docs</a></li>
+        <li><a href="https://github.com/tinkrtailor/nemo">GitHub</a></li>
+        <li>
+          <a href="https://github.com/tinkrtailor/nemo" class="btn-ghost">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"/></svg>
+            Star on GitHub
+          </a>
+        </li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-text">
+        <h1>Push a spec,<br>get a clean PR.</h1>
+        <p class="hero-sub">
+          Claude implements. OpenAI reviews. Repeat until clean.<br>
+          Different models, different blind spots. Claude never reviews its own work.
+        </p>
+
+        <div class="hero-cta">
+          <span class="dollar">$</span>
+          <code>terraform apply</code>
+          <button class="copy-btn" data-copy="terraform apply" aria-label="Copy command">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="2" width="9" height="9" rx="1.5"/><path d="M2 6v7.5A1.5 1.5 0 003.5 15H11"/></svg>
+          </button>
+        </div>
+        <p class="hero-cta-sub">Four required variables. One command. <a href="#deploy">See the deploy guide</a></p>
+
+        <div class="verb-badges">
+          <span class="verb-badge">nemo harden</span>
+          <span class="verb-badge">nemo start</span>
+          <span class="verb-badge">nemo ship</span>
+        </div>
+      </div>
+
+      <div class="terminal">
+        <div class="terminal-bar">
+          <span class="terminal-dot"></span>
+          <span class="terminal-dot"></span>
+          <span class="terminal-dot"></span>
+          <span class="terminal-title">nautiloop</span>
+        </div>
+        <div class="terminal-body"><span class="round">Round 1</span>  <span class="action">Claude implements</span>
+         <span class="action">tests run</span>
+         <span class="action">OpenAI reviews   </span><span class="findings">→  3 issues</span>
+
+<span class="round">Round 2</span>  <span class="action">Claude fixes</span>
+         <span class="action">tests run</span>
+         <span class="action">OpenAI reviews   </span><span class="findings">→  1 issue</span>
+
+<span class="round">Round 3</span>  <span class="action">Claude fixes</span>
+         <span class="action">tests run</span>
+         <span class="action">OpenAI reviews   </span><span class="clean">→  clean ✓</span>
+
+<span class="result">→ PR created</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- How It Works -->
+  <section id="how-it-works">
+    <div class="container">
+      <h2>How it works</h2>
+      <div class="arch-flow">
+        <div class="arch-node">
+          <h3>Your Machine</h3>
+          <p>nemo CLI</p>
+        </div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-node">
+          <h3>Nautiloop Server</h3>
+          <p>API + Loop Engine<br>Postgres</p>
+        </div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-node">
+          <h3>Agent Pods</h3>
+          <p>Claude + OpenAI<br>Auth Sidecar</p>
+        </div>
+      </div>
+      <p class="arch-tagline">Your agents keep working when you close your laptop.</p>
+    </div>
+  </section>
+
+  <!-- Three Verbs -->
+  <section id="verbs">
+    <div class="container">
+      <h2>Three verbs</h2>
+      <div class="verbs-grid">
+        <div class="verb-card">
+          <code>$ nemo harden spec.md</code>
+          <p class="desc">OpenAI audits the spec, Claude revises. Loop until clean.</p>
+          <p class="result-label">Result</p>
+          <p class="result-value">Hardened spec merged</p>
+        </div>
+        <div class="verb-card">
+          <code>$ nemo start spec.md</code>
+          <p class="desc">Claude implements, tests run, OpenAI reviews. Loop until clean.</p>
+          <p class="result-label">Result</p>
+          <p class="result-value">PR created</p>
+        </div>
+        <div class="verb-card">
+          <code>$ nemo ship spec.md</code>
+          <p class="desc">Same as start + auto-merge when the loop converges.</p>
+          <p class="result-label">Result</p>
+          <p class="result-value">Code shipped</p>
+        </div>
+      </div>
+      <p class="verbs-note">Add <code>--harden</code> to <code>start</code> or <code>ship</code> to harden the spec before implementing.</p>
+    </div>
+  </section>
+
+  <!-- Deploy -->
+  <section id="deploy">
+    <div class="container">
+      <h2>Deploy a nautiloop</h2>
+      <p class="text-secondary">The nautiloop Terraform module installs on any Linux server with SSH access. You provision the server, the module handles k3s, Postgres, and the control plane.</p>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span>main.tf</span>
+          <button class="copy-btn" data-copy='module "nautiloop" {
+  source = "github.com/tinkrtailor/nemo//terraform/modules/nautiloop"
+
+  server_ip       = "100.64.0.1"
+  ssh_private_key = file("~/.ssh/id_ed25519")
+  git_repo_url    = "git@github.com:you/your-repo.git"
+  git_host_token  = var.github_pat
+}' aria-label="Copy code">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="2" width="9" height="9" rx="1.5"/><path d="M2 6v7.5A1.5 1.5 0 003.5 15H11"/></svg>
+          </button>
+        </div>
+        <pre><span class="key">module</span> <span class="string">"nautiloop"</span> {
+  <span class="key">source</span> = <span class="string">"github.com/tinkrtailor/nemo//terraform/modules/nautiloop"</span>
+
+  <span class="key">server_ip</span>       = <span class="string">"100.64.0.1"</span>                          <span class="comment"># any server with SSH</span>
+  <span class="key">ssh_private_key</span> = <span class="key">file</span>(<span class="string">"~/.ssh/id_ed25519"</span>)
+  <span class="key">git_repo_url</span>    = <span class="string">"git@github.com:you/your-repo.git"</span>
+  <span class="key">git_host_token</span>  = <span class="key">var</span>.github_pat
+}</pre>
+      </div>
+
+      <p class="deploy-note">Four required variables. <code>terraform apply</code>. Done. <a href="https://github.com/tinkrtailor/nemo/blob/main/docs/deploy.md">Full deploy guide →</a></p>
+    </div>
+  </section>
+
+  <!-- Security -->
+  <section id="security">
+    <div class="container">
+      <h2>Security model</h2>
+      <p class="security-lead text-secondary">Agent containers get open internet but <strong>no secrets</strong>. Credentials never touch the agent filesystem.</p>
+      <ul class="security-list">
+        <li>Auth sidecar proxies all model API calls and git pushes</li>
+        <li>Read-only reviewer mounts the worktree read-only in review stage</li>
+        <li>Per-engineer credentials scoped to each engineer's jobs</li>
+        <li>Egress logging on all outbound traffic from agent pods</li>
+        <li>Tailscale recommended for private API access</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- Built with Nemo -->
+  <section class="built-section" id="built">
+    <div class="container">
+      <h2>Built with Nemo</h2>
+      <p class="built-lead">Nemo was built through the exact process it automates. Three parallel implementation lanes, each hardened by cross-model adversarial review.</p>
+
+      <table class="stats-table">
+        <thead>
+          <tr>
+            <th>Lane</th>
+            <th>Rounds</th>
+            <th>Findings</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Core loop engine</td>
+            <td>28</td>
+            <td>124</td>
+          </tr>
+          <tr>
+            <td>Infrastructure</td>
+            <td>25</td>
+            <td>88</td>
+          </tr>
+          <tr>
+            <td>Agent runtime</td>
+            <td>21</td>
+            <td>107</td>
+          </tr>
+          <tr>
+            <td>Integration</td>
+            <td>7</td>
+            <td>12</td>
+          </tr>
+          <tr>
+            <td><strong>Total</strong></td>
+            <td class="amber">81</td>
+            <td class="amber">331</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="built-callout"><span class="amber">331</span> production bugs caught by cross-model review before first deploy.</p>
+    </div>
+  </section>
+
+  <!-- Open Source -->
+  <section class="opensource">
+    <div class="container">
+      <h2>Open source. Self-hosted. Apache 2.0.</h2>
+      <p class="opensource-lead">Run Nautiloop on your own infrastructure. The entire convergent loop engine is open source.</p>
+      <p class="cloud-teaser"><strong>Nautiloop Cloud</strong> is coming — managed infrastructure, team features, zero ops.</p>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <div class="container">
+      <div class="footer-brand">
+        <svg viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M 50 20 C 67 20, 80 33, 80 50 C 80 67, 67 80, 50 80 C 33 80, 22 69, 22 55 C 22 41, 31 32, 43 32 C 55 32, 63 40, 63 50 C 63 60, 56 66, 48 66 C 40 66, 35 61, 35 54 C 35 47, 40 43, 46 43 C 52 43, 55 47, 55 51 C 55 55, 52 58, 49 58 C 46 58, 44 56, 44 53 C 44 50, 46 48, 48 48"/>
+        </svg>
+        Nautiloop
+      </div>
+      <ul class="footer-links">
+        <li><a href="https://github.com/tinkrtailor/nemo">GitHub</a></li>
+        <li><span class="footer-sep">·</span></li>
+        <li><a href="https://github.com/tinkrtailor/nemo/blob/main/docs/deploy.md">Docs</a></li>
+        <li><span class="footer-sep">·</span></li>
+        <li><a href="https://github.com/tinkrtailor/nemo/blob/main/LICENSE">Apache 2.0</a></li>
+      </ul>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
