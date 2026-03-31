@@ -111,6 +111,11 @@ variable "cert_manager_version" {
   description = "cert-manager version (only used when domain is set)"
   type        = string
   default     = "v1.14.0"
+
+  validation {
+    condition     = can(regex("^v[0-9]+\\.[0-9]+\\.[0-9]+$", var.cert_manager_version))
+    error_message = "cert_manager_version must be a semver tag (e.g., v1.14.0). No extra flags or characters."
+  }
 }
 
 variable "postgres_password" {

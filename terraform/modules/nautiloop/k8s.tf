@@ -487,11 +487,12 @@ resource "null_resource" "k8s_config" {
   }
 }
 
-# Fallback ssh-keyscan if ssh_known_hosts not provided
+# Fallback ssh-keyscan if ssh_known_hosts not provided.
+# Uses local kubectl with the generated kubeconfig, so must wait for it.
 resource "null_resource" "ssh_keyscan" {
   count = var.ssh_known_hosts == "" ? 1 : 0
 
-  depends_on = [null_resource.k8s_config]
+  depends_on = [null_resource.k8s_config, null_resource.kubeconfig]
 
   triggers = {
     git_repo_url = var.git_repo_url
@@ -545,7 +546,7 @@ resource "null_resource" "k8s_cert_manager" {
       # Install helm if not present (k3s doesn't include it)
       "command -v helm >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash",
       "helm repo add jetstack https://charts.jetstack.io 2>/dev/null || helm repo update jetstack",
-      "helm upgrade --install cert-manager jetstack/cert-manager --namespace cert-manager --create-namespace --version ${var.cert_manager_version} --set installCRDs=true --wait --timeout 5m",
+      "helm upgrade --install cert-manager jetstack/cert-manager --namespace cert-manager --create-namespace --version '${var.cert_manager_version}' --set installCRDs=true --wait --timeout 5m",
     ]
   }
 
@@ -582,6 +583,8 @@ resource "null_resource" "k8s_networking_tls" {
   provisioner "remote-exec" {
     inline = [
       "echo '${base64encode(local.networking_tls_yaml)}' | base64 -d | kubectl apply -f -",
+      # Clean up IP-only LoadBalancer if it exists from a previous IP-only deployment
+      "kubectl -n nemo-system delete svc nemo-api-server-lb --ignore-not-found",
     ]
   }
 }
@@ -607,6 +610,9 @@ resource "null_resource" "k8s_networking_ip" {
   provisioner "remote-exec" {
     inline = [
       "echo '${base64encode(local.networking_ip_yaml)}' | base64 -d | kubectl apply -f -",
+      # Clean up TLS resources if they exist from a previous domain deployment
+      "kubectl -n nemo-system delete ingressroute nemo-api nemo-api-http --ignore-not-found 2>/dev/null || true",
+      "kubectl -n nemo-system delete middleware redirect-https --ignore-not-found 2>/dev/null || true",
     ]
   }
 }

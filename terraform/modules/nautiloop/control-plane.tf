@@ -308,7 +308,10 @@ resource "null_resource" "k8s_repo_init" {
       # Delete previous job if it exists (jobs are immutable)
       "kubectl -n nemo-system delete job nemo-repo-init --ignore-not-found",
       "echo '${base64encode(local.repo_init_yaml)}' | base64 -d | kubectl apply -f -",
-      "kubectl -n nemo-system wait --for=condition=complete job/nemo-repo-init --timeout=600s || echo 'WARN: repo-init did not complete (deploy key may not be configured yet)'",
+      # Wait for completion. The job script already tolerates missing deploy keys
+      # (git fetch failure is non-fatal inside the container). A timeout here means
+      # a real infrastructure failure (bad PVC, secret mount, etc.) — fail hard.
+      "kubectl -n nemo-system wait --for=condition=complete job/nemo-repo-init --timeout=600s",
     ]
   }
 }
