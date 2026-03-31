@@ -51,14 +51,16 @@ resource "null_resource" "kubeconfig" {
 
   provisioner "local-exec" {
     command = <<-EOT
-      mkdir -p "$(dirname '${local.kubeconfig_path}')"
+      KUBECONFIG_OUT="${local.kubeconfig_path}"
+      mkdir -p "$(dirname "$KUBECONFIG_OUT")"
       ssh -o StrictHostKeyChecking=accept-new \
         -o "UserKnownHostsFile=/dev/null" \
         -i "$SSH_KEY_FILE" \
         ${var.ssh_user}@${var.server_ip} \
         'cat /etc/rancher/k3s/k3s.yaml' | \
-        sed '/server:/s/127.0.0.1/${var.server_ip}/' > ${local.kubeconfig_path}
-      chmod 600 ${local.kubeconfig_path}
+        sed '/server:/s/127.0.0.1/${var.server_ip}/' > "$KUBECONFIG_OUT.tmp"
+      chmod 600 "$KUBECONFIG_OUT.tmp"
+      mv "$KUBECONFIG_OUT.tmp" "$KUBECONFIG_OUT"
     EOT
 
     environment = {

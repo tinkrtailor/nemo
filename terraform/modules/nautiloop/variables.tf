@@ -8,8 +8,8 @@ variable "server_ip" {
   type        = string
 
   validation {
-    condition     = can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$", var.server_ip))
-    error_message = "server_ip must be a valid IPv4 address (e.g., 100.64.0.1)."
+    condition = can(regex("^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$", var.server_ip))
+    error_message = "server_ip must be a valid IPv4 address (e.g., 100.64.0.1). IPv6 and hostnames are not supported."
   }
 }
 
