@@ -51,13 +51,14 @@ resource "null_resource" "kubeconfig" {
 
   provisioner "local-exec" {
     command = <<-EOT
-      mkdir -p ${path.module}/.state
+      mkdir -p "$(dirname '${local.kubeconfig_path}')"
       ssh -o StrictHostKeyChecking=accept-new \
         -o "UserKnownHostsFile=/dev/null" \
         -i "$SSH_KEY_FILE" \
         ${var.ssh_user}@${var.server_ip} \
         'cat /etc/rancher/k3s/k3s.yaml' | \
-        sed "s/127.0.0.1/${var.server_ip}/" > ${local.kubeconfig_path}
+        sed '/server:/s/127.0.0.1/${var.server_ip}/' > ${local.kubeconfig_path}
+      chmod 600 ${local.kubeconfig_path}
     EOT
 
     environment = {
@@ -105,8 +106,7 @@ locals {
     Next steps:
     1. Add this deploy key to your repo (Settings > Deploy keys, enable write access):
        ${local.deploy_public_key != null ? trimspace(local.deploy_public_key) : ""}
-    2. Trigger initial repo sync: kubectl -n nemo-system delete job nemo-repo-init
-       (The job will be recreated and fetch the repo with the new key)
+    2. Re-run terraform apply to sync the repo (the repo-init job will fetch with the new key)
     3. Install the CLI: cargo install --git https://github.com/tinkrtailor/nemo nemo-cli
     4. Configure: nemo init && nemo auth
   EOT

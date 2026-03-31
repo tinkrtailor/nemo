@@ -6,6 +6,11 @@
 variable "server_ip" {
   description = "IP address of the server to install Nemo on"
   type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$", var.server_ip))
+    error_message = "server_ip must be a valid IPv4 address (e.g., 100.64.0.1)."
+  }
 }
 
 variable "ssh_private_key" {
