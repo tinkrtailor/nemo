@@ -591,7 +591,7 @@ mod tests {
         StageConfig {
             name: "implement".to_string(),
             model: Some("claude-opus-4".to_string()),
-            prompt_template: Some(".nemo/prompts/implement.md".to_string()),
+            prompt_template: Some(".nautiloop/prompts/implement.md".to_string()),
             timeout: Duration::from_secs(1800),
             max_retries: 2,
         }

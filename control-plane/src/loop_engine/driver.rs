@@ -1254,7 +1254,7 @@ impl ConvergentLoopDriver {
                     .clone()
                     .unwrap_or_else(|| self.config.models.reviewer.clone()),
             ),
-            prompt_template: Some(".nemo/prompts/spec-audit.md".to_string()),
+            prompt_template: Some(".nautiloop/prompts/spec-audit.md".to_string()),
             timeout: self.config.timeouts.audit_duration(),
             max_retries: 2,
         }
@@ -1269,7 +1269,7 @@ impl ConvergentLoopDriver {
                     .clone()
                     .unwrap_or_else(|| self.config.models.implementor.clone()),
             ),
-            prompt_template: Some(".nemo/prompts/spec-revise.md".to_string()),
+            prompt_template: Some(".nautiloop/prompts/spec-revise.md".to_string()),
             timeout: self.config.timeouts.revise_duration(),
             max_retries: 2,
         }
@@ -1284,7 +1284,7 @@ impl ConvergentLoopDriver {
                     .clone()
                     .unwrap_or_else(|| self.config.models.implementor.clone()),
             ),
-            prompt_template: Some(".nemo/prompts/implement.md".to_string()),
+            prompt_template: Some(".nautiloop/prompts/implement.md".to_string()),
             timeout: self.config.timeouts.implement_duration(),
             max_retries: 2,
         }
@@ -1309,7 +1309,7 @@ impl ConvergentLoopDriver {
                     .clone()
                     .unwrap_or_else(|| self.config.models.reviewer.clone()),
             ),
-            prompt_template: Some(".nemo/prompts/review.md".to_string()),
+            prompt_template: Some(".nautiloop/prompts/review.md".to_string()),
             timeout: self.config.timeouts.review_duration(),
             max_retries: 2,
         }
