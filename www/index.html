@@ -115,6 +115,76 @@
     </div>
   </section>
 
+  <!-- Scale -->
+  <section id="scale">
+    <div class="container">
+      <h2>Every engineer becomes a dev director</h2>
+      <p class="scale-lead text-secondary">Each engineer runs parallel convergent loops. Push 5 specs, get 5 clean PRs. Your team of 3 ships like a team of 15.</p>
+
+      <div class="scale-diagram">
+        <div class="scale-col scale-engineers">
+          <div class="scale-label">Engineers</div>
+          <div class="scale-person" data-person="1">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="6" r="4"/><path d="M2 18c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg>
+            <span>Alice</span>
+          </div>
+          <div class="scale-person" data-person="2">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="6" r="4"/><path d="M2 18c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg>
+            <span>Bob</span>
+          </div>
+          <div class="scale-person" data-person="3">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="6" r="4"/><path d="M2 18c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg>
+            <span>Carol</span>
+          </div>
+        </div>
+
+        <div class="scale-arrows">
+          <div class="scale-arrow-group" data-person="1">
+            <span class="scale-line"></span><span class="scale-line"></span><span class="scale-line"></span><span class="scale-line"></span><span class="scale-line"></span>
+          </div>
+          <div class="scale-arrow-group" data-person="2">
+            <span class="scale-line"></span><span class="scale-line"></span><span class="scale-line"></span><span class="scale-line"></span><span class="scale-line"></span>
+          </div>
+          <div class="scale-arrow-group" data-person="3">
+            <span class="scale-line"></span><span class="scale-line"></span><span class="scale-line"></span><span class="scale-line"></span><span class="scale-line"></span>
+          </div>
+        </div>
+
+        <div class="scale-col scale-agents">
+          <div class="scale-label">Convergent Loops</div>
+          <div class="scale-agent-group" data-person="1">
+            <span class="scale-agent">auth-refactor</span>
+            <span class="scale-agent">api-pagination</span>
+            <span class="scale-agent">fix-n+1-query</span>
+            <span class="scale-agent">add-rate-limit</span>
+            <span class="scale-agent">migrate-to-v2</span>
+          </div>
+          <div class="scale-agent-group" data-person="2">
+            <span class="scale-agent">setup-ci-cache</span>
+            <span class="scale-agent">add-e2e-tests</span>
+            <span class="scale-agent">fix-flaky-test</span>
+            <span class="scale-agent">upgrade-deps</span>
+            <span class="scale-agent">add-monitoring</span>
+          </div>
+          <div class="scale-agent-group" data-person="3">
+            <span class="scale-agent">new-dashboard</span>
+            <span class="scale-agent">dark-mode</span>
+            <span class="scale-agent">mobile-nav</span>
+            <span class="scale-agent">search-index</span>
+            <span class="scale-agent">perf-audit</span>
+          </div>
+        </div>
+
+        <div class="scale-col scale-output">
+          <div class="scale-label">Output</div>
+          <div class="scale-result"><span class="amber">15</span> clean PRs</div>
+        </div>
+      </div>
+
+      <p class="scale-tagline">Agents keep working when you close your laptop. Review the PRs when you're ready.</p>
+    </div>
+  </section>
+
   <!-- Three Verbs -->
   <section id="verbs">
     <div class="container">
@@ -147,7 +217,7 @@
   <section id="deploy">
     <div class="container">
       <h2>Deploy a nautiloop</h2>
-      <p class="text-secondary">The nautiloop Terraform module installs on any Linux server with SSH access. You provision the server, the module handles k3s, Postgres, and the control plane.</p>
+      <p class="text-secondary">The nautiloop Terraform module installs on any Linux server with SSH access. You provision the server, the module handles k3s, Postgres, and the control plane. Self-contained: no extra provider configuration needed. Single <code>terraform apply</code> from a clean state.</p>
 
       <div class="code-block">
         <div class="code-block-header">

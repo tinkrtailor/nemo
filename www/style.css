@@ -354,6 +354,141 @@ nav .container {
   font-style: italic;
 }
 
+/* ---- Scale Diagram ---- */
+
+.scale-lead {
+  font-size: 1.125rem;
+  margin-bottom: 40px;
+  max-width: 640px;
+}
+
+.scale-diagram {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  gap: 0;
+  align-items: start;
+  margin-bottom: 32px;
+}
+
+.scale-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.scale-label {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+.scale-person {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text);
+  height: 72px;
+}
+
+.scale-person svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--teal);
+}
+
+.scale-arrows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 12px;
+  padding-top: 22px;
+}
+
+.scale-arrow-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: 72px;
+  justify-content: center;
+}
+
+.scale-line {
+  display: block;
+  width: 32px;
+  height: 1px;
+  background: var(--border);
+}
+
+.scale-agent-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: 72px;
+  justify-content: center;
+}
+
+.scale-agent {
+  font-family: var(--font-code);
+  font-size: 0.6875rem;
+  background: var(--teal-muted);
+  color: var(--teal);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  line-height: 1.4;
+}
+
+.scale-output {
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding-top: 22px;
+  min-height: 100%;
+}
+
+.scale-result {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.scale-result .amber {
+  color: var(--amber);
+}
+
+.scale-tagline {
+  text-align: center;
+  font-size: 1.125rem;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+@media (max-width: 768px) {
+  .scale-diagram {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+
+  .scale-arrows { display: none; }
+
+  .scale-person { height: auto; }
+  .scale-agent-group { height: auto; flex-direction: row; flex-wrap: wrap; }
+  .scale-output { padding-left: 0; padding-top: 0; }
+}
+
 /* ---- Three Verbs ---- */
 
 .verbs-grid {
