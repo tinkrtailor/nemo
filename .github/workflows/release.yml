@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/tinkrtailor
+
+jobs:
+  # Build CLI + server binaries for 4 targets
+  binaries:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: linux-arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            suffix: darwin-amd64
+          - target: aarch64-apple-darwin
+            os: macos-14
+            suffix: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc' >> "$GITHUB_ENV"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binaries
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+
+          # CLI binary
+          cp target/${{ matrix.target }}/release/nemo dist/
+          tar -czf dist/nemo-${VERSION}-${{ matrix.suffix }}.tar.gz -C dist nemo
+          rm dist/nemo
+
+          # Server binary
+          cp target/${{ matrix.target }}/release/nautiloop-server dist/
+          tar -czf dist/nautiloop-server-${VERSION}-${{ matrix.suffix }}.tar.gz -C dist nautiloop-server
+          rm dist/nautiloop-server
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.suffix }}
+          path: dist/*.tar.gz
+
+  # Build multi-arch Docker images
+  images:
+    strategy:
+      matrix:
+        image:
+          - name: control-plane
+            dockerfile: images/control-plane/Dockerfile
+            context: .
+          - name: agent-base
+            dockerfile: images/base/Dockerfile
+            context: .
+          - name: sidecar
+            dockerfile: images/sidecar/Dockerfile
+            context: images/sidecar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version
+        id: version
+        run: echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/nautiloop-${{ matrix.image.name }}:${{ steps.version.outputs.tag }}
+            ${{ env.REGISTRY }}/nautiloop-${{ matrix.image.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Create GitHub release with binaries
+  release:
+    needs: [binaries, images]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > checksums-sha256.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/checksums-sha256.txt
