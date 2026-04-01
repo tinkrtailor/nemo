@@ -56,7 +56,7 @@ module "nautiloop" {
 }
 ```
 
-Four required variables. `terraform apply`. Done.
+Four required variables. Single `terraform apply`. No extra provider configuration needed.
 
 The module auto-generates a deploy key (or accepts yours). After apply, add the public key to your repo's deploy keys with write access.
 

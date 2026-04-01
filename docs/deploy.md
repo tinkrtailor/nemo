@@ -32,19 +32,7 @@ output "nemo_deploy_key_public" {
 
 The module auto-generates a deploy key. After `terraform apply`, add the public key to your repo's deploy keys (with write access), then you're done.
 
-**Important:** The module needs `kubernetes` and `helm` providers configured in the caller. Point them at the kubeconfig the module generates:
-
-```hcl
-provider "kubernetes" {
-  config_path = "${path.module}/<path-to-module>/.state/kubeconfig.yaml"
-}
-
-provider "helm" {
-  kubernetes {
-    config_path = "${path.module}/<path-to-module>/.state/kubeconfig.yaml"
-  }
-}
-```
+The module is self-contained: no `kubernetes` or `helm` provider configuration needed. It provisions all k8s resources via SSH+kubectl on the server, so a single `terraform apply` works from a clean state.
 
 ## Full example (all options)
 
