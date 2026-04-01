@@ -57,9 +57,9 @@ module "nautiloop" {
   acme_email = "me@mydomain.com"     # required if domain is set
 
   # Optional: images (defaults to latest public GHCR)
-  control_plane_image = "ghcr.io/tinkrtailor/nemo-control-plane:0.1.0"
-  agent_base_image    = "ghcr.io/tinkrtailor/nemo-agent-base:0.1.0"
-  sidecar_image       = "ghcr.io/tinkrtailor/nemo-sidecar:0.1.0"
+  control_plane_image = "ghcr.io/tinkrtailor/nemo-control-plane:0.1.1"
+  agent_base_image    = "ghcr.io/tinkrtailor/nemo-agent-base:0.1.1"
+  sidecar_image       = "ghcr.io/tinkrtailor/nemo-sidecar:0.1.1"
 }
 ```
 
@@ -75,9 +75,9 @@ module "nautiloop" {
 | `repo_ssh_private_key` | no | auto-generated | SSH deploy key. If null, generates ED25519 |
 | `domain` | no | `null` | Domain for TLS. null = HTTP on raw IP:8080 |
 | `acme_email` | no | `null` | Let's Encrypt email. Required if domain is set |
-| `control_plane_image` | no | `ghcr.io/tinkrtailor/nemo-control-plane:0.1.0` | Control plane image |
-| `agent_base_image` | no | `ghcr.io/tinkrtailor/nemo-agent-base:0.1.0` | Agent base image |
-| `sidecar_image` | no | `ghcr.io/tinkrtailor/nemo-sidecar:0.1.0` | Auth sidecar image |
+| `control_plane_image` | no | `ghcr.io/tinkrtailor/nemo-control-plane:0.1.1` | Control plane image |
+| `agent_base_image` | no | `ghcr.io/tinkrtailor/nemo-agent-base:0.1.1` | Agent base image |
+| `sidecar_image` | no | `ghcr.io/tinkrtailor/nemo-sidecar:0.1.1` | Auth sidecar image |
 | `k3s_version` | no | `v1.32.13+k3s1` | k3s version (v1.32+ required) |
 | `postgres_password` | no | auto-generated | Postgres password |
 | `postgres_volume_size` | no | `20` | Postgres volume size (Gi) |
@@ -150,7 +150,7 @@ Set `domain = "nemo.mydomain.com"` and `acme_email = "you@example.com"`. The mod
 ## Build and push images
 
 ```bash
-./build-images.sh --tag 0.1.0
+./build-images.sh --tag 0.1.1
 ```
 
 Builds 3 images (control-plane, agent-base, sidecar), pushes to GHCR.
