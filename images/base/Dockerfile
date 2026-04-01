@@ -3,14 +3,14 @@
 # NFR-1: Target < 2 GB compressed via multi-stage build
 
 # Stage 1: Install tools that need compilation
-FROM python:3.12-slim@sha256:6294405dc2a6612366092848c41c2ec7f9ba7368b618ee707dcf7f75c1d07830 AS python-tools
+FROM python:3.12-slim AS python-tools
 RUN pip install --no-cache-dir yq
 
 # Stage 2: Get opencode binary from published image
-FROM ghcr.io/anomalyco/opencode:latest@sha256:f19f2c5902ae1b20667b707d495dfc80d4c30761b52f4d8a66ed4f7778693d74 AS opencode-src
+FROM ghcr.io/anomalyco/opencode:latest AS opencode-src
 
 # Stage 3: Final image
-FROM node:22-bookworm-slim@sha256:263e93fe2e7f5edc1e0f6647fcc679aa88e7cdd25d93bccf65f97ab68eacb93b
+FROM node:22-bookworm-slim
 
 # FR-1: System packages
 RUN apt-get update && apt-get install -y --no-install-recommends \

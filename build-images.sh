@@ -63,7 +63,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --tag, -t <version>   Image tag (required)"
             echo "  --no-push             Build locally, don't push to GHCR"
             echo "  --only <image>        Build only: control-plane, agent-base, or sidecar"
-            echo "  --platform <plat>     Override platform (default: linux/amd64)"
+            echo "  --platform <plat>     Override platform (default: linux/amd64,linux/arm64)"
             echo "  -h, --help            Show this help"
             exit 0
             ;;
@@ -123,8 +123,8 @@ else
     docker buildx use "$BUILDER_NAME"
 fi
 
-# Hetzner runs amd64
-PLATFORM="${PLATFORM_OVERRIDE:-linux/amd64}"
+# Multi-arch: support both amd64 (most clouds) and arm64 (Hetzner CAX/CCX, Graviton)
+PLATFORM="${PLATFORM_OVERRIDE:-linux/amd64,linux/arm64}"
 
 info "Building images with tag: $IMAGE_TAG"
 info "Platform: $PLATFORM"
@@ -163,7 +163,12 @@ build_image() {
     if [ "$PUSH" = true ]; then
         build_cmd+=(--push)
     else
-        build_cmd+=(--load)
+        # --load only works with single-platform builds
+        if [[ "$PLATFORM" == *","* ]]; then
+            warn "Multi-platform build without --push: images stay in buildx cache only (use --no-push --platform linux/amd64 to load locally)"
+        else
+            build_cmd+=(--load)
+        fi
     fi
 
     build_cmd+=("$context")

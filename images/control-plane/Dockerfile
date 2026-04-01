@@ -2,7 +2,7 @@
 # Produces a minimal image with the nemo-server binary.
 # Same binary runs as API server or loop engine based on args.
 
-FROM rust:1.88-bookworm@sha256:8aa70d1416cf5b1cff4b95ec6c57f1c5e4e649a3b53d616a26695cda6fbb46bc AS builder
+FROM rust:1.88-bookworm AS builder
 
 WORKDIR /build
 
@@ -26,7 +26,7 @@ RUN touch control-plane/src/main.rs control-plane/src/lib.rs && \
     cargo build --release --package nemo-control-plane
 
 # Runtime image: minimal Debian with TLS certs
-FROM debian:bookworm-slim@sha256:ee5473f786ff8a4e03409277c276b459b29afa55a84268bef55342c4f705b7ad
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

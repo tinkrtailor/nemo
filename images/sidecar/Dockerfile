@@ -2,7 +2,7 @@
 # FR-14: Single static binary (~10 MB)
 # NFR-2: Under 15 MB
 
-FROM golang:1.22-alpine@sha256:7030196c59858ca8942e85aa2f68599240d58282ee35eb795609738a1e242c1f AS builder
+FROM golang:1.22-alpine AS builder
 
 WORKDIR /build
 COPY go.mod go.sum* ./
