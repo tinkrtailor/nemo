@@ -42,8 +42,8 @@ provider "hcloud" {
 # No public 8080 — API only reachable via Tailscale.
 # 80/443 only when domain is set (public HTTPS).
 
-resource "hcloud_firewall" "nemo" {
-  name = "nemo-${var.server_location}"
+resource "hcloud_firewall" "nautiloop" {
+  name = "nautiloop-${var.server_location}"
 
   # SSH (needed for terraform provisioning over public IP during bootstrap)
   rule {
@@ -115,24 +115,24 @@ resource "hcloud_firewall" "nemo" {
 
 # --- SSH key (for Hetzner initial cloud-init access) ---
 
-resource "hcloud_ssh_key" "nemo" {
+resource "hcloud_ssh_key" "nautiloop" {
   count      = length(var.ssh_public_keys)
-  name       = "nemo-${count.index}"
+  name       = "nautiloop-${count.index}"
   public_key = var.ssh_public_keys[count.index]
 }
 
 # --- Server ---
 
-resource "hcloud_server" "nemo" {
-  name        = "nemo-${var.server_location}"
+resource "hcloud_server" "nautiloop" {
+  name        = "nautiloop-${var.server_location}"
   server_type = var.server_type
   location    = var.server_location
   image       = "ubuntu-22.04"
-  ssh_keys    = hcloud_ssh_key.nemo[*].id
+  ssh_keys    = hcloud_ssh_key.nautiloop[*].id
 
-  firewall_ids = [hcloud_firewall.nemo.id]
+  firewall_ids = [hcloud_firewall.nautiloop.id]
 
-  labels = { app = "nemo" }
+  labels = { app = "nautiloop" }
 
   user_data = templatefile("${path.module}/templates/cloud-init.yaml", {
     tailscale_auth_key = var.tailscale_auth_key
@@ -143,11 +143,11 @@ resource "hcloud_server" "nemo" {
 # --- Wait for Tailscale, get IPv4 tailnet address ---
 
 resource "null_resource" "tailscale_wait" {
-  depends_on = [hcloud_server.nemo]
+  depends_on = [hcloud_server.nautiloop]
 
   connection {
     type        = "ssh"
-    host        = hcloud_server.nemo.ipv4_address
+    host        = hcloud_server.nautiloop.ipv4_address
     user        = "root"
     private_key = file(pathexpand(var.ssh_private_key_path))
   }
@@ -172,7 +172,7 @@ data "external" "tailscale_ip" {
     IP=$(ssh -o StrictHostKeyChecking=accept-new \
       -o UserKnownHostsFile=/dev/null \
       -i ${pathexpand(var.ssh_private_key_path)} \
-      root@${hcloud_server.nemo.ipv4_address} \
+      root@${hcloud_server.nautiloop.ipv4_address} \
       'cat /tmp/tailscale_ip' 2>/dev/null)
     if [ -z "$IP" ] || [ "$IP" = "null" ]; then
       echo '{"error": "Tailscale IP not available"}' >&2
@@ -216,7 +216,7 @@ module "nautiloop" {
 
 output "public_ip" {
   description = "Public IP (HTTP/HTTPS only — API and daily SSH via Tailscale)"
-  value       = hcloud_server.nemo.ipv4_address
+  value       = hcloud_server.nautiloop.ipv4_address
 }
 
 output "tailscale_ip" {
@@ -224,8 +224,8 @@ output "tailscale_ip" {
   value       = data.external.tailscale_ip.result["ip"]
 }
 
-output "nemo_server_url" {
-  description = "URL of the Nemo control plane"
+output "nautiloop_server_url" {
+  description = "URL of the Nautiloop control plane"
   value       = module.nautiloop.server_url
 }
 
@@ -234,18 +234,18 @@ output "ssh_command" {
   value       = "ssh root@nautiloop"
 }
 
-output "nemo_api_key" {
+output "nautiloop_api_key" {
   description = "API key for CLI authentication"
   value       = module.nautiloop.api_key
   sensitive   = true
 }
 
-output "nemo_deploy_key_public" {
+output "nautiloop_deploy_key_public" {
   description = "Public key to add as a deploy key (null if you provided your own)"
   value       = module.nautiloop.deploy_key_public
 }
 
-output "nemo_post_apply_instructions" {
+output "nautiloop_post_apply_instructions" {
   description = "Post-apply next steps"
   value       = module.nautiloop.post_apply_instructions
 }

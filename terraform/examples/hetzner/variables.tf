@@ -42,7 +42,7 @@ variable "server_location" {
   default     = "fsn1"
 }
 
-# --- Nemo module pass-through ---
+# --- Nautiloop module pass-through ---
 
 variable "git_repo_url" {
   description = "Git repository URL (SSH format)"
@@ -77,19 +77,19 @@ variable "acme_email" {
 variable "control_plane_image" {
   description = "Control plane container image"
   type        = string
-  default     = "ghcr.io/tinkrtailor/nemo-control-plane:0.1.1"
+  default     = "ghcr.io/tinkrtailor/nautiloop-control-plane:0.1.1"
 }
 
 variable "agent_base_image" {
   description = "Agent base container image"
   type        = string
-  default     = "ghcr.io/tinkrtailor/nemo-agent-base:0.1.1"
+  default     = "ghcr.io/tinkrtailor/nautiloop-agent-base:0.1.1"
 }
 
 variable "sidecar_image" {
   description = "Auth sidecar container image"
   type        = string
-  default     = "ghcr.io/tinkrtailor/nemo-sidecar:0.1.1"
+  default     = "ghcr.io/tinkrtailor/nautiloop-sidecar:0.1.1"
 }
 
 variable "k3s_version" {

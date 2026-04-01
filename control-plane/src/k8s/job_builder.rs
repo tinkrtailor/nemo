@@ -33,22 +33,22 @@ pub struct JobBuildConfig {
 /// - agent container: runs the agent entrypoint
 /// - sidecar container: `auth-sidecar` for model API proxy, git SSH proxy, egress logging
 ///
-/// Job naming: `nemo-{loop_id_short}-{stage}-r{round}-t{attempt}` (FR-31)
-/// Labels: `nemo.dev/loop-id`, `nemo.dev/stage`, `nemo.dev/engineer`, `nemo.dev/round` (FR-32)
+/// Job naming: `nautiloop-{loop_id_short}-{stage}-r{round}-t{attempt}` (FR-31)
+/// Labels: `nautiloop.dev/loop-id`, `nautiloop.dev/stage`, `nautiloop.dev/engineer`, `nautiloop.dev/round` (FR-32)
 pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -> Job {
     let short_id = &ctx.loop_id.to_string()[..8];
     // FR-31: Include attempt number in name to avoid AlreadyExists on redispatch.
     // Attempt = retry_count + 1 (first dispatch is attempt 1, first retry is attempt 2).
     let attempt = ctx.retry_count + 1;
-    let job_name = format!("nemo-{short_id}-{}-r{}-t{attempt}", stage.name, ctx.round);
+    let job_name = format!("nautiloop-{short_id}-{}-r{}-t{attempt}", stage.name, ctx.round);
 
     // FR-32: Labels for control plane queries
     let mut labels = BTreeMap::new();
-    labels.insert("app".to_string(), "nemo".to_string());
-    labels.insert("nemo.dev/loop-id".to_string(), ctx.loop_id.to_string());
-    labels.insert("nemo.dev/stage".to_string(), stage.name.clone());
-    labels.insert("nemo.dev/round".to_string(), ctx.round.to_string());
-    labels.insert("nemo.dev/engineer".to_string(), ctx.engineer.clone());
+    labels.insert("app".to_string(), "nautiloop".to_string());
+    labels.insert("nautiloop.dev/loop-id".to_string(), ctx.loop_id.to_string());
+    labels.insert("nautiloop.dev/stage".to_string(), stage.name.clone());
+    labels.insert("nautiloop.dev/round".to_string(), ctx.round.to_string());
+    labels.insert("nautiloop.dev/engineer".to_string(), ctx.engineer.clone());
 
     let parsed_stage = Stage::from_short_name(&stage.name);
     let is_review_or_audit = matches!(parsed_stage, Some(Stage::Review) | Some(Stage::Audit));
@@ -73,7 +73,7 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
         volumes.push(Volume {
             name: "claude-session".to_string(),
             secret: Some(SecretVolumeSource {
-                secret_name: Some(format!("nemo-creds-{safe_engineer}")),
+                secret_name: Some(format!("nautiloop-creds-{safe_engineer}")),
                 items: Some(vec![KeyToPath {
                     key: "claude".to_string(),
                     path: ".credentials.json".to_string(),
@@ -247,7 +247,7 @@ fn build_agent_env_vars(ctx: &LoopContext, stage: &StageConfig, is_test: bool) -
         // Note: ANTHROPIC_BASE_URL is NOT set. Claude Code authenticates via the
         // mounted ~/.claude/ session directory (FR-25b), not via the sidecar proxy.
         // Base branch for diff context in review/audit stages
-        env_var("NEMO_BASE_BRANCH", &ctx.base_branch),
+        env_var("NAUTILOOP_BASE_BRANCH", &ctx.base_branch),
     ];
 
     // FR-10, FR-27: Git identity from engineer identity (populated by nemo auth)
@@ -356,7 +356,7 @@ fn build_volumes(
         Volume {
             name: "model-credentials".to_string(),
             secret: Some(SecretVolumeSource {
-                secret_name: Some(format!("nemo-creds-{engineer}")),
+                secret_name: Some(format!("nautiloop-creds-{engineer}")),
                 optional: Some(true),
                 ..Default::default()
             }),
@@ -367,7 +367,7 @@ fn build_volumes(
         Volume {
             name: "ssh-key".to_string(),
             secret: Some(SecretVolumeSource {
-                secret_name: Some(format!("nemo-creds-{engineer}")),
+                secret_name: Some(format!("nautiloop-creds-{engineer}")),
                 items: Some(vec![KeyToPath {
                     key: "ssh".to_string(),
                     path: "id_ed25519".to_string(),
@@ -591,7 +591,7 @@ mod tests {
         StageConfig {
             name: "implement".to_string(),
             model: Some("claude-opus-4".to_string()),
-            prompt_template: Some(".nemo/prompts/implement.md".to_string()),
+            prompt_template: Some(".nautiloop/prompts/implement.md".to_string()),
             timeout: Duration::from_secs(1800),
             max_retries: 2,
         }
@@ -599,14 +599,14 @@ mod tests {
 
     fn test_cfg() -> JobBuildConfig {
         JobBuildConfig {
-            namespace: "nemo-jobs".to_string(),
-            agent_image: "nemo-agent:latest".to_string(),
-            sidecar_image: "nemo-sidecar:latest".to_string(),
-            bare_repo_pvc: "nemo-bare-repo".to_string(),
-            sessions_pvc: "nemo-sessions".to_string(),
+            namespace: "nautiloop-jobs".to_string(),
+            agent_image: "nautiloop-agent:latest".to_string(),
+            sidecar_image: "nautiloop-sidecar:latest".to_string(),
+            bare_repo_pvc: "nautiloop-bare-repo".to_string(),
+            sessions_pvc: "nautiloop-sessions".to_string(),
             image_pull_secret: None,
             git_repo_url: "git@github.com:test-org/test-repo.git".to_string(),
-            ssh_known_hosts_configmap: "nemo-ssh-known-hosts".to_string(),
+            ssh_known_hosts_configmap: "nautiloop-ssh-known-hosts".to_string(),
         }
     }
 
@@ -617,8 +617,8 @@ mod tests {
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let name = job.metadata.name.unwrap();
-        // FR-31: nemo-{loop_id_short}-{stage}-r{round}-t{attempt}
-        assert_eq!(name, "nemo-a1b2c3d4-implement-r2-t1");
+        // FR-31: nautiloop-{loop_id_short}-{stage}-r{round}-t{attempt}
+        assert_eq!(name, "nautiloop-a1b2c3d4-implement-r2-t1");
     }
 
     #[test]
@@ -630,7 +630,7 @@ mod tests {
         let job = build_job(&ctx, &stage, &cfg);
         let name = job.metadata.name.unwrap();
         // retry_count=3 -> attempt=4
-        assert_eq!(name, "nemo-a1b2c3d4-implement-r2-t4");
+        assert_eq!(name, "nautiloop-a1b2c3d4-implement-r2-t4");
     }
 
     #[test]
@@ -640,10 +640,10 @@ mod tests {
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let labels = job.metadata.labels.unwrap();
-        assert_eq!(labels["app"], "nemo");
-        assert_eq!(labels["nemo.dev/stage"], "implement");
-        assert_eq!(labels["nemo.dev/round"], "2");
-        assert_eq!(labels["nemo.dev/engineer"], "alice");
+        assert_eq!(labels["app"], "nautiloop");
+        assert_eq!(labels["nautiloop.dev/stage"], "implement");
+        assert_eq!(labels["nautiloop.dev/round"], "2");
+        assert_eq!(labels["nautiloop.dev/engineer"], "alice");
     }
 
     #[test]
@@ -1031,12 +1031,12 @@ mod tests {
         let ctx = test_ctx();
         let stage = test_stage();
         let mut cfg = test_cfg();
-        cfg.image_pull_secret = Some("nemo-registry-creds".to_string());
+        cfg.image_pull_secret = Some("nautiloop-registry-creds".to_string());
         let job = build_job(&ctx, &stage, &cfg);
         let pod_spec = job.spec.unwrap().template.spec.unwrap();
         let secrets = pod_spec.image_pull_secrets.unwrap();
         assert_eq!(secrets.len(), 1);
-        assert_eq!(secrets[0].name, "nemo-registry-creds");
+        assert_eq!(secrets[0].name, "nautiloop-registry-creds");
     }
 
     #[test]

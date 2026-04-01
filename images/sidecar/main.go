@@ -1,4 +1,4 @@
-// Auth sidecar for Nemo agent jobs.
+// Auth sidecar for Nautiloop agent jobs.
 // FR-14 through FR-23: Model API proxy, Git SSH proxy, Egress logger.
 // Single static binary (~10 MB), three localhost ports.
 package main
@@ -127,7 +127,7 @@ func modelProxyHandler(w http.ResponseWriter, r *http.Request) {
 	// FR-21: Re-read credentials on each request
 	apiKey, err := readCredentialFile(credFile)
 	if err != nil {
-		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("failed to read credentials from %s: %v", credFile, err))
+		logJSON("NAUTILOOP_SIDECAR", "error", fmt.Sprintf("failed to read credentials from %s: %v", credFile, err))
 		http.Error(w, `{"error":"credential read failed"}`, http.StatusInternalServerError)
 		return
 	}
@@ -211,7 +211,7 @@ func (p *egressProxy) handleConnect(w http.ResponseWriter, r *http.Request, star
 	if err == nil {
 		for _, ip := range ips {
 			if isPrivateIP(ip) {
-				logJSON("NEMO_SIDECAR", "warn", fmt.Sprintf("blocked CONNECT to private IP: %s -> %v", destHost, ip))
+				logJSON("NAUTILOOP_SIDECAR", "warn", fmt.Sprintf("blocked CONNECT to private IP: %s -> %v", destHost, ip))
 				http.Error(w, "CONNECT to private/internal addresses is blocked", http.StatusForbidden)
 				return
 			}
@@ -278,7 +278,7 @@ func (p *egressProxy) handleHTTP(w http.ResponseWriter, r *http.Request, start t
 	if ips, err := net.LookupIP(hostname); err == nil {
 		for _, ip := range ips {
 			if isPrivateIP(ip) {
-				logJSON("NEMO_SIDECAR", "warn", fmt.Sprintf("blocked HTTP to private IP: %s -> %v", r.URL.Host, ip))
+				logJSON("NAUTILOOP_SIDECAR", "warn", fmt.Sprintf("blocked HTTP to private IP: %s -> %v", r.URL.Host, ip))
 				http.Error(w, "Requests to private/internal addresses are blocked", http.StatusForbidden)
 				return
 			}
@@ -331,7 +331,7 @@ func logEgress(start time.Time, dest, method string, sent, recv int64) {
 		Method:      method,
 		BytesSent:   sent,
 		BytesRecv:   recv,
-		Prefix:      "NEMO_SIDECAR",
+		Prefix:      "NAUTILOOP_SIDECAR",
 	}
 	data, _ := json.Marshal(entry)
 	fmt.Println(string(data))
@@ -390,7 +390,7 @@ func startGitProxy(ctx context.Context, gitRemoteHost string, allowedRepoPath st
 				if ctx.Err() != nil {
 					return
 				}
-				logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("git proxy accept error: %v", err))
+				logJSON("NAUTILOOP_SIDECAR", "error", fmt.Sprintf("git proxy accept error: %v", err))
 				continue
 			}
 			go handleSSHConnection(conn, config, gitRemoteHost, allowedRepoPath)
@@ -408,7 +408,7 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, gitRemoteHost
 	// Perform SSH handshake with the agent
 	sshConn, chans, reqs, err := ssh.NewServerConn(nConn, config)
 	if err != nil {
-		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("SSH handshake failed: %v", err))
+		logJSON("NAUTILOOP_SIDECAR", "error", fmt.Sprintf("SSH handshake failed: %v", err))
 		return
 	}
 	defer sshConn.Close()
@@ -424,7 +424,7 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, gitRemoteHost
 
 		channel, requests, err := newChan.Accept()
 		if err != nil {
-			logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("failed to accept channel: %v", err))
+			logJSON("NAUTILOOP_SIDECAR", "error", fmt.Sprintf("failed to accept channel: %v", err))
 			continue
 		}
 
@@ -455,7 +455,7 @@ func handleSSHSession(channel ssh.Channel, requests <-chan *ssh.Request, gitRemo
 			cmdName := cmdParts[0]
 
 			if !allowedGitCommands[cmdName] {
-				logJSON("NEMO_SIDECAR", "warn", fmt.Sprintf("rejected SSH command: %s", cmdName))
+				logJSON("NAUTILOOP_SIDECAR", "warn", fmt.Sprintf("rejected SSH command: %s", cmdName))
 				req.Reply(false, nil)
 				channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
 				continue
@@ -467,7 +467,7 @@ func handleSSHSession(channel ssh.Channel, requests <-chan *ssh.Request, gitRemo
 				requestedRepo = strings.TrimPrefix(requestedRepo, "/")
 				normalizedAllowed := strings.TrimPrefix(allowedRepoPath, "/")
 				if requestedRepo != normalizedAllowed {
-					logJSON("NEMO_SIDECAR", "warn", fmt.Sprintf(
+					logJSON("NAUTILOOP_SIDECAR", "warn", fmt.Sprintf(
 						"rejected git command: repo path %q does not match allowed %q",
 						requestedRepo, normalizedAllowed))
 					req.Reply(false, nil)
@@ -476,7 +476,7 @@ func handleSSHSession(channel ssh.Channel, requests <-chan *ssh.Request, gitRemo
 				}
 			}
 
-			logJSON("NEMO_SIDECAR", "info", fmt.Sprintf("proxying git command: %s to %s", cmdName, gitRemoteHost))
+			logJSON("NAUTILOOP_SIDECAR", "info", fmt.Sprintf("proxying git command: %s to %s", cmdName, gitRemoteHost))
 			req.Reply(true, nil)
 
 			// Proxy the command to the actual git remote via SSH
@@ -506,14 +506,14 @@ func proxyGitCommand(channel ssh.Channel, command string, gitRemoteHost string) 
 	sshKeyPath := filepath.Join("/secrets", "ssh-key", "id_ed25519")
 	keyData, err := os.ReadFile(sshKeyPath)
 	if err != nil {
-		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("failed to read SSH key: %v", err))
+		logJSON("NAUTILOOP_SIDECAR", "error", fmt.Sprintf("failed to read SSH key: %v", err))
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
 		return
 	}
 
 	signer, err := ssh.ParsePrivateKey(keyData)
 	if err != nil {
-		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("failed to parse SSH key: %v", err))
+		logJSON("NAUTILOOP_SIDECAR", "error", fmt.Sprintf("failed to parse SSH key: %v", err))
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
 		return
 	}
@@ -548,12 +548,12 @@ func proxyGitCommand(channel ssh.Channel, command string, gitRemoteHost string) 
 				return fmt.Errorf("host key verification failed for %s", hostname)
 			}
 		} else {
-			logJSON("NEMO_SIDECAR", "error", "known_hosts file is empty or unreadable — refusing to connect without host key verification")
+			logJSON("NAUTILOOP_SIDECAR", "error", "known_hosts file is empty or unreadable — refusing to connect without host key verification")
 			channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
 			return
 		}
 	} else {
-		logJSON("NEMO_SIDECAR", "error", "known_hosts file not found at /secrets/ssh-known-hosts/known_hosts — refusing to connect")
+		logJSON("NAUTILOOP_SIDECAR", "error", "known_hosts file not found at /secrets/ssh-known-hosts/known_hosts — refusing to connect")
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
 		return
 	}
@@ -570,7 +570,7 @@ func proxyGitCommand(channel ssh.Channel, command string, gitRemoteHost string) 
 	destAddr := gitRemoteHost // host:port already formatted by caller
 	client, err := ssh.Dial("tcp", destAddr, clientConfig)
 	if err != nil {
-		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("failed to connect to git remote %s: %v", destAddr, err))
+		logJSON("NAUTILOOP_SIDECAR", "error", fmt.Sprintf("failed to connect to git remote %s: %v", destAddr, err))
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
 		return
 	}
@@ -578,7 +578,7 @@ func proxyGitCommand(channel ssh.Channel, command string, gitRemoteHost string) 
 
 	session, err := client.NewSession()
 	if err != nil {
-		logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("failed to create SSH session: %v", err))
+		logJSON("NAUTILOOP_SIDECAR", "error", fmt.Sprintf("failed to create SSH session: %v", err))
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1}))
 		return
 	}
@@ -595,7 +595,7 @@ func proxyGitCommand(channel ssh.Channel, command string, gitRemoteHost string) 
 		if exitErr, ok := err.(*ssh.ExitError); ok {
 			exitCode = uint32(exitErr.ExitStatus())
 		} else {
-			logJSON("NEMO_SIDECAR", "error", fmt.Sprintf("git command error: %v", err))
+			logJSON("NAUTILOOP_SIDECAR", "error", fmt.Sprintf("git command error: %v", err))
 			exitCode = 1
 		}
 	}
@@ -678,7 +678,7 @@ func logJSON(prefix, level, msg string) {
 }
 
 func main() {
-	logJSON("NEMO_SIDECAR", "info", "starting auth sidecar")
+	logJSON("NAUTILOOP_SIDECAR", "info", "starting auth sidecar")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -692,7 +692,7 @@ func main() {
 	if remote.host == "" {
 		log.Fatalf("Failed to parse git host from GIT_REPO_URL: %s", gitRepoURL)
 	}
-	logJSON("NEMO_SIDECAR", "info", fmt.Sprintf("git remote host: %s, allowed repo: %s", remote.host, remote.repoPath))
+	logJSON("NAUTILOOP_SIDECAR", "info", fmt.Sprintf("git remote host: %s, allowed repo: %s", remote.host, remote.repoPath))
 
 	// Start all three servers
 
@@ -770,14 +770,14 @@ func main() {
 	if err := os.WriteFile(readyPath, []byte("ready"), 0644); err != nil {
 		log.Fatalf("failed to write readiness file: %v", err)
 	}
-	logJSON("NEMO_SIDECAR", "info", "all ports ready, readiness file written")
+	logJSON("NAUTILOOP_SIDECAR", "info", "all ports ready, readiness file written")
 
 	// FR-23: Handle SIGTERM gracefully
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	<-sigCh
 
-	logJSON("NEMO_SIDECAR", "info", "received shutdown signal, draining connections")
+	logJSON("NAUTILOOP_SIDECAR", "info", "received shutdown signal, draining connections")
 
 	// 5s grace period for draining
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -811,9 +811,9 @@ func main() {
 	select {
 	case <-sshDone:
 	case <-shutdownCtx.Done():
-		logJSON("NEMO_SIDECAR", "warn", "SSH session drain timed out, proceeding with shutdown")
+		logJSON("NAUTILOOP_SIDECAR", "warn", "SSH session drain timed out, proceeding with shutdown")
 	}
 
 	wg.Wait()
-	logJSON("NEMO_SIDECAR", "info", "shutdown complete")
+	logJSON("NAUTILOOP_SIDECAR", "info", "shutdown complete")
 }

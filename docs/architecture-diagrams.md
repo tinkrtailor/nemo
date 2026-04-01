@@ -1,4 +1,4 @@
-# Nemo Architecture Diagrams
+# Nautiloop Architecture Diagrams
 
 Mermaid diagrams rendered natively by GitHub. Visual companion to [`design.md`](design.md) and [`architecture.md`](architecture.md).
 
@@ -6,7 +6,7 @@ Mermaid diagrams rendered natively by GitHub. Visual companion to [`design.md`](
 
 ## 1. System Architecture Overview
 
-High-level view of all components: the engineer's machine, the k3s cluster (split into `nemo-system` and `nemo-jobs` namespaces), shared storage, and external services.
+High-level view of all components: the engineer's machine, the k3s cluster (split into `nautiloop-system` and `nautiloop-jobs` namespaces), shared storage, and external services.
 
 ```mermaid
 graph TD
@@ -16,13 +16,13 @@ graph TD
 
     subgraph k3s["k3s Cluster (Hetzner CCX43)"]
 
-        subgraph nemo-system["Namespace: nemo-system"]
+        subgraph nautiloop-system["Namespace: nautiloop-system"]
             API["<b>API Server</b><br/>axum on :8080<br/>submit, status, logs,<br/>cancel, approve, inspect"]
             PG[("<b>Postgres 16</b><br/>Pod + PVC<br/>loops, jobs, engineers,<br/>egress_logs, log_events")]
             LE["<b>Loop Engine</b><br/>Reconciliation tick 5s<br/>K8s Job watcher (kube-rs)<br/>State machine driver"]
         end
 
-        subgraph nemo-jobs["Namespace: nemo-jobs"]
+        subgraph nautiloop-jobs["Namespace: nautiloop-jobs"]
             J1["Implement Job<br/>(claude-code)"]
             J2["Test Job<br/>(runner)"]
             J3["Review Job<br/>(opencode)"]
@@ -46,8 +46,8 @@ graph TD
     J3 -->|"via sidecar :9091"| Git
 
     style k3s fill:#1a1a2e,stroke:#e94560,color:#fff
-    style nemo-system fill:#16213e,stroke:#0f3460,color:#fff
-    style nemo-jobs fill:#1a1a2e,stroke:#e94560,color:#fff
+    style nautiloop-system fill:#16213e,stroke:#0f3460,color:#fff
+    style nautiloop-jobs fill:#1a1a2e,stroke:#e94560,color:#fff
     style CLI fill:#0f3460,stroke:#e94560,color:#fff
     style ModelAPIs fill:#533483,stroke:#e94560,color:#fff
     style Git fill:#533483,stroke:#e94560,color:#fff
@@ -61,7 +61,7 @@ Each agent job runs as a K8s Job with two containers: the agent (claude-code or 
 
 ```mermaid
 graph LR
-    subgraph Pod["K8s Job Pod: nemo-{id}-{stage}-r{round}"]
+    subgraph Pod["K8s Job Pod: nautiloop-{id}-{stage}-r{round}"]
         direction LR
 
         subgraph Agent["Agent Container<br/>(claude-code OR opencode)<br/>User 1000, readOnlyRootFilesystem"]
@@ -312,7 +312,7 @@ Three config layers merge with increasing priority. CLI flags are the highest-pr
 
 ```mermaid
 graph TD
-    CL["<b>Layer 1: Cluster Config</b><br/>(lowest priority)<br/>K8s ConfigMap + env vars<br/>/etc/nemo/cluster.toml<br/><i>node_size, provider, domain,<br/>default models, max caps</i>"]
+    CL["<b>Layer 1: Cluster Config</b><br/>(lowest priority)<br/>K8s ConfigMap + env vars<br/>/etc/nautiloop/cluster.toml<br/><i>node_size, provider, domain,<br/>default models, max caps</i>"]
 
     REPO["<b>Layer 2: Repo Config</b><br/>(team conventions)<br/>nemo.toml in monorepo root<br/>(checked in)<br/><i>models, limits, services,<br/>max_rounds_harden/implement</i>"]
 
@@ -421,7 +421,7 @@ graph LR
     AUTH_CMD -->|"K8s API"| SECRETS
 
     subgraph Cluster["k3s Cluster"]
-        SECRETS["<b>K8s Secrets</b><br/>nemo-creds-{engineer}<br/>nemo-ssh-{engineer}"]
+        SECRETS["<b>K8s Secrets</b><br/>nautiloop-creds-{engineer}<br/>nautiloop-ssh-{engineer}"]
 
         subgraph JobPod["Job Pod"]
             AGENT["<b>Agent Container</b><br/>NO /secrets mount<br/>Cannot read credentials"]
@@ -514,7 +514,7 @@ flowchart TD
 
 ## 10. Engineer Workflow (Pitch Diagram)
 
-How an engineer uses Nemo day-to-day. This is the product from the user's perspective.
+How an engineer uses Nautiloop day-to-day. This is the product from the user's perspective.
 
 ```mermaid
 graph TD
@@ -529,7 +529,7 @@ graph TD
         MERGE["Review PR, merge<br/><i>(nemo ship: auto-merged)</i>"]
     end
 
-    subgraph Nemo["⚡ Nemo (runs on shared cluster)"]
+    subgraph Nautiloop["⚡ Nautiloop (runs on shared cluster)"]
         direction TB
 
         subgraph Harden["Spec Hardening Loop"]
@@ -565,7 +565,7 @@ graph TD
     PR --> MERGE
 
     style Engineer fill:#0f3460,stroke:#e94560,color:#fff
-    style Nemo fill:#1a1a2e,stroke:#e94560,color:#fff
+    style Nautiloop fill:#1a1a2e,stroke:#e94560,color:#fff
     style Harden fill:#16213e,stroke:#0f3460,color:#fff
     style Build fill:#16213e,stroke:#0f3460,color:#fff
     style PR fill:#006400,stroke:#e94560,color:#fff
@@ -576,11 +576,11 @@ graph TD
 
 ## 11. Parallel Execution (Team View)
 
-What it looks like when a team of 3 engineers is using Nemo simultaneously. Each engineer runs up to 5 parallel loops on shared infrastructure.
+What it looks like when a team of 3 engineers is using Nautiloop simultaneously. Each engineer runs up to 5 parallel loops on shared infrastructure.
 
 ```mermaid
 gantt
-    title Nemo: 3 Engineers × 5 Parallel Loops
+    title Nautiloop: 3 Engineers × 5 Parallel Loops
     dateFormat HH:mm
     axisFormat %H:%M
 
@@ -607,7 +607,7 @@ gantt
 
 ## 12. The Convergent Loop (Core Primitive)
 
-The single primitive that powers everything in Nemo. Both spec hardening and implementation are instances of this same loop.
+The single primitive that powers everything in Nautiloop. Both spec hardening and implementation are instances of this same loop.
 
 ```mermaid
 graph TD

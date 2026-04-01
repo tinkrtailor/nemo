@@ -7,7 +7,7 @@ output "control_plane_url" {
 
 output "server_ip" {
   description = "Public IP of the Hetzner server"
-  value       = hcloud_server.nemo.ipv4_address
+  value       = hcloud_server.nautiloop.ipv4_address
 }
 
 output "namespace_jobs" {

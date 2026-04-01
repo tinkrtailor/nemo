@@ -5,7 +5,7 @@ use axum::response::IntoResponse;
 use uuid::Uuid;
 
 use super::AppState;
-use crate::error::NemoError;
+use crate::error::NautiloopError;
 use crate::state::LoopFlag;
 use crate::types::api::{
     ApproveResponse, CancelResponse, CredentialRequest, InspectResponse, LogsQuery, LoopSummary,
@@ -23,7 +23,7 @@ pub struct InspectQuery {
 pub async fn start(
     State(state): State<AppState>,
     Json(req): Json<StartRequest>,
-) -> Result<impl IntoResponse, NemoError> {
+) -> Result<impl IntoResponse, NautiloopError> {
     // Validate engineer name: must be non-empty, lowercase alphanumeric + hyphens.
     // Lowercase enforced to prevent normalization collisions in K8s Secret names.
     if req.engineer.is_empty()
@@ -37,7 +37,7 @@ pub async fn start(
             .starts_with(|c: char| c.is_ascii_alphanumeric())
         || !req.engineer.ends_with(|c: char| c.is_ascii_alphanumeric())
     {
-        return Err(NemoError::BadRequest(
+        return Err(NautiloopError::BadRequest(
             "engineer must be 1-63 chars, lowercase alphanumeric with hyphens, \
              starting and ending with alphanumeric"
                 .to_string(),
@@ -46,7 +46,7 @@ pub async fn start(
 
     // If ship_mode, check that ship is allowed in config
     if req.ship_mode && !state.config.ship.allowed {
-        return Err(NemoError::ShipNotEnabled);
+        return Err(NautiloopError::ShipNotEnabled);
     }
 
     // Fetch latest from remote so spec validation and branch creation use current state
@@ -58,7 +58,7 @@ pub async fn start(
         .git
         .read_file(&req.spec_path, &default_ref)
         .await
-        .map_err(|_| NemoError::SpecNotFound {
+        .map_err(|_| NautiloopError::SpecNotFound {
             path: req.spec_path.clone(),
         })?;
     let branch = generate_branch_name(&req.engineer, &req.spec_path, &spec_content);
@@ -145,8 +145,8 @@ pub async fn start(
 
     match state.store.create_loop(&record).await {
         Ok(_) => {}
-        Err(NemoError::Database(ref e)) if is_unique_violation(e) => {
-            return Err(NemoError::ActiveLoopConflict {
+        Err(NautiloopError::Database(ref e)) if is_unique_violation(e) => {
+            return Err(NautiloopError::ActiveLoopConflict {
                 branch: branch.clone(),
             });
         }
@@ -196,7 +196,7 @@ pub async fn start(
 pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
-) -> Result<Json<StatusResponse>, NemoError> {
+) -> Result<Json<StatusResponse>, NautiloopError> {
     let show_all = query.all.unwrap_or(false);
     let loops = state
         .store
@@ -230,13 +230,13 @@ pub async fn logs(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Query(query): Query<LogsQuery>,
-) -> Result<impl IntoResponse, NemoError> {
+) -> Result<impl IntoResponse, NautiloopError> {
     // Verify loop exists
     let record = state
         .store
         .get_loop(id)
         .await?
-        .ok_or(NemoError::LoopNotFound { id })?;
+        .ok_or(NautiloopError::LoopNotFound { id })?;
 
     // For terminal loops, return all historical logs
     if record.state.is_terminal() {
@@ -270,15 +270,15 @@ pub async fn logs(
 pub async fn cancel(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<CancelResponse>, NemoError> {
+) -> Result<Json<CancelResponse>, NautiloopError> {
     let record = state
         .store
         .get_loop(id)
         .await?
-        .ok_or(NemoError::LoopNotFound { id })?;
+        .ok_or(NautiloopError::LoopNotFound { id })?;
 
     if record.state.is_terminal() {
-        return Err(NemoError::InvalidStateTransition {
+        return Err(NautiloopError::InvalidStateTransition {
             action: "cancel".to_string(),
             state: record.state.to_string(),
             expected: "non-terminal state".to_string(),
@@ -303,15 +303,15 @@ pub async fn cancel(
 pub async fn approve(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<ApproveResponse>, NemoError> {
+) -> Result<Json<ApproveResponse>, NautiloopError> {
     let record = state
         .store
         .get_loop(id)
         .await?
-        .ok_or(NemoError::LoopNotFound { id })?;
+        .ok_or(NautiloopError::LoopNotFound { id })?;
 
     if record.state != LoopState::AwaitingApproval {
-        return Err(NemoError::InvalidStateTransition {
+        return Err(NautiloopError::InvalidStateTransition {
             action: "approve".to_string(),
             state: record.state.to_string(),
             expected: "AWAITING_APPROVAL".to_string(),
@@ -334,15 +334,15 @@ pub async fn approve(
 pub async fn resume(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<ResumeResponse>, NemoError> {
+) -> Result<Json<ResumeResponse>, NautiloopError> {
     let record = state
         .store
         .get_loop(id)
         .await?
-        .ok_or(NemoError::LoopNotFound { id })?;
+        .ok_or(NautiloopError::LoopNotFound { id })?;
 
     if record.state != LoopState::Paused && record.state != LoopState::AwaitingReauth {
-        return Err(NemoError::InvalidStateTransition {
+        return Err(NautiloopError::InvalidStateTransition {
             action: "resume".to_string(),
             state: record.state.to_string(),
             expected: "PAUSED or AWAITING_REAUTH".to_string(),
@@ -366,7 +366,7 @@ pub async fn resume(
 pub async fn inspect(
     State(state): State<AppState>,
     Query(params): Query<InspectQuery>,
-) -> Result<Json<InspectResponse>, NemoError> {
+) -> Result<Json<InspectResponse>, NautiloopError> {
     let branch = &params.branch;
 
     // Use get_loop_by_branch_any to include terminal loops (N5)
@@ -374,7 +374,7 @@ pub async fn inspect(
         .store
         .get_loop_by_branch_any(branch)
         .await?
-        .ok_or_else(|| NemoError::BadRequest(format!("No loop found for branch: {branch}")))?;
+        .ok_or_else(|| NautiloopError::BadRequest(format!("No loop found for branch: {branch}")))?;
 
     let rounds = state.store.get_rounds(record.id).await?;
 
@@ -416,11 +416,11 @@ pub async fn inspect(
 /// POST /credentials - Register or update engineer credentials.
 ///
 /// Stores credential metadata in Postgres and creates/updates a K8s Secret
-/// `nemo-creds-{engineer}` in the jobs namespace so job pods can mount it.
+/// `nautiloop-creds-{engineer}` in the jobs namespace so job pods can mount it.
 pub async fn upsert_credentials(
     State(state): State<AppState>,
     Json(req): Json<CredentialRequest>,
-) -> Result<impl IntoResponse, NemoError> {
+) -> Result<impl IntoResponse, NautiloopError> {
     if req.engineer.is_empty()
         || req.engineer.len() > 63
         || !req
@@ -432,7 +432,7 @@ pub async fn upsert_credentials(
             .starts_with(|c: char| c.is_ascii_alphanumeric())
         || !req.engineer.ends_with(|c: char| c.is_ascii_alphanumeric())
     {
-        return Err(NemoError::BadRequest(
+        return Err(NautiloopError::BadRequest(
             "engineer must be 1-63 chars, lowercase alphanumeric with hyphens, \
              starting and ending with alphanumeric"
                 .to_string(),
@@ -474,12 +474,12 @@ pub async fn upsert_credentials(
     // Write K8s Secret FIRST, then Postgres metadata.
     // This ensures jobs never mount stale secrets when Postgres says creds are valid.
     let kube_client = state.kube_client.as_ref().ok_or_else(|| {
-        NemoError::Internal("K8s client not available — cannot store credentials".to_string())
+        NautiloopError::Internal("K8s client not available — cannot store credentials".to_string())
     })?;
     {
         // Normalize engineer name for K8s: lowercase, replace _ with -
         let safe_engineer: String = req.engineer.to_lowercase().replace('_', "-");
-        let secret_name = format!("nemo-creds-{safe_engineer}");
+        let secret_name = format!("nautiloop-creds-{safe_engineer}");
         let namespace = &state.config.cluster.jobs_namespace;
         let secrets_api: kube::Api<k8s_openapi::api::core::v1::Secret> =
             kube::Api::namespaced(kube_client.clone(), namespace);
@@ -523,7 +523,7 @@ pub async fn upsert_credentials(
                 .replace(&secret_name, &kube::api::PostParams::default(), &secret)
                 .await
                 .map_err(|e| {
-                    NemoError::Internal(format!("Failed to update K8s Secret {secret_name}: {e}"))
+                    NautiloopError::Internal(format!("Failed to update K8s Secret {secret_name}: {e}"))
                 })?;
         } else {
             // New secret — create
@@ -531,7 +531,7 @@ pub async fn upsert_credentials(
                 .create(&kube::api::PostParams::default(), &secret)
                 .await
                 .map_err(|e| {
-                    NemoError::Internal(format!("Failed to create K8s Secret {secret_name}: {e}"))
+                    NautiloopError::Internal(format!("Failed to create K8s Secret {secret_name}: {e}"))
                 })?;
         }
     }
@@ -579,7 +579,7 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
 mod tests {
     use super::*;
     use crate::api::AppState;
-    use crate::config::NemoConfig;
+    use crate::config::NautiloopConfig;
     use crate::git::mock::MockGitOperations;
     use crate::state::StateStore;
     use crate::state::memory::MemoryStateStore;
@@ -593,7 +593,7 @@ mod tests {
     fn test_app() -> (Router, Arc<MemoryStateStore>, Arc<MockGitOperations>) {
         let store = Arc::new(MemoryStateStore::new());
         let git = Arc::new(MockGitOperations::new());
-        let mut config = NemoConfig::default();
+        let mut config = NautiloopConfig::default();
         config.ship.allowed = true;
         let state = AppState {
             store: store.clone(),
@@ -848,7 +848,7 @@ mod tests {
     async fn test_ship_not_enabled() {
         let store = Arc::new(MemoryStateStore::new());
         let git = Arc::new(MockGitOperations::new());
-        let config = NemoConfig::default(); // ship.allowed = false by default
+        let config = NautiloopConfig::default(); // ship.allowed = false by default
         let state = AppState {
             store: store.clone(),
             git: git.clone(),

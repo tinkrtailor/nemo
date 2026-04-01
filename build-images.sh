@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =============================================================================
-# Nemo — Docker Image Builder
+# Nautiloop — Docker Image Builder
 # =============================================================================
 # Builds production images and optionally pushes to GHCR.
 # Uses 1Password CLI (op) for GHCR authentication.
@@ -104,8 +104,8 @@ if [ "$PUSH" = true ]; then
         if ! op account list &>/dev/null; then
             error "Not signed in to 1Password. Run: op signin"
         fi
-        GHCR_USER=$(op read "op://Nemo/github-registry/username" 2>/dev/null) || error "Failed to read GHCR username from 1Password"
-        GHCR_TOKEN=$(op read "op://Nemo/github-registry/pat" 2>/dev/null) || error "Failed to read GHCR token from 1Password"
+        GHCR_USER=$(op read "op://Nautiloop/github-registry/username" 2>/dev/null) || error "Failed to read GHCR username from 1Password"
+        GHCR_TOKEN=$(op read "op://Nautiloop/github-registry/pat" 2>/dev/null) || error "Failed to read GHCR token from 1Password"
         echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin || error "GHCR login failed"
         success "Logged in to ghcr.io"
     else
@@ -115,7 +115,7 @@ fi
 
 # -- Buildx setup -------------------------------------------------------------
 
-BUILDER_NAME="nemo-multiarch"
+BUILDER_NAME="nautiloop-multiarch"
 if ! docker buildx inspect "$BUILDER_NAME" &>/dev/null; then
     info "Creating buildx builder '$BUILDER_NAME'..."
     docker buildx create --name "$BUILDER_NAME" --use --bootstrap
@@ -144,9 +144,9 @@ build_image() {
     local context="$3"
     shift 3
 
-    local full_image="$REGISTRY/nemo-$name:$IMAGE_TAG"
+    local full_image="$REGISTRY/nautiloop-$name:$IMAGE_TAG"
 
-    info "Building nemo-$name ($PLATFORM)..."
+    info "Building nautiloop-$name ($PLATFORM)..."
 
     local build_cmd=(
         docker buildx build
@@ -157,7 +157,7 @@ build_image() {
 
     # Only tag :latest when building all images (prevents split-brain versions)
     if [ -z "$ONLY" ]; then
-        build_cmd+=(-t "$REGISTRY/nemo-$name:latest")
+        build_cmd+=(-t "$REGISTRY/nautiloop-$name:latest")
     fi
 
     if [ "$PUSH" = true ]; then
@@ -173,10 +173,10 @@ build_image() {
 
     build_cmd+=("$context")
 
-    "${build_cmd[@]}" || error "Failed to build nemo-$name"
+    "${build_cmd[@]}" || error "Failed to build nautiloop-$name"
 
     BUILT_IMAGES+=("$full_image")
-    success "nemo-$name:$IMAGE_TAG built"
+    success "nautiloop-$name:$IMAGE_TAG built"
 }
 
 # -- Build: control-plane -----------------------------------------------------
@@ -211,7 +211,7 @@ if [ "$PUSH" = true ]; then
     info "Images pushed to $REGISTRY"
     echo ""
     info "Update terraform vars to use tag '$IMAGE_TAG':"
-    echo "  TF_VAR_control_plane_image=$REGISTRY/nemo-control-plane:$IMAGE_TAG"
-    echo "  TF_VAR_agent_base_image=$REGISTRY/nemo-agent-base:$IMAGE_TAG"
-    echo "  TF_VAR_sidecar_image=$REGISTRY/nemo-sidecar:$IMAGE_TAG"
+    echo "  TF_VAR_control_plane_image=$REGISTRY/nautiloop-control-plane:$IMAGE_TAG"
+    echo "  TF_VAR_agent_base_image=$REGISTRY/nautiloop-agent-base:$IMAGE_TAG"
+    echo "  TF_VAR_sidecar_image=$REGISTRY/nautiloop-sidecar:$IMAGE_TAG"
 fi

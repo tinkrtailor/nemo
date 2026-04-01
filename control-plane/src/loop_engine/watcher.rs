@@ -3,7 +3,7 @@ use tokio::sync::Notify;
 
 /// K8s Job watcher that monitors Job status changes and wakes the reconciler.
 ///
-/// Uses `kube::runtime::watcher` on `batch/v1/Job` with label selector `app=nemo`.
+/// Uses `kube::runtime::watcher` on `batch/v1/Job` with label selector `app=nautiloop`.
 /// On any Job status change, signals the reconciler to wake up via `Notify`.
 /// The watcher does NOT write to Postgres directly -- only the reconciler does.
 pub struct JobWatcher {
@@ -30,7 +30,7 @@ impl JobWatcher {
         use kube::runtime::watcher::Config;
 
         let jobs_api: Api<Job> = Api::namespaced(client, namespace);
-        let watcher_config = Config::default().labels("app=nemo");
+        let watcher_config = Config::default().labels("app=nautiloop");
 
         let mut stream = watcher(jobs_api, watcher_config).boxed();
 

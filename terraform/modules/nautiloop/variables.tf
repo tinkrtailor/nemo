@@ -1,10 +1,10 @@
-# Module inputs — provider-agnostic Nemo installation
+# Module inputs — provider-agnostic Nautiloop installation
 # The caller provisions the server; this module installs everything on it.
 
 # --- Required: server access ---
 
 variable "server_ip" {
-  description = "IP address of the server to install Nemo on"
+  description = "IP address of the server to install Nautiloop on"
   type        = string
 
   validation {
@@ -59,7 +59,7 @@ variable "domain" {
 
   validation {
     condition     = var.domain == null || var.domain == "" || can(regex("^[a-zA-Z0-9][a-zA-Z0-9.-]+[a-zA-Z0-9]$", var.domain))
-    error_message = "domain must be a valid hostname (e.g., nemo.example.com). Do not include http:// or https://."
+    error_message = "domain must be a valid hostname (e.g., nautiloop.example.com). Do not include http:// or https://."
   }
 }
 
@@ -79,19 +79,19 @@ variable "acme_email" {
 variable "control_plane_image" {
   description = "Control plane container image"
   type        = string
-  default     = "ghcr.io/tinkrtailor/nemo-control-plane:0.1.1"
+  default     = "ghcr.io/tinkrtailor/nautiloop-control-plane:0.1.1"
 }
 
 variable "agent_base_image" {
   description = "Agent base container image"
   type        = string
-  default     = "ghcr.io/tinkrtailor/nemo-agent-base:0.1.1"
+  default     = "ghcr.io/tinkrtailor/nautiloop-agent-base:0.1.1"
 }
 
 variable "sidecar_image" {
   description = "Auth sidecar container image"
   type        = string
-  default     = "ghcr.io/tinkrtailor/nemo-sidecar:0.1.1"
+  default     = "ghcr.io/tinkrtailor/nautiloop-sidecar:0.1.1"
 }
 
 # --- Optional: tuning ---
@@ -149,7 +149,7 @@ variable "ssh_known_hosts" {
 }
 
 variable "image_pull_secret_dockerconfigjson" {
-  description = "Docker config JSON for private registry access. If provided, creates nemo-registry-creds Secret."
+  description = "Docker config JSON for private registry access. If provided, creates nautiloop-registry-creds Secret."
   type        = string
   default     = null
   sensitive   = true

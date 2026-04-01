@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn test_detect_services() {
-        let temp = std::env::temp_dir().join(format!("nemo-test-{}", uuid::Uuid::new_v4()));
+        let temp = std::env::temp_dir().join(format!("nautiloop-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp).unwrap();
 
         // Create marker files

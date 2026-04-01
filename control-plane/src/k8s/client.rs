@@ -141,7 +141,7 @@ impl JobDispatcher for KubeJobDispatcher {
             Ok(String::new())
         } else {
             // Pods exist but all log retrievals failed
-            Err(crate::error::NemoError::Internal(format!(
+            Err(crate::error::NautiloopError::Internal(format!(
                 "Failed to retrieve logs from any pod for job {name}"
             )))
         }

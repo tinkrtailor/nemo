@@ -1,6 +1,6 @@
 # Convergence Loop Learnings
 
-Observations from dogfooding the Nemo convergent review loop by hand.
+Observations from dogfooding the Nautiloop convergent review loop by hand.
 Lane A implementation: Claude (Opus 4.6) implements, OpenCode (GPT-5.4) reviews.
 March 28, 2026.
 
@@ -54,9 +54,9 @@ output ingestion). These cascaded into every subsequent round. A tighter spec or
 better implement prompt ("follow the spec exactly, no mock implementations") would
 have eliminated rounds 1-3 entirely.
 
-**Action for Nemo:** The harden loop is the leverage point. More adversarial spec
+**Action for Nautiloop:** The harden loop is the leverage point. More adversarial spec
 hardening = fewer implementation rounds. The default implement prompt template
-(.nemo/prompts/implement.md) must explicitly prohibit mock/placeholder implementations.
+(.nautiloop/prompts/implement.md) must explicitly prohibit mock/placeholder implementations.
 
 ### 2. The reviewer never converges to zero on a large diff
 
@@ -64,7 +64,7 @@ With ~10K lines of new code, each round finds 2-5 new edge cases. The reviewer
 is not repeating itself; it's finding genuinely new things each pass. This suggests
 that for large implementations, a max_rounds safety valve is necessary.
 
-**Action for Nemo:** max_rounds_implement = 15 is validated as the right default.
+**Action for Nautiloop:** max_rounds_implement = 15 is validated as the right default.
 Consider: round threshold for auto-merge (ship mode) should be lower (5) to only
 auto-merge confident results.
 
@@ -74,7 +74,7 @@ Round 9 found a CRITICAL (harden_only never sets the harden flag) that was prese
 since the initial implementation. Earlier rounds missed it because they were focused
 on more obvious structural issues. Different angles each round catch different things.
 
-**Action for Nemo:** Don't assume early rounds catch all CRITICALs. The value of
+**Action for Nautiloop:** Don't assume early rounds catch all CRITICALs. The value of
 persistent review compounds over rounds. This validates the "exit on clean verdict,
 not fixed iteration count" design.
 
@@ -87,7 +87,7 @@ Rounds 8-11:  Integration bugs (git identity, credential handling, state persist
 Rounds 12+:   Subtle correctness (cursor monotonicity, memory leaks, terminal state semantics)
 ```
 
-**Action for Nemo:** The review prompt could be stage-aware. Early rounds: "focus on
+**Action for Nautiloop:** The review prompt could be stage-aware. Early rounds: "focus on
 architecture and spec compliance." Later rounds: "focus on edge cases, state
 persistence, and resource leaks."
 
@@ -101,7 +101,7 @@ ran tests, and committed nothing. It found and fixed bugs in the same pass but:
 
 Round 12 (re-run, read-only): Clean verdict with 3 specific findings. Traceable.
 
-**Action for Nemo:** Review pods MUST mount the worktree read-only. The verdict
+**Action for Nautiloop:** Review pods MUST mount the worktree read-only. The verdict
 is a JSON file, not code changes. This is already in the spec (Lane C) but this
 incident validates WHY. The permission config for the reviewer: `"permission":
 { "edit": "deny", "bash": "deny", "read": "allow" }`.
@@ -114,7 +114,7 @@ Multiple rounds found bugs in how feedback is passed between stages:
 - Round 8: Wrong feedback file type (review vs test)
 - Round 13: Revise output not parsed (spec path stale)
 
-**Action for Nemo:** The feedback file schema needs to be a first-class contract,
+**Action for Nautiloop:** The feedback file schema needs to be a first-class contract,
 not an afterthought. The control plane should validate feedback files before
 dispatching the next stage.
 
@@ -125,7 +125,7 @@ dispatching the next stage.
 - Round 10: Fatal vs retryable error classification
 - Round 11: Per-stage retry reset on transition
 
-**Action for Nemo:** Retry logic should be a dedicated module, not scattered
+**Action for Nautiloop:** Retry logic should be a dedicated module, not scattered
 across the driver. The retry model spec (from eng review) was correct but the
 implementation spread it across too many functions.
 
@@ -139,7 +139,7 @@ More findings related to git than any other subsystem:
 - Spec path stale after revise renames
 - Branch name sanitization
 
-**Action for Nemo:** The git module needs the most test coverage. Consider
+**Action for Nautiloop:** The git module needs the most test coverage. Consider
 integration tests against a real git repo (not mocks) as a priority.
 
 ### 9. The implement -> review latency is acceptable
@@ -162,7 +162,7 @@ The system should support: `nemo extend <id> --rounds 5` to add more rounds past
 the default limit. max_rounds is a safety valve for autonomous operation, but when
 a human is watching, they should be able to override it.
 
-**Action for Nemo:** Add `nemo extend` command. Default behavior (auto-stop at
+**Action for Nautiloop:** Add `nemo extend` command. Default behavior (auto-stop at
 max_rounds with NEEDS_HUMAN_REVIEW) stays the same. The extend command resets
 the round budget.
 
@@ -172,7 +172,7 @@ Round 16 found a race condition (concurrent /start destroys another request's br
 that no prior round caught. Concurrency bugs require the reviewer to think about
 multi-request scenarios, which only happens when the single-request bugs are fixed.
 
-**Action for Nemo:** Consider a dedicated "concurrency review" prompt for later rounds
+**Action for Nautiloop:** Consider a dedicated "concurrency review" prompt for later rounds
 that specifically asks: "what happens if two requests hit this endpoint simultaneously?"
 
 ### 12. Final convergence data across all lanes
@@ -193,7 +193,7 @@ parallel, completing in ~5 rounds wall time. 5.6x speedup.
 
 ### 13. The product built itself
 
-Nemo was built through the exact process it automates:
+Nautiloop was built through the exact process it automates:
 - Specs hardened through adversarial review (11 rounds)
 - Implementation via Claude Code in sandboxed worktrees
 - Cross-model adversarial review via OpenCode GPT-5.4
@@ -204,7 +204,7 @@ Nemo was built through the exact process it automates:
 331 production bugs caught that would have shipped without the loop.
 The loop works. Now automate it.
 
-## Metrics for Nemo Dashboard
+## Metrics for Nautiloop Dashboard
 
 Track these per loop:
 - Total rounds to convergence

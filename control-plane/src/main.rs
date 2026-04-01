@@ -6,14 +6,14 @@ use tokio::net::TcpListener;
 use tokio::sync::{Notify, watch};
 use tracing_subscriber::EnvFilter;
 
-use nemo_control_plane::api::{self, AppState};
-use nemo_control_plane::config::NemoConfig;
-use nemo_control_plane::git::GitOperations;
-use nemo_control_plane::k8s::JobDispatcher;
-use nemo_control_plane::k8s::client::KubeJobDispatcher;
-use nemo_control_plane::loop_engine::{ConvergentLoopDriver, Reconciler, watcher::JobWatcher};
-use nemo_control_plane::state::StateStore;
-use nemo_control_plane::state::postgres::PgStateStore;
+use nautiloop_control_plane::api::{self, AppState};
+use nautiloop_control_plane::config::NautiloopConfig;
+use nautiloop_control_plane::git::GitOperations;
+use nautiloop_control_plane::k8s::JobDispatcher;
+use nautiloop_control_plane::k8s::client::KubeJobDispatcher;
+use nautiloop_control_plane::loop_engine::{ConvergentLoopDriver, Reconciler, watcher::JobWatcher};
+use nautiloop_control_plane::state::StateStore;
+use nautiloop_control_plane::state::postgres::PgStateStore;
 
 /// Run mode selected by the first CLI argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,10 +30,10 @@ fn parse_mode() -> anyhow::Result<Mode> {
         Some("api-server") => Ok(Mode::ApiServer),
         Some("loop-engine") => Ok(Mode::LoopEngine),
         Some(other) => anyhow::bail!(
-            "Unknown mode '{}'. Usage: nemo-server <api-server|loop-engine>",
+            "Unknown mode '{}'. Usage: nautiloop-server <api-server|loop-engine>",
             other
         ),
-        None => anyhow::bail!("Usage: nemo-server <api-server|loop-engine>"),
+        None => anyhow::bail!("Usage: nautiloop-server <api-server|loop-engine>"),
     }
 }
 
@@ -46,19 +46,19 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let mode = parse_mode()?;
-    tracing::info!(?mode, "Starting Nemo control plane");
+    tracing::info!(?mode, "Starting Nautiloop control plane");
 
-    // TODO(V1.5): Replace flat NemoConfig with three-layer config merge
+    // TODO(V1.5): Replace flat NautiloopConfig with three-layer config merge
     // (cluster -> repo nemo.toml -> engineer ~/.nemo/config.toml) using
-    // config::merged::MergedConfig. V1 uses flat NemoConfig; engineer-level
+    // config::merged::MergedConfig. V1 uses flat NautiloopConfig; engineer-level
     // model/limit overrides are deferred to V1.5. The merge modules exist
     // in config/cluster.rs, config/engineer.rs, config/merged.rs, config/repo.rs.
-    let config = NemoConfig::load().map_err(|e| anyhow::anyhow!(e))?;
+    let config = NautiloopConfig::load().map_err(|e| anyhow::anyhow!(e))?;
     let config_arc = Arc::new(config.clone());
 
-    // API server needs NEMO_API_KEY for auth middleware
-    if mode == Mode::ApiServer && std::env::var("NEMO_API_KEY").is_err() {
-        anyhow::bail!("NEMO_API_KEY environment variable is required for api-server mode");
+    // API server needs NAUTILOOP_API_KEY for auth middleware
+    if mode == Mode::ApiServer && std::env::var("NAUTILOOP_API_KEY").is_err() {
+        anyhow::bail!("NAUTILOOP_API_KEY environment variable is required for api-server mode");
     }
 
     // Connect to Postgres and run migrations
@@ -85,10 +85,10 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("Connected to Kubernetes cluster");
 
             let bare_repo_path = std::env::var("BARE_REPO_PATH")
-                .or_else(|_| std::env::var("NEMO_BARE_REPO_PATH"))
+                .or_else(|_| std::env::var("NAUTILOOP_BARE_REPO_PATH"))
                 .unwrap_or_else(|_| "/bare-repo".to_string());
             let git: Arc<dyn GitOperations> = Arc::new(
-                nemo_control_plane::git::bare::BareRepoGitOperations::new(&bare_repo_path),
+                nautiloop_control_plane::git::bare::BareRepoGitOperations::new(&bare_repo_path),
             );
 
             let app_state = AppState {
@@ -133,10 +133,10 @@ async fn main() -> anyhow::Result<()> {
             ));
 
             let bare_repo_path = std::env::var("BARE_REPO_PATH")
-                .or_else(|_| std::env::var("NEMO_BARE_REPO_PATH"))
+                .or_else(|_| std::env::var("NAUTILOOP_BARE_REPO_PATH"))
                 .unwrap_or_else(|_| "/bare-repo".to_string());
             let git: Arc<dyn GitOperations> = Arc::new(
-                nemo_control_plane::git::bare::BareRepoGitOperations::new(&bare_repo_path),
+                nautiloop_control_plane::git::bare::BareRepoGitOperations::new(&bare_repo_path),
             );
 
             let driver = Arc::new(ConvergentLoopDriver::new(
@@ -189,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    tracing::info!("Nemo control plane shut down");
+    tracing::info!("Nautiloop control plane shut down");
     Ok(())
 }
 

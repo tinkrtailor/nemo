@@ -5,19 +5,19 @@ locals {
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nemo-postgres
-  namespace: nemo-system
+  name: nautiloop-postgres
+  namespace: nautiloop-system
   labels:
-    app: nemo-postgres
+    app: nautiloop-postgres
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: nemo-postgres
+      app: nautiloop-postgres
   template:
     metadata:
       labels:
-        app: nemo-postgres
+        app: nautiloop-postgres
     spec:
       containers:
         - name: postgres
@@ -26,13 +26,13 @@ spec:
             - containerPort: 5432
           env:
             - name: POSTGRES_DB
-              value: nemo
+              value: nautiloop
             - name: POSTGRES_USER
-              value: nemo
+              value: nautiloop
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: nemo-postgres-credentials
+                  name: nautiloop-postgres-credentials
                   key: password
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
@@ -48,27 +48,27 @@ spec:
               memory: 2Gi
           livenessProbe:
             exec:
-              command: ["pg_isready", "-U", "nemo"]
+              command: ["pg_isready", "-U", "nautiloop"]
             initialDelaySeconds: 15
             periodSeconds: 10
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "nemo"]
+              command: ["pg_isready", "-U", "nautiloop"]
             initialDelaySeconds: 5
             periodSeconds: 5
       volumes:
         - name: postgres-data
           persistentVolumeClaim:
-            claimName: nemo-postgres-data
+            claimName: nautiloop-postgres-data
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: nemo-postgres
-  namespace: nemo-system
+  name: nautiloop-postgres
+  namespace: nautiloop-system
 spec:
   selector:
-    app: nemo-postgres
+    app: nautiloop-postgres
   ports:
     - port: 5432
       targetPort: 5432
@@ -76,8 +76,8 @@ spec:
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: nemo-postgres-backup
-  namespace: nemo-system
+  name: nautiloop-postgres-backup
+  namespace: nautiloop-system
 spec:
   schedule: "0 2 * * *"
   jobTemplate:
@@ -91,15 +91,15 @@ spec:
               args:
                 - |
                   set -e
-                  find /data/backups -name "nemo-*.sql.gz" -mtime +7 -delete 2>/dev/null || true
-                  PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h nemo-postgres -U nemo nemo | \
-                    gzip > /data/backups/nemo-$(date +%Y%m%d-%H%M%S).sql.gz
+                  find /data/backups -name "nautiloop-*.sql.gz" -mtime +7 -delete 2>/dev/null || true
+                  PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h nautiloop-postgres -U nautiloop nautiloop | \
+                    gzip > /data/backups/nautiloop-$(date +%Y%m%d-%H%M%S).sql.gz
                   echo "Backup completed successfully"
               env:
                 - name: POSTGRES_PASSWORD
                   valueFrom:
                     secretKeyRef:
-                      name: nemo-postgres-credentials
+                      name: nautiloop-postgres-credentials
                       key: password
               volumeMounts:
                 - name: backup-volume
@@ -134,7 +134,7 @@ resource "null_resource" "k8s_postgres" {
   provisioner "remote-exec" {
     inline = [
       "echo '${base64encode(local.postgres_yaml)}' | base64 -d | kubectl apply -f -",
-      "kubectl -n nemo-system rollout status deployment/nemo-postgres --timeout=300s",
+      "kubectl -n nautiloop-system rollout status deployment/nautiloop-postgres --timeout=300s",
     ]
   }
 }

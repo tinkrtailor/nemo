@@ -1,5 +1,5 @@
 #cloud-config
-# Cloud-init for Nemo k3s server
+# Cloud-init for Nautiloop k3s server
 # Prepares the server for k3s installation via remote-exec provisioner
 
 package_update: true
@@ -16,8 +16,8 @@ packages:
 runcmd:
   - mkdir -p /data/backups
   - chmod 700 /data/backups
-  - mkdir -p /data/nemo-postgres
-  - chmod 755 /data/nemo-postgres
+  - mkdir -p /data/nautiloop-postgres
+  - chmod 755 /data/nautiloop-postgres
 
 # Disable swap (required for k3s)
 swap:

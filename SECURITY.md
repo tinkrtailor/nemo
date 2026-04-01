@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in Nemo, please report it responsibly.
+If you discover a security vulnerability in Nautiloop, please report it responsibly.
 
 **Email:** security@tinkrtailor.com
 
@@ -25,7 +25,7 @@ If you discover a security vulnerability in Nemo, please report it responsibly.
 
 This policy covers:
 
-- The Nemo control plane (`control-plane/`)
+- The Nautiloop control plane (`control-plane/`)
 - The CLI (`cli/`)
 - The auth sidecar (`images/sidecar/`)
 - The Terraform module (`terraform/modules/nautiloop/`)

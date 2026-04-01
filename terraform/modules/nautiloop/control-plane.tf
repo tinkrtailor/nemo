@@ -1,35 +1,35 @@
 # Control plane: nemo.toml config, repo-init job, API server, loop engine — applied via SSH+kubectl.
 
 locals {
-  nemo_toml = <<-TOML
+  nautiloop_toml = <<-TOML
 [cluster]
 git_repo_url = "${var.git_repo_url}"
 agent_image = "${var.agent_base_image}"
 sidecar_image = "${var.sidecar_image}"
-${var.image_pull_secret_dockerconfigjson != null ? "image_pull_secret = \"nemo-registry-creds\"" : ""}
+${var.image_pull_secret_dockerconfigjson != null ? "image_pull_secret = \"nautiloop-registry-creds\"" : ""}
 TOML
 
-  config_checksum = sha256(local.nemo_toml)
+  config_checksum = sha256(local.nautiloop_toml)
 
-  nemo_config_yaml = <<-YAML
+  nautiloop_config_yaml = <<-YAML
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: nemo-config
-  namespace: nemo-system
+  name: nautiloop-config
+  namespace: nautiloop-system
 data:
   nemo.toml: |
-    ${indent(4, local.nemo_toml)}
+    ${indent(4, local.nautiloop_toml)}
 YAML
 
-  image_pull_secrets_snippet = var.image_pull_secret_dockerconfigjson != null ? "imagePullSecrets:\n        - name: nemo-registry-creds" : ""
+  image_pull_secrets_snippet = var.image_pull_secret_dockerconfigjson != null ? "imagePullSecrets:\n        - name: nautiloop-registry-creds" : ""
 
   repo_init_yaml = <<-YAML
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: nemo-repo-init
-  namespace: nemo-system
+  name: nautiloop-repo-init
+  namespace: nautiloop-system
 spec:
   backoffLimit: 3
   template:
@@ -61,7 +61,7 @@ spec:
             - name: GIT_REPO_URL
               valueFrom:
                 configMapKeyRef:
-                  name: nemo-cluster-config
+                  name: nautiloop-cluster-config
                   key: git_repo_url
           volumeMounts:
             - name: bare-repo
@@ -75,14 +75,14 @@ spec:
       volumes:
         - name: bare-repo
           persistentVolumeClaim:
-            claimName: nemo-bare-repo
+            claimName: nautiloop-bare-repo
         - name: ssh-key
           secret:
-            secretName: nemo-repo-ssh-key
+            secretName: nautiloop-repo-ssh-key
             defaultMode: 0400
         - name: ssh-known-hosts
           configMap:
-            name: nemo-ssh-known-hosts
+            name: nautiloop-ssh-known-hosts
       restartPolicy: OnFailure
 YAML
 
@@ -90,23 +90,23 @@ YAML
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nemo-api-server
-  namespace: nemo-system
+  name: nautiloop-api-server
+  namespace: nautiloop-system
   labels:
-    app: nemo-api-server
+    app: nautiloop-api-server
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: nemo-api-server
+      app: nautiloop-api-server
   template:
     metadata:
       labels:
-        app: nemo-api-server
+        app: nautiloop-api-server
       annotations:
         config-checksum: "${local.config_checksum}"
     spec:
-      serviceAccountName: nemo-api-server
+      serviceAccountName: nautiloop-api-server
       ${local.image_pull_secrets_snippet}
       securityContext:
         fsGroup: 1000
@@ -120,17 +120,17 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: nemo-postgres-credentials
+                  name: nautiloop-postgres-credentials
                   key: DATABASE_URL
-            - name: NEMO_API_KEY
+            - name: NAUTILOOP_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: nemo-api-key
-                  key: NEMO_API_KEY
+                  name: nautiloop-api-key
+                  key: NAUTILOOP_API_KEY
             - name: GIT_HOST_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: nemo-git-host-token
+                  name: nautiloop-git-host-token
                   key: GIT_HOST_TOKEN
             - name: BARE_REPO_PATH
               value: /bare-repo
@@ -144,8 +144,8 @@ spec:
           volumeMounts:
             - name: bare-repo
               mountPath: /bare-repo
-            - name: nemo-config
-              mountPath: /etc/nemo
+            - name: nautiloop-config
+              mountPath: /etc/nautiloop
               readOnly: true
           startupProbe:
             httpGet:
@@ -168,19 +168,19 @@ spec:
       volumes:
         - name: bare-repo
           persistentVolumeClaim:
-            claimName: nemo-bare-repo
-        - name: nemo-config
+            claimName: nautiloop-bare-repo
+        - name: nautiloop-config
           configMap:
-            name: nemo-config
+            name: nautiloop-config
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: nemo-api-server
-  namespace: nemo-system
+  name: nautiloop-api-server
+  namespace: nautiloop-system
 spec:
   selector:
-    app: nemo-api-server
+    app: nautiloop-api-server
   ports:
     - port: 8080
       targetPort: 8080
@@ -190,23 +190,23 @@ YAML
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nemo-loop-engine
-  namespace: nemo-system
+  name: nautiloop-loop-engine
+  namespace: nautiloop-system
   labels:
-    app: nemo-loop-engine
+    app: nautiloop-loop-engine
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: nemo-loop-engine
+      app: nautiloop-loop-engine
   template:
     metadata:
       labels:
-        app: nemo-loop-engine
+        app: nautiloop-loop-engine
       annotations:
         config-checksum: "${local.config_checksum}"
     spec:
-      serviceAccountName: nemo-loop-engine
+      serviceAccountName: nautiloop-loop-engine
       ${local.image_pull_secrets_snippet}
       securityContext:
         fsGroup: 1000
@@ -218,12 +218,12 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: nemo-postgres-credentials
+                  name: nautiloop-postgres-credentials
                   key: DATABASE_URL
             - name: GIT_HOST_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: nemo-git-host-token
+                  name: nautiloop-git-host-token
                   key: GIT_HOST_TOKEN
             - name: BARE_REPO_PATH
               value: /bare-repo
@@ -232,8 +232,8 @@ spec:
           volumeMounts:
             - name: bare-repo
               mountPath: /bare-repo
-            - name: nemo-config
-              mountPath: /etc/nemo
+            - name: nautiloop-config
+              mountPath: /etc/nautiloop
               readOnly: true
           resources:
             requests:
@@ -251,20 +251,20 @@ spec:
       volumes:
         - name: bare-repo
           persistentVolumeClaim:
-            claimName: nemo-bare-repo
-        - name: nemo-config
+            claimName: nautiloop-bare-repo
+        - name: nautiloop-config
           configMap:
-            name: nemo-config
+            name: nautiloop-config
 YAML
 }
 
-# --- Nemo config ---
+# --- Nautiloop config ---
 
-resource "null_resource" "k8s_nemo_config" {
+resource "null_resource" "k8s_nautiloop_config" {
   depends_on = [null_resource.k8s_foundation]
 
   triggers = {
-    config_hash = sha256(local.nemo_config_yaml)
+    config_hash = sha256(local.nautiloop_config_yaml)
     server_ip   = var.server_ip
   }
 
@@ -277,7 +277,7 @@ resource "null_resource" "k8s_nemo_config" {
 
   provisioner "remote-exec" {
     inline = [
-      "echo '${base64encode(local.nemo_config_yaml)}' | base64 -d | kubectl apply -f -",
+      "echo '${base64encode(local.nautiloop_config_yaml)}' | base64 -d | kubectl apply -f -",
     ]
   }
 }
@@ -289,7 +289,7 @@ resource "null_resource" "k8s_repo_init" {
     null_resource.k8s_foundation,
     null_resource.k8s_secrets,
     null_resource.k8s_config,
-    null_resource.k8s_nemo_config,
+    null_resource.k8s_nautiloop_config,
     null_resource.ssh_keyscan,
   ]
 
@@ -308,12 +308,12 @@ resource "null_resource" "k8s_repo_init" {
   provisioner "remote-exec" {
     inline = [
       # Delete previous job if it exists (jobs are immutable)
-      "kubectl -n nemo-system delete job nemo-repo-init --ignore-not-found",
+      "kubectl -n nautiloop-system delete job nautiloop-repo-init --ignore-not-found",
       "echo '${base64encode(local.repo_init_yaml)}' | base64 -d | kubectl apply -f -",
       # Wait for completion. The job script already tolerates missing deploy keys
       # (git fetch failure is non-fatal inside the container). A timeout here means
       # a real infrastructure failure (bad PVC, secret mount, etc.) — fail hard.
-      "kubectl -n nemo-system wait --for=condition=complete job/nemo-repo-init --timeout=600s",
+      "kubectl -n nautiloop-system wait --for=condition=complete job/nautiloop-repo-init --timeout=600s",
     ]
   }
 }
@@ -326,7 +326,7 @@ resource "null_resource" "k8s_api_server" {
     null_resource.k8s_repo_init,
     null_resource.k8s_secrets,
     null_resource.k8s_config,
-    null_resource.k8s_nemo_config,
+    null_resource.k8s_nautiloop_config,
     null_resource.k8s_registry_creds,
   ]
 
@@ -357,7 +357,7 @@ resource "null_resource" "k8s_loop_engine" {
     null_resource.k8s_repo_init,
     null_resource.k8s_secrets,
     null_resource.k8s_config,
-    null_resource.k8s_nemo_config,
+    null_resource.k8s_nautiloop_config,
     null_resource.k8s_registry_creds,
   ]
 
@@ -406,13 +406,13 @@ resource "null_resource" "health_check" {
 
   provisioner "remote-exec" {
     inline = [
-      "echo 'Waiting for Nemo API server to be ready...'",
-      "kubectl -n nemo-system rollout status deployment/nemo-api-server --timeout=600s",
-      "kubectl -n nemo-system rollout status deployment/nemo-loop-engine --timeout=600s",
-      "SVC_IP=$(kubectl -n nemo-system get svc nemo-api-server -o jsonpath='{.spec.clusterIP}')",
+      "echo 'Waiting for Nautiloop API server to be ready...'",
+      "kubectl -n nautiloop-system rollout status deployment/nautiloop-api-server --timeout=600s",
+      "kubectl -n nautiloop-system rollout status deployment/nautiloop-loop-engine --timeout=600s",
+      "SVC_IP=$(kubectl -n nautiloop-system get svc nautiloop-api-server -o jsonpath='{.spec.clusterIP}')",
       "TRIES=0; until curl -sf http://$SVC_IP:8080/health >/dev/null 2>&1 || [ $TRIES -ge 60 ]; do sleep 2; TRIES=$((TRIES+1)); done",
       "curl -sf http://$SVC_IP:8080/health || { echo 'ERROR: API server health check failed after 120s'; exit 1; }",
-      "echo 'Nemo is ready.'",
+      "echo 'Nautiloop is ready.'",
     ]
   }
 }

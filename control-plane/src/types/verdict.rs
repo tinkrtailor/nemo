@@ -53,16 +53,16 @@ pub struct AuditVerdict {
     pub token_usage: TokenUsage,
 }
 
-/// NEMO_RESULT envelope: the typed output contract between agent and control plane.
-/// Written as a single JSON line prefixed with `NEMO_RESULT:` to stdout (FR-13).
+/// NAUTILOOP_RESULT envelope: the typed output contract between agent and control plane.
+/// Written as a single JSON line prefixed with `NAUTILOOP_RESULT:` to stdout (FR-13).
 /// The `stage` field uses short names: implement, test, review, audit, revise.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NemoResult {
+pub struct NautiloopResult {
     pub stage: String,
     pub data: serde_json::Value,
 }
 
-impl NemoResult {
+impl NautiloopResult {
     /// Parse the data field into a typed implement output.
     pub fn as_impl_output(&self) -> std::result::Result<ImplResultData, serde_json::Error> {
         serde_json::from_value(self.data.clone())
@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nemo_result_implement_roundtrip() {
+    fn test_nautiloop_result_implement_roundtrip() {
         let data = ImplResultData {
             new_sha: "abc123def456".to_string(),
             token_usage: TokenUsage {
@@ -318,12 +318,12 @@ mod tests {
             exit_code: 0,
             session_id: "sess-001".to_string(),
         };
-        let result = NemoResult {
+        let result = NautiloopResult {
             stage: "implement".to_string(),
             data: serde_json::to_value(&data).unwrap(),
         };
         let json = serde_json::to_string(&result).unwrap();
-        let parsed: NemoResult = serde_json::from_str(&json).unwrap();
+        let parsed: NautiloopResult = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.stage, "implement");
         let impl_data = parsed.as_impl_output().unwrap();
         assert_eq!(impl_data.new_sha, "abc123def456");
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nemo_result_test_roundtrip() {
+    fn test_nautiloop_result_test_roundtrip() {
         let data = TestResultData {
             services: vec![TestServiceResult {
                 name: "api".to_string(),
@@ -347,12 +347,12 @@ mod tests {
                 output: 0,
             },
         };
-        let result = NemoResult {
+        let result = NautiloopResult {
             stage: "test".to_string(),
             data: serde_json::to_value(&data).unwrap(),
         };
         let json = serde_json::to_string(&result).unwrap();
-        let parsed: NemoResult = serde_json::from_str(&json).unwrap();
+        let parsed: NautiloopResult = serde_json::from_str(&json).unwrap();
         let test_data = parsed.as_test_output().unwrap();
         assert!(test_data.all_passed);
         assert_eq!(test_data.ci_status, CiStatus::Passed);
@@ -360,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nemo_result_review_roundtrip() {
+    fn test_nautiloop_result_review_roundtrip() {
         let data = ReviewResultData {
             verdict: serde_json::json!({"clean": true, "summary": "looks good"}),
             token_usage: TokenUsage {
@@ -370,18 +370,18 @@ mod tests {
             exit_code: 0,
             session_id: "sess-review-1".to_string(),
         };
-        let result = NemoResult {
+        let result = NautiloopResult {
             stage: "review".to_string(),
             data: serde_json::to_value(&data).unwrap(),
         };
         let json = serde_json::to_string(&result).unwrap();
-        let parsed: NemoResult = serde_json::from_str(&json).unwrap();
+        let parsed: NautiloopResult = serde_json::from_str(&json).unwrap();
         let review_data = parsed.as_review_output().unwrap();
         assert_eq!(review_data.exit_code, 0);
     }
 
     #[test]
-    fn test_nemo_result_revise_roundtrip() {
+    fn test_nautiloop_result_revise_roundtrip() {
         let data = ReviseResultData {
             revised_spec_path: "specs/feature/invoice-cancel.md".to_string(),
             new_sha: "def789".to_string(),
@@ -392,12 +392,12 @@ mod tests {
             exit_code: 0,
             session_id: "sess-revise-1".to_string(),
         };
-        let result = NemoResult {
+        let result = NautiloopResult {
             stage: "revise".to_string(),
             data: serde_json::to_value(&data).unwrap(),
         };
         let json = serde_json::to_string(&result).unwrap();
-        let parsed: NemoResult = serde_json::from_str(&json).unwrap();
+        let parsed: NautiloopResult = serde_json::from_str(&json).unwrap();
         let revise_data = parsed.as_revise_output().unwrap();
         assert_eq!(
             revise_data.revised_spec_path,

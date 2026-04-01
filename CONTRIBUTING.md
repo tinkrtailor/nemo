@@ -1,12 +1,12 @@
-# Contributing to Nemo
+# Contributing to Nautiloop
 
-Nemo is open source under Apache 2.0. Contributions are welcome.
+Nautiloop is open source under Apache 2.0. Contributions are welcome.
 
 ## Getting started
 
 ```bash
-git clone https://github.com/tinkrtailor/nemo.git
-cd nemo
+git clone https://github.com/tinkrtailor/nautiloop.git
+cd nautiloop
 cargo build --workspace
 cargo test --workspace
 ```
@@ -24,7 +24,7 @@ control-plane/     Rust library + binary (API server + loop engine)
 cli/               Rust binary (nemo CLI)
 images/            Dockerfiles (control-plane, agent-base, sidecar)
 terraform/         Hetzner + k3s provisioning
-.nemo/prompts/     Agent prompt templates
+.nautiloop/prompts/     Agent prompt templates
 ```
 
 ## Development workflow
@@ -77,7 +77,7 @@ Open an issue on GitHub. Include:
 - What you expected to happen
 - What actually happened
 - Steps to reproduce
-- Nemo version (`nemo --version`)
+- Nautiloop version (`nemo --version`)
 - Relevant logs (`nemo logs <loop_id>`)
 
 ## License

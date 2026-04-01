@@ -9,7 +9,7 @@ use axum::extract::State;
 use axum::middleware;
 use axum::routing::{delete, get, post};
 
-use crate::config::NemoConfig;
+use crate::config::NautiloopConfig;
 use crate::git::GitOperations;
 use crate::state::StateStore;
 
@@ -18,7 +18,7 @@ use crate::state::StateStore;
 pub struct AppState {
     pub store: Arc<dyn StateStore>,
     pub git: Arc<dyn GitOperations>,
-    pub config: Arc<NemoConfig>,
+    pub config: Arc<NautiloopConfig>,
     /// Optional kube client for creating K8s Secrets during credential registration.
     /// None in test environments.
     pub kube_client: Option<kube::Client>,

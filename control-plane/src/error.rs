@@ -1,9 +1,9 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
-/// Top-level error type for the Nemo control plane.
+/// Top-level error type for the Nautiloop control plane.
 #[derive(Debug, thiserror::Error)]
-pub enum NemoError {
+pub enum NautiloopError {
     #[error("Spec not found: {path}")]
     SpecNotFound { path: String },
 
@@ -63,7 +63,7 @@ pub enum NemoError {
     Internal(String),
 }
 
-impl NemoError {
+impl NautiloopError {
     /// Whether this error is fatal (non-retryable) and should transition the loop to FAILED.
     /// Transient errors (DB timeout, K8s API blip) are retryable.
     pub fn is_fatal(&self) -> bool {
@@ -113,7 +113,7 @@ impl NemoError {
     }
 }
 
-impl IntoResponse for NemoError {
+impl IntoResponse for NautiloopError {
     fn into_response(self) -> Response {
         let status = self.status_code();
         let body = serde_json::json!({
@@ -123,4 +123,4 @@ impl IntoResponse for NemoError {
     }
 }
 
-pub type Result<T> = std::result::Result<T, NemoError>;
+pub type Result<T> = std::result::Result<T, NautiloopError>;

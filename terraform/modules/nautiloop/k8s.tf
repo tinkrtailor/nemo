@@ -10,21 +10,21 @@ locals {
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: nemo-system
+  name: nautiloop-system
   labels:
-    app: nemo
+    app: nautiloop
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: nemo-jobs
+  name: nautiloop-jobs
   labels:
-    app: nemo
+    app: nautiloop
 ---
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: nemo-bare-repo-system
+  name: nautiloop-bare-repo-system
 spec:
   capacity:
     storage: 100Gi
@@ -32,13 +32,13 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
   hostPath:
-    path: /data/nemo-bare-repo
+    path: /data/nautiloop-bare-repo
     type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: nemo-bare-repo-jobs
+  name: nautiloop-bare-repo-jobs
 spec:
   capacity:
     storage: 100Gi
@@ -46,13 +46,13 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
   hostPath:
-    path: /data/nemo-bare-repo
+    path: /data/nautiloop-bare-repo
     type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: nemo-postgres-data
+  name: nautiloop-postgres-data
 spec:
   capacity:
     storage: ${var.postgres_volume_size}Gi
@@ -60,18 +60,18 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
   hostPath:
-    path: /data/nemo-postgres
+    path: /data/nautiloop-postgres
     type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: nemo-bare-repo
-  namespace: nemo-system
+  name: nautiloop-bare-repo
+  namespace: nautiloop-system
 spec:
   accessModes: ["ReadWriteMany"]
   storageClassName: manual
-  volumeName: nemo-bare-repo-system
+  volumeName: nautiloop-bare-repo-system
   resources:
     requests:
       storage: 100Gi
@@ -79,12 +79,12 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: nemo-bare-repo
-  namespace: nemo-jobs
+  name: nautiloop-bare-repo
+  namespace: nautiloop-jobs
 spec:
   accessModes: ["ReadWriteMany"]
   storageClassName: manual
-  volumeName: nemo-bare-repo-jobs
+  volumeName: nautiloop-bare-repo-jobs
   resources:
     requests:
       storage: 100Gi
@@ -92,8 +92,8 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: nemo-sessions
-  namespace: nemo-jobs
+  name: nautiloop-sessions
+  namespace: nautiloop-jobs
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
@@ -103,12 +103,12 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: nemo-postgres-data
-  namespace: nemo-system
+  name: nautiloop-postgres-data
+  namespace: nautiloop-system
 spec:
   accessModes: ["ReadWriteOnce"]
   storageClassName: manual
-  volumeName: nemo-postgres-data
+  volumeName: nautiloop-postgres-data
   resources:
     requests:
       storage: ${var.postgres_volume_size}Gi
@@ -119,33 +119,33 @@ YAML
 apiVersion: v1
 kind: Secret
 metadata:
-  name: nemo-postgres-credentials
-  namespace: nemo-system
+  name: nautiloop-postgres-credentials
+  namespace: nautiloop-system
 data:
   password: ${base64encode(local.postgres_password)}
-  DATABASE_URL: ${base64encode("postgres://nemo:${local.postgres_password}@nemo-postgres:5432/nemo")}
+  DATABASE_URL: ${base64encode("postgres://nautiloop:${local.postgres_password}@nautiloop-postgres:5432/nautiloop")}
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: nemo-api-key
-  namespace: nemo-system
+  name: nautiloop-api-key
+  namespace: nautiloop-system
 data:
-  NEMO_API_KEY: ${base64encode(random_password.api_key.result)}
+  NAUTILOOP_API_KEY: ${base64encode(random_password.api_key.result)}
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: nemo-git-host-token
-  namespace: nemo-system
+  name: nautiloop-git-host-token
+  namespace: nautiloop-system
 data:
   GIT_HOST_TOKEN: ${base64encode(var.git_host_token)}
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: nemo-repo-ssh-key
-  namespace: nemo-system
+  name: nautiloop-repo-ssh-key
+  namespace: nautiloop-system
 data:
   id_ed25519: ${base64encode(local.deploy_private_key)}
 YAML
@@ -157,8 +157,8 @@ YAML
 apiVersion: v1
 kind: Secret
 metadata:
-  name: nemo-registry-creds
-  namespace: nemo-jobs
+  name: nautiloop-registry-creds
+  namespace: nautiloop-jobs
 type: kubernetes.io/dockerconfigjson
 data:
   .dockerconfigjson: ${local._dockerconfigjson_b64}
@@ -166,8 +166,8 @@ data:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: nemo-registry-creds
-  namespace: nemo-system
+  name: nautiloop-registry-creds
+  namespace: nautiloop-system
 type: kubernetes.io/dockerconfigjson
 data:
   .dockerconfigjson: ${local._dockerconfigjson_b64}
@@ -178,8 +178,8 @@ YAML
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: nemo-cluster-config
-  namespace: nemo-system
+  name: nautiloop-cluster-config
+  namespace: nautiloop-system
 data:
   git_repo_url: "${var.git_repo_url}"
   domain: "${local.has_domain ? var.domain : var.server_ip}"
@@ -187,8 +187,8 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: nemo-ssh-known-hosts
-  namespace: nemo-system
+  name: nautiloop-ssh-known-hosts
+  namespace: nautiloop-system
 data:
   known_hosts: |
     ${indent(4, var.ssh_known_hosts)}
@@ -196,8 +196,8 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: nemo-ssh-known-hosts
-  namespace: nemo-jobs
+  name: nautiloop-ssh-known-hosts
+  namespace: nautiloop-jobs
 data:
   known_hosts: |
     ${indent(4, var.ssh_known_hosts)}
@@ -208,20 +208,20 @@ YAML
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: nemo-loop-engine
-  namespace: nemo-system
+  name: nautiloop-loop-engine
+  namespace: nautiloop-system
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: nemo-api-server
-  namespace: nemo-system
+  name: nautiloop-api-server
+  namespace: nautiloop-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: nemo-loop-engine
-  namespace: nemo-jobs
+  name: nautiloop-loop-engine
+  namespace: nautiloop-jobs
 rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
@@ -245,22 +245,22 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: nemo-loop-engine
-  namespace: nemo-jobs
+  name: nautiloop-loop-engine
+  namespace: nautiloop-jobs
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: nemo-loop-engine
+  name: nautiloop-loop-engine
 subjects:
   - kind: ServiceAccount
-    name: nemo-loop-engine
-    namespace: nemo-system
+    name: nautiloop-loop-engine
+    namespace: nautiloop-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: nemo-api-server
-  namespace: nemo-jobs
+  name: nautiloop-api-server
+  namespace: nautiloop-jobs
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
@@ -269,16 +269,16 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: nemo-api-server
-  namespace: nemo-jobs
+  name: nautiloop-api-server
+  namespace: nautiloop-jobs
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: nemo-api-server
+  name: nautiloop-api-server
 subjects:
   - kind: ServiceAccount
-    name: nemo-api-server
-    namespace: nemo-system
+    name: nautiloop-api-server
+    namespace: nautiloop-system
 YAML
 
   # Networking: TLS mode (domain set) — cert-manager resources + IngressRoutes
@@ -305,7 +305,7 @@ apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
   name: redirect-https
-  namespace: nemo-system
+  namespace: nautiloop-system
 spec:
   redirectScheme:
     scheme: https
@@ -314,8 +314,8 @@ spec:
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
-  name: nemo-api-http
-  namespace: nemo-system
+  name: nautiloop-api-http
+  namespace: nautiloop-system
 spec:
   entryPoints: ["web"]
   routes:
@@ -323,40 +323,40 @@ spec:
       kind: Rule
       priority: 100
       services:
-        - name: nemo-api-server
+        - name: nautiloop-api-server
           port: 8080
     - match: "Host(`${local._domain}`)"
       kind: Rule
       middlewares:
         - name: redirect-https
-          namespace: nemo-system
+          namespace: nautiloop-system
       services:
-        - name: nemo-api-server
+        - name: nautiloop-api-server
           port: 8080
 ---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
-  name: nemo-api
-  namespace: nemo-system
+  name: nautiloop-api
+  namespace: nautiloop-system
 spec:
   entryPoints: ["websecure"]
   routes:
     - match: "Host(`${local._domain}`) && !Path(`/health`)"
       kind: Rule
       services:
-        - name: nemo-api-server
+        - name: nautiloop-api-server
           port: 8080
   tls:
-    secretName: nemo-tls
+    secretName: nautiloop-tls
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: nemo-tls
-  namespace: nemo-system
+  name: nautiloop-tls
+  namespace: nautiloop-system
 spec:
-  secretName: nemo-tls
+  secretName: nautiloop-tls
   issuerRef:
     name: letsencrypt-prod
     kind: ClusterIssuer
@@ -369,12 +369,12 @@ YAML
 apiVersion: v1
 kind: Service
 metadata:
-  name: nemo-api-server-lb
-  namespace: nemo-system
+  name: nautiloop-api-server-lb
+  namespace: nautiloop-system
 spec:
   type: LoadBalancer
   selector:
-    app: nemo-api-server
+    app: nautiloop-api-server
   ports:
     - port: 8080
       targetPort: 8080
@@ -509,9 +509,9 @@ resource "null_resource" "ssh_keyscan" {
         echo "ERROR: ssh-keyscan returned empty for $GITHOST" >&2
         exit 1
       fi
-      for NS in nemo-system nemo-jobs; do
+      for NS in nautiloop-system nautiloop-jobs; do
         kubectl --kubeconfig ${local.kubeconfig_path} -n "$NS" \
-          create configmap nemo-ssh-known-hosts \
+          create configmap nautiloop-ssh-known-hosts \
           --from-literal="known_hosts=$KNOWN_HOSTS" \
           --dry-run=client -o yaml | \
           kubectl --kubeconfig ${local.kubeconfig_path} apply -f -
@@ -581,7 +581,7 @@ resource "null_resource" "k8s_networking_tls" {
     inline = [
       "echo '${base64encode(local.networking_tls_yaml)}' | base64 -d | kubectl apply -f -",
       # Clean up IP-only LoadBalancer if it exists from a previous IP-only deployment
-      "kubectl -n nemo-system delete svc nemo-api-server-lb --ignore-not-found",
+      "kubectl -n nautiloop-system delete svc nautiloop-api-server-lb --ignore-not-found",
     ]
   }
 }
@@ -609,9 +609,9 @@ resource "null_resource" "k8s_networking_ip" {
     inline = [
       "echo '${base64encode(local.networking_ip_yaml)}' | base64 -d | kubectl apply -f -",
       # Clean up TLS resources if they exist from a previous domain deployment
-      "kubectl -n nemo-system delete ingressroute nemo-api nemo-api-http --ignore-not-found 2>/dev/null || true",
-      "kubectl -n nemo-system delete middleware redirect-https --ignore-not-found 2>/dev/null || true",
-      "kubectl -n nemo-system delete certificate nemo-tls --ignore-not-found 2>/dev/null || true",
+      "kubectl -n nautiloop-system delete ingressroute nautiloop-api nautiloop-api-http --ignore-not-found 2>/dev/null || true",
+      "kubectl -n nautiloop-system delete middleware redirect-https --ignore-not-found 2>/dev/null || true",
+      "kubectl -n nautiloop-system delete certificate nautiloop-tls --ignore-not-found 2>/dev/null || true",
       "kubectl delete clusterissuer letsencrypt-prod --ignore-not-found 2>/dev/null || true",
       # Uninstall cert-manager helm release if it was previously installed
       "command -v helm >/dev/null 2>&1 && helm uninstall cert-manager --namespace cert-manager 2>/dev/null || true",

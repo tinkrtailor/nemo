@@ -1,5 +1,5 @@
-# Control plane image for Nemo
-# Produces a minimal image with the nemo-server binary.
+# Control plane image for Nautiloop
+# Produces a minimal image with the nautiloop-server binary.
 # Same binary runs as API server or loop engine based on args.
 
 FROM rust:1.88-bookworm AS builder
@@ -17,13 +17,13 @@ RUN mkdir -p control-plane/src cli/src && \
     echo "" > control-plane/src/lib.rs && \
     echo "fn main() {}" > cli/src/main.rs
 
-RUN cargo build --release --package nemo-control-plane 2>/dev/null || true
+RUN cargo build --release --package nautiloop-control-plane 2>/dev/null || true
 
 # Copy real source and rebuild
 COPY control-plane/ control-plane/
 COPY cli/ cli/
 RUN touch control-plane/src/main.rs control-plane/src/lib.rs && \
-    cargo build --release --package nemo-control-plane
+    cargo build --release --package nautiloop-control-plane
 
 # Runtime image: minimal Debian with TLS certs
 FROM debian:bookworm-slim
@@ -42,12 +42,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/target/release/nemo-server /usr/local/bin/nemo-server
+COPY --from=builder /build/target/release/nautiloop-server /usr/local/bin/nautiloop-server
 
 # Run as non-root
-RUN groupadd -g 1000 nemo && \
-    useradd -u 1000 -g nemo -m nemo
-USER nemo
+RUN groupadd -g 1000 nautiloop && \
+    useradd -u 1000 -g nautiloop -m nautiloop
+USER nautiloop
 
-ENTRYPOINT ["tini", "--", "/usr/local/bin/nemo-server"]
+ENTRYPOINT ["tini", "--", "/usr/local/bin/nautiloop-server"]
 CMD ["api-server"]

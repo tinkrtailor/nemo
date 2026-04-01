@@ -35,8 +35,8 @@ resource "null_resource" "k3s_install" {
       "kubectl get crd ingressroutes.traefik.io || { echo 'ERROR: Traefik CRDs not registered after 120s'; exit 1; }",
       "kubectl -n kube-system rollout status deployment/traefik --timeout=120s",
       # Pre-create hostPath directories with correct ownership for non-root pods (UID 1000)
-      "mkdir -p /data/nemo-bare-repo /data/nemo-postgres /data/backups",
-      "chown 1000:1000 /data/nemo-bare-repo",
+      "mkdir -p /data/nautiloop-bare-repo /data/nautiloop-postgres /data/backups",
+      "chown 1000:1000 /data/nautiloop-bare-repo",
     ]
   }
 }
@@ -105,21 +105,21 @@ locals {
   server_url         = local.has_domain ? "https://${var.domain}" : "http://${var.server_ip}:8080"
 
   post_apply_instructions_with_key = <<-EOT
-    Nemo deployed at ${local.server_url}
+    Nautiloop deployed at ${local.server_url}
 
     Next steps:
     1. Add this deploy key to your repo (Settings > Deploy keys, enable write access):
        ${local.deploy_public_key != null ? trimspace(local.deploy_public_key) : ""}
     2. Re-run terraform apply to sync the repo (the repo-init job will fetch with the new key)
-    3. Install the CLI: cargo install --git https://github.com/tinkrtailor/nemo nemo-cli
+    3. Install the CLI: cargo install --git https://github.com/tinkrtailor/nautiloop nemo-cli
     4. Configure: nemo init && nemo auth
   EOT
 
   post_apply_instructions_no_key = <<-EOT
-    Nemo deployed at ${local.server_url}
+    Nautiloop deployed at ${local.server_url}
 
     Next steps:
-    1. Install the CLI: cargo install --git https://github.com/tinkrtailor/nemo nemo-cli
+    1. Install the CLI: cargo install --git https://github.com/tinkrtailor/nautiloop nemo-cli
     2. Configure: nemo init && nemo auth
   EOT
 }

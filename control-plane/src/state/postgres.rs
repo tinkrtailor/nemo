@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{LoopFlag, StateStore};
-use crate::error::{NemoError, Result};
+use crate::error::{NautiloopError, Result};
 use crate::types::{
     EngineerCredential, LogEvent, LoopKind, LoopRecord, LoopState, RoundRecord, SubState,
 };
@@ -57,7 +57,7 @@ fn parse_loop_state(s: &str) -> Result<LoopState> {
         "AWAITING_REAUTH" => Ok(LoopState::AwaitingReauth),
         "HARDENED" => Ok(LoopState::Hardened),
         "SHIPPED" => Ok(LoopState::Shipped),
-        unknown => Err(NemoError::Internal(format!(
+        unknown => Err(NautiloopError::Internal(format!(
             "Corrupt DB: unknown loop_state '{unknown}'"
         ))),
     }
@@ -68,7 +68,7 @@ fn parse_sub_state(s: &str) -> Result<SubState> {
         "DISPATCHED" => Ok(SubState::Dispatched),
         "RUNNING" => Ok(SubState::Running),
         "COMPLETED" => Ok(SubState::Completed),
-        unknown => Err(NemoError::Internal(format!(
+        unknown => Err(NautiloopError::Internal(format!(
             "Corrupt DB: unknown sub_state '{unknown}'"
         ))),
     }
@@ -78,7 +78,7 @@ fn parse_loop_kind(s: &str) -> Result<LoopKind> {
     match s {
         "harden" => Ok(LoopKind::Harden),
         "implement" => Ok(LoopKind::Implement),
-        unknown => Err(NemoError::Internal(format!(
+        unknown => Err(NautiloopError::Internal(format!(
             "Corrupt DB: unknown loop_kind '{unknown}'"
         ))),
     }
@@ -642,7 +642,7 @@ impl StateStore for PgStateStore {
         sqlx::query("SELECT 1")
             .execute(&self.pool)
             .await
-            .map_err(crate::error::NemoError::Database)?;
+            .map_err(crate::error::NautiloopError::Database)?;
         Ok(())
     }
 }

@@ -1,4 +1,4 @@
-module github.com/nemo/auth-sidecar
+module github.com/nautiloop/auth-sidecar
 
 go 1.22
 

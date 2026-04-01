@@ -1,20 +1,20 @@
-# Root terraform — provisions Hetzner VPS + installs Nemo via module.
+# Root terraform — provisions Hetzner VPS + installs Nautiloop via module.
 # For other cloud providers, see terraform/examples/.
 
-resource "hcloud_ssh_key" "nemo" {
+resource "hcloud_ssh_key" "nautiloop" {
   count      = length(var.ssh_public_keys)
-  name       = "nemo-${count.index}"
+  name       = "nautiloop-${count.index}"
   public_key = var.ssh_public_keys[count.index]
 }
 
-resource "hcloud_server" "nemo" {
-  name        = "nemo-${var.server_location}"
+resource "hcloud_server" "nautiloop" {
+  name        = "nautiloop-${var.server_location}"
   server_type = var.server_type
   location    = var.server_location
   image       = "ubuntu-22.04"
-  ssh_keys    = hcloud_ssh_key.nemo[*].id
+  ssh_keys    = hcloud_ssh_key.nautiloop[*].id
 
-  labels = { app = "nemo" }
+  labels = { app = "nautiloop" }
 
   user_data = file("${path.module}/templates/cloud-init.yaml")
 }
@@ -22,7 +22,7 @@ resource "hcloud_server" "nemo" {
 module "nautiloop" {
   source = "./modules/nautiloop"
 
-  server_ip       = hcloud_server.nemo.ipv4_address
+  server_ip       = hcloud_server.nautiloop.ipv4_address
   ssh_private_key = file(pathexpand(var.ssh_private_key_path))
   ssh_user        = "root"
 

@@ -1,7 +1,7 @@
-# Nemo Architecture & Lifecycle Diagrams
+# Nautiloop Architecture & Lifecycle Diagrams
 
 This document contains detailed ASCII art diagrams covering every major subsystem,
-data flow, and lifecycle in Nemo. It is the visual companion to `docs/design.md`
+data flow, and lifecycle in Nautiloop. It is the visual companion to `docs/design.md`
 and the three specs (`lane-a-core-loop.md`, `lane-b-infrastructure.md`,
 `lane-c-agent-runtime.md`).
 
@@ -23,7 +23,7 @@ and the three specs (`lane-a-core-loop.md`, `lane-b-infrastructure.md`,
            ============================|==============================
            |           k3s Cluster (Hetzner CCX43)                   |
            |                           |                             |
-           |  Namespace: nemo-system   |                             |
+           |  Namespace: nautiloop-system   |                             |
            |  +------------------------v-----------------------+     |
            |  |            API Server (Deployment)             |     |
            |  |            axum on :8080                       |     |
@@ -56,7 +56,7 @@ and the three specs (`lane-a-core-loop.md`, `lane-b-infrastructure.md`,
            |  | 100 Gi  |  |       |  |       |  |        |        |
            |  +----+----+  |       |  |       |  |        |        |
            |       |       |       |  |       |  |        |        |
-           |  Namespace: nemo-jobs |  |       |  |        |        |
+           |  Namespace: nautiloop-jobs |  |       |  |        |        |
            |  +----v-----------v---v--v-------v--v--------v--+     |
            |  |                                              |     |
            |  |    Agent Job Pods (K8s Jobs)                 |     |
@@ -97,9 +97,9 @@ and the three specs (`lane-a-core-loop.md`, `lane-b-infrastructure.md`,
 
 ```
 +===========================================================================+
-|  K8s Job Pod: nemo-a3f2b1c9-implement-r2                                 |
-|  Labels: nemo.dev/loop-id, nemo.dev/stage, nemo.dev/engineer,            |
-|          nemo.dev/round                                                   |
+|  K8s Job Pod: nautiloop-a3f2b1c9-implement-r2                                 |
+|  Labels: nautiloop.dev/loop-id, nautiloop.dev/stage, nautiloop.dev/engineer,            |
+|          nautiloop.dev/round                                                   |
 |  restartPolicy: Never                                                     |
 |                                                                           |
 |  +----------------------------------+  +-------------------------------+  |
@@ -134,7 +134,7 @@ and the three specs (`lane-a-core-loop.md`, `lane-b-infrastructure.md`,
 |  |      + stdout                    |  |                               |  |
 |  |                                  |  |  /secrets/model-credentials   |  |
 |  +----------------------------------+  |    <-- K8s Secret             |  |
-|  |                                  |  |       (nemo-creds-{engineer}) |  |
+|  |                                  |  |       (nautiloop-creds-{engineer}) |  |
 |  |  VOLUME MOUNTS (agent):         |  |                               |  |
 |  |                                  |  |  /secrets/ssh-key             |  |
 |  |  /work       <-- Bare repo PVC  |  |    <-- K8s Secret             |  |
@@ -171,7 +171,7 @@ NETWORK FLOW:
   |            |  localhost          | (passthru) |               | host   |
   +------------+                     +------------+                +--------+
 
-NETWORKPOLICY (nemo-jobs namespace):
+NETWORKPOLICY (nautiloop-jobs namespace):
 
   +------------------+     +------------------+
   | Agent container  |     | Auth sidecar     |
@@ -571,14 +571,14 @@ Engineer                API Server          Postgres            Loop Engine     
   Cluster Config                       Repo Config                   Engineer Config
 
   Source: K8s ConfigMap                Source: nemo.toml             Source: ~/.nemo/config.toml
-  /etc/nemo/cluster.toml              (monorepo root, checked in)   (per-machine, not checked in)
-  + NEMO_CLUSTER_* env vars
+  /etc/nautiloop/cluster.toml              (monorepo root, checked in)   (per-machine, not checked in)
+  + NAUTILOOP_CLUSTER_* env vars
 
   +---------------------------+       +---------------------------+  +---------------------------+
   | [cluster]                 |       | [repo]                    |  | [identity]                |
   |   node_size = "ccx43"    |       |   name = "cleared"        |  |   name = "Alice"          |
   |   provider = "hetzner"   |       |   default_branch = "main" |  |   email = "alice@..."     |
-  |   domain = "nemo.internal|       |                           |  |                           |
+  |   domain = "nautiloop.internal|       |                           |  |                           |
   |   default_implementor =  |       | [models]                  |  | [models]                  |
   |     "claude-opus-4"      |       |   implementor =           |  |   implementor =           |
   |   default_reviewer =     |       |     "claude-opus-4"       |  |     "claude-opus-4"       |
@@ -768,17 +768,17 @@ Engineer                API Server          Postgres            Loop Engine     
   Engineer's Machine                   k3s Cluster
   +---------------------------+        +-------------------------------------------+
   |                           |        |                                           |
-  |  ~/.claude/               |        |  Namespace: nemo-jobs                     |
+  |  ~/.claude/               |        |  Namespace: nautiloop-jobs                     |
   |    (session tokens,       |        |                                           |
   |     Claude Max auth)      |        |  K8s Secrets (per engineer):              |
   |                           |        |  +-------------------------------------+  |
-  |  OpenAI auth tokens       |        |  | Secret: nemo-creds-alice            |  |
+  |  OpenAI auth tokens       |        |  | Secret: nautiloop-creds-alice            |  |
   |    (Pro subscription)     |        |  |   (one secret per engineer, keys   |  |
   |                           |        |  |    named by provider)              |  |
   |  SSH private key          |        |  |   claude: <~/.claude/ session data>|  |
   |    (for git push)         |        |  |   openai: <opencode auth data>     |  |
   +------------+--------------+        |  |                                     |  |
-               |                       |  | Secret: nemo-ssh-alice              |  |
+               |                       |  | Secret: nautiloop-ssh-alice              |  |
                |                       |  |   ssh-key: -----BEGIN OPENSSH...   |  |
                |                       |  +-------------------------------------+  |
    nemo auth   |                       |                                           |
@@ -797,7 +797,7 @@ Engineer                API Server          Postgres            Loop Engine     
   |     (scoped to engineer)  |
   +---------------------------+
                |
-               | K8s API / nemo API
+               | K8s API / nautiloop API
                v
 
   INSIDE A JOB POD (credential flow):

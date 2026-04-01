@@ -1,6 +1,6 @@
-# Deploying Nemo
+# Deploying Nautiloop
 
-Nemo ships as a reusable Terraform module that installs on any Linux server with SSH access. You provision the server (Hetzner, AWS, DigitalOcean, bare metal) — the module handles k3s, Postgres, and the control plane.
+Nautiloop ships as a reusable Terraform module that installs on any Linux server with SSH access. You provision the server (Hetzner, AWS, DigitalOcean, bare metal) — the module handles k3s, Postgres, and the control plane.
 
 ## Quick start (minimal)
 
@@ -8,7 +8,7 @@ Four required variables. Everything else has sane defaults.
 
 ```hcl
 module "nautiloop" {
-  source = "github.com/tinkrtailor/nemo//terraform/modules/nautiloop"
+  source = "github.com/tinkrtailor/nautiloop//terraform/modules/nautiloop"
 
   server_ip       = "203.0.113.10"
   ssh_private_key = file("~/.ssh/id_ed25519")
@@ -16,16 +16,16 @@ module "nautiloop" {
   git_host_token  = var.github_pat
 }
 
-output "nemo_server_url" {
+output "nautiloop_server_url" {
   value = module.nautiloop.server_url  # http://IP:8080
 }
 
-output "nemo_api_key" {
+output "nautiloop_api_key" {
   value     = module.nautiloop.api_key
   sensitive = true
 }
 
-output "nemo_deploy_key_public" {
+output "nautiloop_deploy_key_public" {
   value = module.nautiloop.deploy_key_public  # add to GitHub deploy keys
 }
 ```
@@ -38,9 +38,9 @@ The module is self-contained: no `kubernetes` or `helm` provider configuration n
 
 ```hcl
 module "nautiloop" {
-  source = "github.com/tinkrtailor/nemo//terraform/modules/nautiloop"
+  source = "github.com/tinkrtailor/nautiloop//terraform/modules/nautiloop"
 
-  # Required: give me a server, I'll install nemo on it
+  # Required: give me a server, I'll install nautiloop on it
   server_ip       = hcloud_server.x.ipv4_address  # or aws_instance, digitalocean_droplet, etc.
   ssh_private_key = file("~/.ssh/id_ed25519")
   ssh_user        = "root"
@@ -53,13 +53,13 @@ module "nautiloop" {
   repo_ssh_private_key = null
 
   # Optional: domain + TLS (skip for IP-only)
-  domain     = "nemo.mydomain.com"   # or null for http://IP:8080
+  domain     = "nautiloop.mydomain.com"   # or null for http://IP:8080
   acme_email = "me@mydomain.com"     # required if domain is set
 
   # Optional: images (defaults to latest public GHCR)
-  control_plane_image = "ghcr.io/tinkrtailor/nemo-control-plane:0.1.1"
-  agent_base_image    = "ghcr.io/tinkrtailor/nemo-agent-base:0.1.1"
-  sidecar_image       = "ghcr.io/tinkrtailor/nemo-sidecar:0.1.1"
+  control_plane_image = "ghcr.io/tinkrtailor/nautiloop-control-plane:0.1.1"
+  agent_base_image    = "ghcr.io/tinkrtailor/nautiloop-agent-base:0.1.1"
+  sidecar_image       = "ghcr.io/tinkrtailor/nautiloop-sidecar:0.1.1"
 }
 ```
 
@@ -75,9 +75,9 @@ module "nautiloop" {
 | `repo_ssh_private_key` | no | auto-generated | SSH deploy key. If null, generates ED25519 |
 | `domain` | no | `null` | Domain for TLS. null = HTTP on raw IP:8080 |
 | `acme_email` | no | `null` | Let's Encrypt email. Required if domain is set |
-| `control_plane_image` | no | `ghcr.io/tinkrtailor/nemo-control-plane:0.1.1` | Control plane image |
-| `agent_base_image` | no | `ghcr.io/tinkrtailor/nemo-agent-base:0.1.1` | Agent base image |
-| `sidecar_image` | no | `ghcr.io/tinkrtailor/nemo-sidecar:0.1.1` | Auth sidecar image |
+| `control_plane_image` | no | `ghcr.io/tinkrtailor/nautiloop-control-plane:0.1.1` | Control plane image |
+| `agent_base_image` | no | `ghcr.io/tinkrtailor/nautiloop-agent-base:0.1.1` | Agent base image |
+| `sidecar_image` | no | `ghcr.io/tinkrtailor/nautiloop-sidecar:0.1.1` | Auth sidecar image |
 | `k3s_version` | no | `v1.32.13+k3s1` | k3s version (v1.32+ required) |
 | `postgres_password` | no | auto-generated | Postgres password |
 | `postgres_volume_size` | no | `20` | Postgres volume size (Gi) |
@@ -93,8 +93,8 @@ All outputs are machine-readable via `terraform output -json`.
 | `deploy_key_public` | Public key to add as repo deploy key. Null if you provided your own. |
 | `post_apply_instructions` | Human-readable next steps |
 | `kubeconfig_path` | Path to the kubeconfig file |
-| `namespace_system` | `nemo-system` |
-| `namespace_jobs` | `nemo-jobs` |
+| `namespace_system` | `nautiloop-system` |
+| `namespace_jobs` | `nautiloop-jobs` |
 
 ## Examples
 
@@ -137,7 +137,7 @@ Set `domain = null` (the default). The control plane runs on HTTP at `http://IP:
 
 ### With domain + TLS
 
-Set `domain = "nemo.mydomain.com"` and `acme_email = "you@example.com"`. The module installs cert-manager, provisions a Let's Encrypt certificate, and configures Traefik with HTTPS.
+Set `domain = "nautiloop.mydomain.com"` and `acme_email = "you@example.com"`. The module installs cert-manager, provisions a Let's Encrypt certificate, and configures Traefik with HTTPS.
 
 ## Prerequisites
 
@@ -175,9 +175,9 @@ nemo auth                    # pushes credentials (Claude, OpenAI, SSH) to clust
 ```bash
 ./build-images.sh --tag 0.2.0
 terraform apply \
-  -var="control_plane_image=ghcr.io/tinkrtailor/nemo-control-plane:0.2.0" \
-  -var="agent_base_image=ghcr.io/tinkrtailor/nemo-agent-base:0.2.0" \
-  -var="sidecar_image=ghcr.io/tinkrtailor/nemo-sidecar:0.2.0"
+  -var="control_plane_image=ghcr.io/tinkrtailor/nautiloop-control-plane:0.2.0" \
+  -var="agent_base_image=ghcr.io/tinkrtailor/nautiloop-agent-base:0.2.0" \
+  -var="sidecar_image=ghcr.io/tinkrtailor/nautiloop-sidecar:0.2.0"
 ```
 
 All three images must be updated together to avoid version skew.

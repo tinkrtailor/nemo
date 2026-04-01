@@ -39,7 +39,7 @@ pub trait JobDispatcher: Send + Sync + 'static {
     async fn get_job(&self, name: &str, namespace: &str) -> Result<Option<Job>>;
 
     /// Get logs from the agent container of a job's pod.
-    /// Used to extract NEMO_RESULT: lines from completed jobs.
+    /// Used to extract NAUTILOOP_RESULT: lines from completed jobs.
     async fn get_job_logs(&self, name: &str, namespace: &str) -> Result<String>;
 }
 
@@ -64,7 +64,7 @@ pub mod mock {
             }
         }
 
-        /// Set mock logs for a job (for testing NEMO_RESULT extraction).
+        /// Set mock logs for a job (for testing NAUTILOOP_RESULT extraction).
         pub async fn set_job_logs(&self, name: &str, logs: &str) {
             let mut log_map = self.logs.write().await;
             log_map.insert(name.to_string(), logs.to_string());

@@ -1,4 +1,4 @@
-# Base Agent Image for Nemo
+# Base Agent Image for Nautiloop
 # FR-1 through FR-3: Tools, runtimes, and agent CLIs
 # NFR-1: Target < 2 GB compressed via multi-stage build
 
@@ -40,13 +40,13 @@ COPY --from=opencode-src /usr/local/bin/opencode /usr/local/bin/opencode
 RUN chmod +x /usr/local/bin/opencode
 
 # FR-4: Entrypoint script
-COPY images/base/nemo-agent-entry /usr/local/bin/nemo-agent-entry
-RUN chmod +x /usr/local/bin/nemo-agent-entry
+COPY images/base/nautiloop-agent-entry /usr/local/bin/nautiloop-agent-entry
+RUN chmod +x /usr/local/bin/nautiloop-agent-entry
 
 # Default prompt templates (FR-33)
 # Build context must be the repo root: docker build -f images/base/Dockerfile .
 # Prompts are embedded in the image as fallback defaults.
-COPY .nemo/prompts/ /etc/nemo/prompts/
+COPY .nautiloop/prompts/ /etc/nautiloop/prompts/
 
 # Create agent user (UID 1000) for non-root execution (FR-25)
 # node:22-bookworm-slim has UID/GID 1000 as 'node'. Reuse it.
@@ -64,4 +64,4 @@ USER agent
 WORKDIR /work
 
 # Use tini as PID 1 for proper signal handling (FR-4)
-ENTRYPOINT ["tini", "--", "/usr/local/bin/nemo-agent-entry"]
+ENTRYPOINT ["tini", "--", "/usr/local/bin/nautiloop-agent-entry"]

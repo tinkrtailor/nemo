@@ -5,12 +5,12 @@ use axum::response::Response;
 
 /// Auth middleware: validates API key from `Authorization: Bearer <key>` header.
 ///
-/// Validates against `NEMO_API_KEY` env var. If unset, rejects all requests.
+/// Validates against `NAUTILOOP_API_KEY` env var. If unset, rejects all requests.
 /// In V1, all authenticated users have full access (FR-14).
 /// mTLS is handled at the ingress/load-balancer level, not in application code.
 pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, StatusCode> {
-    let expected_key = std::env::var("NEMO_API_KEY").map_err(|_| {
-        tracing::error!("NEMO_API_KEY not set - all requests will be rejected");
+    let expected_key = std::env::var("NAUTILOOP_API_KEY").map_err(|_| {
+        tracing::error!("NAUTILOOP_API_KEY not set - all requests will be rejected");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 

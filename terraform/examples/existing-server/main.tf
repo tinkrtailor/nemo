@@ -15,7 +15,7 @@ terraform {
 module "nautiloop" {
   source = "../../modules/nautiloop"
 
-  # Required: give me a server, I'll install nemo on it
+  # Required: give me a server, I'll install nautiloop on it
   server_ip       = var.server_ip
   ssh_private_key = file(pathexpand(var.ssh_private_key_path))
   ssh_user        = var.ssh_user
@@ -35,19 +35,19 @@ module "nautiloop" {
   sidecar_image       = var.sidecar_image
 }
 
-output "nemo_server_url" {
+output "nautiloop_server_url" {
   value = module.nautiloop.server_url
 }
 
-output "nemo_api_key" {
+output "nautiloop_api_key" {
   value     = module.nautiloop.api_key
   sensitive = true
 }
 
-output "nemo_deploy_key_public" {
+output "nautiloop_deploy_key_public" {
   value = module.nautiloop.deploy_key_public
 }
 
-output "nemo_post_apply_instructions" {
+output "nautiloop_post_apply_instructions" {
   value = module.nautiloop.post_apply_instructions
 }

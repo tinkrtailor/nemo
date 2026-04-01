@@ -178,7 +178,7 @@ pub mod memory {
                 .values()
                 .any(|l| l.branch == record.branch && !l.state.is_terminal());
             if has_active {
-                return Err(crate::error::NemoError::Database(sqlx::Error::Database(
+                return Err(crate::error::NautiloopError::Database(sqlx::Error::Database(
                     Box::new(MemoryUniqueViolation),
                 )));
             }

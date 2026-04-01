@@ -1,4 +1,4 @@
-# Auth sidecar image for Nemo agent jobs
+# Auth sidecar image for Nautiloop agent jobs
 # FR-14: Single static binary (~10 MB)
 # NFR-2: Under 15 MB
 

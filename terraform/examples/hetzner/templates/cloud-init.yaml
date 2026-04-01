@@ -1,9 +1,9 @@
 #cloud-config
-# Cloud-init for Nemo k3s server (Hetzner + Tailscale hardened example)
+# Cloud-init for Nautiloop k3s server (Hetzner + Tailscale hardened example)
 #
 # - Installs Tailscale and joins tailnet (SSH over Tailscale only)
 # - Hardens: fail2ban, unattended-upgrades, password auth disabled
-# - Prepares directories for k3s + Nemo data
+# - Prepares directories for k3s + Nautiloop data
 
 package_update: true
 package_upgrade: true
@@ -18,10 +18,10 @@ packages:
   - fail2ban
 
 runcmd:
-  # --- Directories for Nemo persistence ---
-  - mkdir -p /data/backups /data/nemo-postgres /data/nemo-bare-repo
+  # --- Directories for Nautiloop persistence ---
+  - mkdir -p /data/backups /data/nautiloop-postgres /data/nautiloop-bare-repo
   - chmod 700 /data/backups
-  - chown 1000:1000 /data/nemo-bare-repo
+  - chown 1000:1000 /data/nautiloop-bare-repo
 
   # --- Tailscale ---
   - curl -fsSL https://tailscale.com/install.sh | sh

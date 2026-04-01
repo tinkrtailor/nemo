@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# nemo-agent-entry: Agent entrypoint script for Nemo agent jobs.
+# nautiloop-agent-entry: Agent entrypoint script for Nautiloop agent jobs.
 # FR-4 through FR-13: Stage dispatch, environment setup, result output.
 set -euo pipefail
 
@@ -11,7 +11,7 @@ ELAPSED=0
 while [ ! -f "$READY_FILE" ]; do
     ELAPSED=$((ELAPSED + 1))
     if [ "$ELAPSED" -ge "$((TIMEOUT * 10))" ]; then
-        echo "NEMO_ERROR: sidecar: readiness timeout after ${TIMEOUT}s" >&2
+        echo "NAUTILOOP_ERROR: sidecar: readiness timeout after ${TIMEOUT}s" >&2
         exit 1
     fi
     sleep 0.1
@@ -26,13 +26,13 @@ for var in $required_vars; do
     fi
 done
 if [ -n "$missing" ]; then
-    echo "NEMO_ERROR: entrypoint: missing required environment variables:$missing" >&2
+    echo "NAUTILOOP_ERROR: entrypoint: missing required environment variables:$missing" >&2
     exit 1
 fi
 
 # --- Check worktree mount (Edge Case: Worktree volume not mounted) ---
 if [ ! -d "/work" ] || { [ ! -f "/work/.git" ] && [ ! -d "/work/.git" ]; }; then
-    echo "NEMO_ERROR: entrypoint: worktree volume not found at /work" >&2
+    echo "NAUTILOOP_ERROR: entrypoint: worktree volume not found at /work" >&2
     exit 1
 fi
 
@@ -46,22 +46,22 @@ case "$STAGE" in
     audit)     STAGE_FILENAME="spec-audit.md" ;;
     test)      ;; # No prompt template for test stage
     *)
-        echo "NEMO_ERROR: entrypoint: unknown stage '$STAGE'" >&2
+        echo "NAUTILOOP_ERROR: entrypoint: unknown stage '$STAGE'" >&2
         exit 1
         ;;
 esac
 
 PROMPT_CONTENT=""
 if [ -n "$STAGE_FILENAME" ]; then
-    REPO_PROMPT="/work/.nemo/prompts/$STAGE_FILENAME"
-    DEFAULT_PROMPT="/etc/nemo/prompts/$STAGE_FILENAME"
+    REPO_PROMPT="/work/.nautiloop/prompts/$STAGE_FILENAME"
+    DEFAULT_PROMPT="/etc/nautiloop/prompts/$STAGE_FILENAME"
 
     if [ -f "$REPO_PROMPT" ]; then
         PROMPT_CONTENT=$(cat "$REPO_PROMPT")
     elif [ -f "$DEFAULT_PROMPT" ]; then
         PROMPT_CONTENT=$(cat "$DEFAULT_PROMPT")
     else
-        echo "NEMO_ERROR: entrypoint: prompt template not found: $STAGE_FILENAME" >&2
+        echo "NAUTILOOP_ERROR: entrypoint: prompt template not found: $STAGE_FILENAME" >&2
         exit 1
     fi
 
@@ -79,7 +79,7 @@ if [ -n "$STAGE_FILENAME" ]; then
     DIFF_CONTENT=""
     if [ "$STAGE" = "review" ] || [ "$STAGE" = "audit" ]; then
         # Generate diff for review context using the resolved base branch
-        BASE_REF="origin/${NEMO_BASE_BRANCH:-main}"
+        BASE_REF="origin/${NAUTILOOP_BASE_BRANCH:-main}"
         DIFF_CONTENT=$(cd /work && git diff "${BASE_REF}...$SHA" 2>/dev/null || echo "")
     fi
 
@@ -91,21 +91,21 @@ if [ -n "$STAGE_FILENAME" ]; then
     PROMPT_CONTENT="${PROMPT_CONTENT//\{\{AFFECTED_SERVICES\}\}/${AFFECTED_SERVICES:-[]}}"
 
     # Write assembled prompt to a temp file for CLI tools
-    PROMPT_FILE="/tmp/nemo-prompt-$$"
+    PROMPT_FILE="/tmp/nautiloop-prompt-$$"
     echo "$PROMPT_CONTENT" > "$PROMPT_FILE"
 fi
 
 # --- Sidecar connection check helper ---
 check_sidecar() {
     if ! curl -sf http://localhost:9092/ >/dev/null 2>&1; then
-        echo "NEMO_ERROR: sidecar: connection refused on proxy port 9092" >&2
+        echo "NAUTILOOP_ERROR: sidecar: connection refused on proxy port 9092" >&2
         # FR-22: Exit code 111 for sidecar connection failure
         exit 111
     fi
 }
 
-# --- Helper: run CLI as child process, extract result, emit NEMO_RESULT: ---
-# Finding 1: exec replaces the process, preventing NEMO_RESULT emission.
+# --- Helper: run CLI as child process, extract result, emit NAUTILOOP_RESULT: ---
+# Finding 1: exec replaces the process, preventing NAUTILOOP_RESULT emission.
 # Instead, run as child, capture output, extract final assistant payload.
 run_and_emit_result() {
     local stage_name="$1"
@@ -131,7 +131,7 @@ run_and_emit_result() {
             --arg stderr "$stderr_tail" \
             '{stage: $stage, data: {exit_code: $exit_code, error: $stderr}}')
         echo "$result" > /output/result.json
-        echo "NEMO_RESULT:$result"
+        echo "NAUTILOOP_RESULT:$result"
         exit "$exit_code"
     fi
 
@@ -150,7 +150,7 @@ run_and_emit_result() {
     result=$(jq -n --arg stage "$stage_name" --argjson data "$result_data" '{stage: $stage, data: $data}' 2>/dev/null || \
         jq -n --arg stage "$stage_name" --arg data "$result_data" '{stage: $stage, data: $data}')
     echo "$result" > /output/result.json
-    echo "NEMO_RESULT:$result"
+    echo "NAUTILOOP_RESULT:$result"
 }
 
 # --- FR-4: Stage dispatch ---
@@ -179,14 +179,14 @@ case "$STAGE" in
     test)
         # FR-42a through FR-42d: Run test commands for affected services
         if [ -z "${AFFECTED_SERVICES:-}" ]; then
-            echo "NEMO_ERROR: test: AFFECTED_SERVICES not set" >&2
+            echo "NAUTILOOP_ERROR: test: AFFECTED_SERVICES not set" >&2
             exit 1
         fi
 
         # FR-42b: Read test commands from nemo.toml
         TOML_FILE="/work/nemo.toml"
         if [ ! -f "$TOML_FILE" ]; then
-            echo "NEMO_ERROR: test: nemo.toml not found at $TOML_FILE" >&2
+            echo "NAUTILOOP_ERROR: test: nemo.toml not found at $TOML_FILE" >&2
             exit 1
         fi
 
@@ -250,12 +250,12 @@ case "$STAGE" in
 
         # FR-13: Write to /output/result.json and stdout with prefix
         echo "$RESULT_ENVELOPE" > /output/result.json
-        echo "NEMO_RESULT:$RESULT_ENVELOPE"
+        echo "NAUTILOOP_RESULT:$RESULT_ENVELOPE"
         exit 0
         ;;
 
     *)
-        echo "NEMO_ERROR: entrypoint: unknown stage '$STAGE'" >&2
+        echo "NAUTILOOP_ERROR: entrypoint: unknown stage '$STAGE'" >&2
         exit 1
         ;;
 esac

@@ -1,4 +1,4 @@
-# Root terraform variables — Hetzner provisioning + Nemo module pass-through
+# Root terraform variables — Hetzner provisioning + Nautiloop module pass-through
 
 # --- Hetzner-specific ---
 
@@ -36,7 +36,7 @@ variable "server_location" {
   default     = "fsn1"
 }
 
-# --- Nemo module pass-through ---
+# --- Nautiloop module pass-through ---
 
 variable "git_repo_url" {
   description = "Git repository URL (SSH format: git@github.com:user/repo.git)"
@@ -71,19 +71,19 @@ variable "acme_email" {
 variable "control_plane_image" {
   description = "Control plane container image"
   type        = string
-  default     = "ghcr.io/tinkrtailor/nemo-control-plane:0.1.1"
+  default     = "ghcr.io/tinkrtailor/nautiloop-control-plane:0.1.1"
 }
 
 variable "agent_base_image" {
   description = "Agent base container image"
   type        = string
-  default     = "ghcr.io/tinkrtailor/nemo-agent-base:0.1.1"
+  default     = "ghcr.io/tinkrtailor/nautiloop-agent-base:0.1.1"
 }
 
 variable "sidecar_image" {
   description = "Auth sidecar container image"
   type        = string
-  default     = "ghcr.io/tinkrtailor/nemo-sidecar:0.1.1"
+  default     = "ghcr.io/tinkrtailor/nautiloop-sidecar:0.1.1"
 }
 
 variable "k3s_version" {
@@ -118,7 +118,7 @@ variable "ssh_known_hosts" {
 }
 
 variable "image_pull_secret_dockerconfigjson" {
-  description = "Docker config JSON for private registry access. If provided, creates nemo-registry-creds Secret."
+  description = "Docker config JSON for private registry access. If provided, creates nautiloop-registry-creds Secret."
   type        = string
   default     = null
   sensitive   = true

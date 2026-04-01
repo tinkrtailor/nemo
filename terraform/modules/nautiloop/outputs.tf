@@ -1,7 +1,7 @@
 # Module outputs — all machine-readable for `terraform output -json`
 
 output "server_url" {
-  description = "URL of the Nemo control plane (http://IP:8080 or https://domain)"
+  description = "URL of the Nautiloop control plane (http://IP:8080 or https://domain)"
   value       = local.server_url
 }
 
@@ -23,12 +23,12 @@ output "kubeconfig_path" {
 
 output "namespace_system" {
   description = "K8s namespace for control plane components"
-  value       = "nemo-system"
+  value       = "nautiloop-system"
 }
 
 output "namespace_jobs" {
   description = "K8s namespace for agent jobs"
-  value       = "nemo-jobs"
+  value       = "nautiloop-jobs"
 }
 
 output "post_apply_instructions" {

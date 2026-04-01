@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::config::NemoConfig;
-use crate::error::{NemoError, Result};
+use crate::config::NautiloopConfig;
+use crate::error::{NautiloopError, Result};
 use crate::git::GitOperations;
 use crate::k8s::job_builder;
 use crate::k8s::{JobDispatcher, JobStatus};
@@ -20,7 +20,7 @@ pub struct ConvergentLoopDriver {
     store: Arc<dyn StateStore>,
     dispatcher: Arc<dyn JobDispatcher>,
     git: Arc<dyn GitOperations>,
-    config: NemoConfig,
+    config: NautiloopConfig,
 }
 
 impl ConvergentLoopDriver {
@@ -28,7 +28,7 @@ impl ConvergentLoopDriver {
         store: Arc<dyn StateStore>,
         dispatcher: Arc<dyn JobDispatcher>,
         git: Arc<dyn GitOperations>,
-        config: NemoConfig,
+        config: NautiloopConfig,
     ) -> Self {
         Self {
             store,
@@ -60,7 +60,7 @@ impl ConvergentLoopDriver {
             .store
             .get_loop(loop_id)
             .await?
-            .ok_or(NemoError::LoopNotFound { id: loop_id })?;
+            .ok_or(NautiloopError::LoopNotFound { id: loop_id })?;
 
         // Terminal states: clear stale flags and return (never transition out)
         if record.state.is_terminal() {
@@ -232,7 +232,7 @@ impl ConvergentLoopDriver {
             LoopState::Hardening => self.evaluate_harden_stage(&mut updated).await,
             LoopState::Implementing => {
                 // Validate implement output exists before advancing to test.
-                // A job that exits 0 but omits NEMO_RESULT should not advance.
+                // A job that exits 0 but omits NAUTILOOP_RESULT should not advance.
                 let rounds = self.store.get_rounds(record.id).await?;
                 let impl_round = rounds
                     .iter()
@@ -245,7 +245,7 @@ impl ConvergentLoopDriver {
                     return self
                         .handle_job_failed(
                             &updated,
-                            "Implement stage exited successfully but produced no NEMO_RESULT",
+                            "Implement stage exited successfully but produced no NAUTILOOP_RESULT",
                         )
                         .await;
                 }
@@ -260,7 +260,7 @@ impl ConvergentLoopDriver {
         }
     }
 
-    /// Ingest output from a completed job: read NEMO_RESULT from pod logs, update round record, set current_sha.
+    /// Ingest output from a completed job: read NAUTILOOP_RESULT from pod logs, update round record, set current_sha.
     /// Returns Err with a Paused transition if branch has diverged since dispatch.
     async fn ingest_job_output(&self, record: &mut LoopRecord) -> Result<()> {
         // Get the branch tip SHA
@@ -284,7 +284,7 @@ impl ConvergentLoopDriver {
             record.sub_state = None;
             record.paused_from_state = Some(from_state);
             self.store.update_loop(record).await?;
-            return Err(crate::error::NemoError::Git(
+            return Err(crate::error::NautiloopError::Git(
                 "Branch diverged after job completed".to_string(),
             ));
         }
@@ -294,8 +294,8 @@ impl ConvergentLoopDriver {
             record.current_sha = Some(sha);
         }
 
-        // Read NEMO_RESULT from pod logs instead of git verdict files.
-        // The entrypoint wraps all stage output with NEMO_RESULT: prefix.
+        // Read NAUTILOOP_RESULT from pod logs instead of git verdict files.
+        // The entrypoint wraps all stage output with NAUTILOOP_RESULT: prefix.
         let job_name = record.active_job_name.as_deref().unwrap_or("unknown");
         let namespace = &self.config.cluster.jobs_namespace;
         let logs = match self.dispatcher.get_job_logs(job_name, namespace).await {
@@ -311,12 +311,12 @@ impl ConvergentLoopDriver {
             }
         };
 
-        let verdict_json = Self::extract_nemo_result(&logs);
+        let verdict_json = Self::extract_nautiloop_result(&logs);
         if verdict_json.is_none() {
             tracing::warn!(
                 loop_id = %record.id,
                 job_name = job_name,
-                "No NEMO_RESULT line found in pod logs"
+                "No NAUTILOOP_RESULT line found in pod logs"
             );
         }
 
@@ -346,13 +346,13 @@ impl ConvergentLoopDriver {
         Ok(())
     }
 
-    /// Extract the NEMO_RESULT data from pod log output.
-    /// Scans for the last line starting with "NEMO_RESULT:" and returns the `data` field
+    /// Extract the NAUTILOOP_RESULT data from pod log output.
+    /// Scans for the last line starting with "NAUTILOOP_RESULT:" and returns the `data` field
     /// from the envelope `{"stage":"...", "data": {...}}`.
-    fn extract_nemo_result(logs: &str) -> Option<serde_json::Value> {
+    fn extract_nautiloop_result(logs: &str) -> Option<serde_json::Value> {
         logs.lines().rev().find_map(|line| {
             let trimmed = line.trim();
-            if let Some(json_str) = trimmed.strip_prefix("NEMO_RESULT:") {
+            if let Some(json_str) = trimmed.strip_prefix("NAUTILOOP_RESULT:") {
                 let envelope: serde_json::Value = serde_json::from_str(json_str).ok()?;
                 // Return the data field from the envelope, falling back to the whole thing
                 envelope.get("data").cloned().or(Some(envelope))
@@ -607,7 +607,7 @@ impl ConvergentLoopDriver {
 
         let raw = test_round.and_then(|r| r.output.as_ref());
 
-        // Try new TestResultData shape first (from entrypoint NEMO_RESULT),
+        // Try new TestResultData shape first (from entrypoint NAUTILOOP_RESULT),
         // fall back to legacy TestOutput for backward compatibility
         let passed = raw.and_then(|v| {
             if let Ok(td) = serde_json::from_value::<TestResultData>(v.clone()) {
@@ -1140,7 +1140,7 @@ impl ConvergentLoopDriver {
     ) -> Result<LoopState> {
         // Write feedback file to the branch worktree so the agent can read it
         let feedback_json = serde_json::to_string_pretty(feedback).map_err(|e| {
-            crate::error::NemoError::Internal(format!("Failed to serialize feedback: {e}"))
+            crate::error::NautiloopError::Internal(format!("Failed to serialize feedback: {e}"))
         })?;
         self.git
             .write_file(&record.branch, feedback_path, &feedback_json)
@@ -1254,7 +1254,7 @@ impl ConvergentLoopDriver {
                     .clone()
                     .unwrap_or_else(|| self.config.models.reviewer.clone()),
             ),
-            prompt_template: Some(".nemo/prompts/spec-audit.md".to_string()),
+            prompt_template: Some(".nautiloop/prompts/spec-audit.md".to_string()),
             timeout: self.config.timeouts.audit_duration(),
             max_retries: 2,
         }
@@ -1269,7 +1269,7 @@ impl ConvergentLoopDriver {
                     .clone()
                     .unwrap_or_else(|| self.config.models.implementor.clone()),
             ),
-            prompt_template: Some(".nemo/prompts/spec-revise.md".to_string()),
+            prompt_template: Some(".nautiloop/prompts/spec-revise.md".to_string()),
             timeout: self.config.timeouts.revise_duration(),
             max_retries: 2,
         }
@@ -1284,7 +1284,7 @@ impl ConvergentLoopDriver {
                     .clone()
                     .unwrap_or_else(|| self.config.models.implementor.clone()),
             ),
-            prompt_template: Some(".nemo/prompts/implement.md".to_string()),
+            prompt_template: Some(".nautiloop/prompts/implement.md".to_string()),
             timeout: self.config.timeouts.implement_duration(),
             max_retries: 2,
         }
@@ -1309,7 +1309,7 @@ impl ConvergentLoopDriver {
                     .clone()
                     .unwrap_or_else(|| self.config.models.reviewer.clone()),
             ),
-            prompt_template: Some(".nemo/prompts/review.md".to_string()),
+            prompt_template: Some(".nautiloop/prompts/review.md".to_string()),
             timeout: self.config.timeouts.review_duration(),
             max_retries: 2,
         }
@@ -1344,7 +1344,7 @@ impl ConvergentLoopDriver {
             .collect();
 
         // Engineer identity: look up name and email from stored credentials,
-        // fall back to engineer slug / {engineer}@nemo.dev if not set.
+        // fall back to engineer slug / {engineer}@nautiloop.dev if not set.
         let all_creds = self.store.get_credentials(&record.engineer).await?;
         let engineer_name = all_creds
             .iter()
@@ -1355,7 +1355,7 @@ impl ConvergentLoopDriver {
             .iter()
             .find(|c| c.provider == "_email" && c.valid)
             .map(|c| c.credential_ref.clone())
-            .unwrap_or_else(|| format!("{}@nemo.dev", record.engineer));
+            .unwrap_or_else(|| format!("{}@nautiloop.dev", record.engineer));
 
         // Derive worktree sub-path from branch name.
         // Use "wt/" prefix (not "worktrees/") to avoid colliding with git's
@@ -1469,7 +1469,7 @@ mod tests {
         dispatcher: Arc<MockJobDispatcher>,
     ) -> ConvergentLoopDriver {
         let git = Arc::new(MockGitOperations::new());
-        ConvergentLoopDriver::new(store, dispatcher, git, NemoConfig::default())
+        ConvergentLoopDriver::new(store, dispatcher, git, NautiloopConfig::default())
     }
 
     fn make_pending_loop(auto_approve: bool) -> LoopRecord {
@@ -1567,7 +1567,7 @@ mod tests {
         record.state = LoopState::Implementing;
         record.sub_state = Some(SubState::Running);
         record.cancel_requested = true;
-        record.active_job_name = Some("nemo-test-job".to_string());
+        record.active_job_name = Some("nautiloop-test-job".to_string());
         store.create_loop(&record).await.unwrap();
 
         let new_state = driver.tick(record.id).await.unwrap();
@@ -1982,15 +1982,15 @@ mod tests {
             store.clone(),
             dispatcher.clone(),
             git.clone(),
-            NemoConfig::default(),
+            NautiloopConfig::default(),
         );
 
-        // Set up branch SHA in git and NEMO_RESULT in mock pod logs
+        // Set up branch SHA in git and NAUTILOOP_RESULT in mock pod logs
         git.set_branch_sha("agent/alice/test-abc12345", "aabbccdd11223344")
             .await;
         dispatcher.set_job_logs(
             "review-job",
-            "some other output\nNEMO_RESULT:{\"stage\":\"review\",\"data\":{\"clean\":true,\"confidence\":0.95,\"issues\":[],\"summary\":\"LGTM\",\"token_usage\":{\"input\":1000,\"output\":200}}}\n",
+            "some other output\nNAUTILOOP_RESULT:{\"stage\":\"review\",\"data\":{\"clean\":true,\"confidence\":0.95,\"issues\":[],\"summary\":\"LGTM\",\"token_usage\":{\"input\":1000,\"output\":200}}}\n",
         ).await;
 
         // Create a loop in REVIEWING/DISPATCHED state
@@ -2068,7 +2068,7 @@ mod tests {
             store.clone(),
             dispatcher.clone(),
             git.clone(),
-            NemoConfig::default(),
+            NautiloopConfig::default(),
         );
 
         // Set branch to a different SHA than expected

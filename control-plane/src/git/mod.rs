@@ -86,19 +86,19 @@ pub mod bare {
         async fn run_git(
             &self,
             args: &[&str],
-        ) -> std::result::Result<String, crate::error::NemoError> {
+        ) -> std::result::Result<String, crate::error::NautiloopError> {
             let output = Command::new("git")
                 .args(args)
                 .current_dir(&self.repo_path)
                 .output()
                 .await
-                .map_err(|e| crate::error::NemoError::Git(format!("Failed to run git: {e}")))?;
+                .map_err(|e| crate::error::NautiloopError::Git(format!("Failed to run git: {e}")))?;
 
             if output.status.success() {
                 Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                Err(crate::error::NemoError::Git(stderr))
+                Err(crate::error::NautiloopError::Git(stderr))
             }
         }
     }
@@ -133,22 +133,22 @@ pub mod bare {
             let file_path = std::path::Path::new(worktree_dir).join(path);
             if let Some(parent) = file_path.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    crate::error::NemoError::Git(format!("Failed to create dirs: {e}"))
+                    crate::error::NautiloopError::Git(format!("Failed to create dirs: {e}"))
                 })?;
             }
             tokio::fs::write(&file_path, content)
                 .await
-                .map_err(|e| crate::error::NemoError::Git(format!("Failed to write file: {e}")))?;
+                .map_err(|e| crate::error::NautiloopError::Git(format!("Failed to write file: {e}")))?;
 
             let add = Command::new("git")
                 .args(["add", path])
                 .current_dir(worktree_dir)
                 .output()
                 .await
-                .map_err(|e| crate::error::NemoError::Git(format!("git add spawn failed: {e}")))?;
+                .map_err(|e| crate::error::NautiloopError::Git(format!("git add spawn failed: {e}")))?;
             if !add.status.success() {
                 let stderr = String::from_utf8_lossy(&add.stderr).trim().to_string();
-                return Err(crate::error::NemoError::Git(format!(
+                return Err(crate::error::NautiloopError::Git(format!(
                     "git add failed: {stderr}"
                 )));
             }
@@ -156,9 +156,9 @@ pub mod bare {
             let commit = Command::new("git")
                 .args([
                     "-c",
-                    "user.name=nemo-control-plane",
+                    "user.name=nautiloop-control-plane",
                     "-c",
-                    "user.email=nemo@nemo.dev",
+                    "user.email=nautiloop@nautiloop.dev",
                     "commit",
                     "-m",
                     &format!("chore(agent): add {path}"),
@@ -167,11 +167,11 @@ pub mod bare {
                 .output()
                 .await
                 .map_err(|e| {
-                    crate::error::NemoError::Git(format!("git commit spawn failed: {e}"))
+                    crate::error::NautiloopError::Git(format!("git commit spawn failed: {e}"))
                 })?;
             if !commit.status.success() {
                 let stderr = String::from_utf8_lossy(&commit.stderr).trim().to_string();
-                return Err(crate::error::NemoError::Git(format!(
+                return Err(crate::error::NautiloopError::Git(format!(
                     "git commit failed: {stderr}"
                 )));
             }
@@ -224,7 +224,7 @@ pub mod bare {
             let base_ref = match self.run_git(&["rev-parse", base_remote_ref]).await {
                 Ok(sha) => sha,
                 Err(_) => self.run_git(&["rev-parse", "HEAD"]).await.map_err(|e| {
-                    crate::error::NemoError::Git(format!("Failed to resolve base ref: {e}"))
+                    crate::error::NautiloopError::Git(format!("Failed to resolve base ref: {e}"))
                 })?,
             };
 
@@ -238,7 +238,7 @@ pub mod bare {
                         Some("OPEN") => {
                             // Open PR exists: refuse reuse, caller should not silently
                             // invalidate an active PR. Return error.
-                            return Err(crate::error::NemoError::Git(format!(
+                            return Err(crate::error::NautiloopError::Git(format!(
                                 "Branch {branch} has an open PR. Close or merge it before restarting."
                             )));
                         }
@@ -250,7 +250,7 @@ pub mod bare {
                             self.run_git(&["branch", branch, &base_ref])
                                 .await
                                 .map_err(|e| {
-                                    crate::error::NemoError::Git(format!(
+                                    crate::error::NautiloopError::Git(format!(
                                         "Failed to recreate branch {branch}: {e}"
                                     ))
                                 })?;
@@ -267,7 +267,7 @@ pub mod bare {
                             self.run_git(&["branch", branch, &base_ref])
                                 .await
                                 .map_err(|e| {
-                                    crate::error::NemoError::Git(format!(
+                                    crate::error::NautiloopError::Git(format!(
                                         "Failed to recreate branch {branch}: {e}"
                                     ))
                                 })?;
@@ -330,11 +330,11 @@ pub mod bare {
             }
 
             // No persistent worktree — create a temporary one
-            let worktree_dir = format!("/tmp/nemo-wt-{}", uuid::Uuid::new_v4());
+            let worktree_dir = format!("/tmp/nautiloop-wt-{}", uuid::Uuid::new_v4());
             self.run_git(&["worktree", "add", &worktree_dir, branch])
                 .await
                 .map_err(|e| {
-                    crate::error::NemoError::Git(format!(
+                    crate::error::NautiloopError::Git(format!(
                         "Failed to create worktree for {branch}: {e}"
                     ))
                 })?;
@@ -401,11 +401,11 @@ pub mod bare {
             let (worktree_dir, is_temp) = if persistent.exists() {
                 (persistent.to_string_lossy().to_string(), false)
             } else {
-                let tmp = format!("/tmp/nemo-wt-{}", uuid::Uuid::new_v4());
+                let tmp = format!("/tmp/nautiloop-wt-{}", uuid::Uuid::new_v4());
                 self.run_git(&["worktree", "add", &tmp, branch])
                     .await
                     .map_err(|e| {
-                        crate::error::NemoError::Git(format!(
+                        crate::error::NautiloopError::Git(format!(
                             "Failed to create worktree for {branch}: {e}"
                         ))
                     })?;
@@ -418,7 +418,7 @@ pub mod bare {
                 .current_dir(&worktree_dir)
                 .output()
                 .await
-                .map_err(|e| crate::error::NemoError::Git(format!("git rm spawn failed: {e}")))?;
+                .map_err(|e| crate::error::NautiloopError::Git(format!("git rm spawn failed: {e}")))?;
 
             if !rm.status.success() {
                 let stderr = String::from_utf8_lossy(&rm.stderr).trim().to_string();
@@ -427,7 +427,7 @@ pub mod bare {
                         .run_git(&["worktree", "remove", "--force", &worktree_dir])
                         .await;
                 }
-                return Err(crate::error::NemoError::Git(format!(
+                return Err(crate::error::NautiloopError::Git(format!(
                     "git rm {path} failed: {stderr}"
                 )));
             }
@@ -436,9 +436,9 @@ pub mod bare {
             let commit = Command::new("git")
                 .args([
                     "-c",
-                    "user.name=nemo-control-plane",
+                    "user.name=nautiloop-control-plane",
                     "-c",
-                    "user.email=nemo@nemo.dev",
+                    "user.email=nautiloop@nautiloop.dev",
                     "commit",
                     "-m",
                     &format!("chore(agent): remove {path} artifacts"),
@@ -447,7 +447,7 @@ pub mod bare {
                 .output()
                 .await
                 .map_err(|e| {
-                    crate::error::NemoError::Git(format!("git commit spawn failed: {e}"))
+                    crate::error::NautiloopError::Git(format!("git commit spawn failed: {e}"))
                 })?;
             if !commit.status.success() {
                 let stderr = String::from_utf8_lossy(&commit.stderr).trim().to_string();
@@ -456,7 +456,7 @@ pub mod bare {
                         .run_git(&["worktree", "remove", "--force", &worktree_dir])
                         .await;
                 }
-                return Err(crate::error::NemoError::Git(format!(
+                return Err(crate::error::NautiloopError::Git(format!(
                     "git commit failed: {stderr}"
                 )));
             }
@@ -475,7 +475,7 @@ pub mod bare {
                 .current_dir(&self.repo_path)
                 .output()
                 .await
-                .map_err(|e| crate::error::NemoError::Git(format!("Failed to run gh: {e}")))?;
+                .map_err(|e| crate::error::NautiloopError::Git(format!("Failed to run gh: {e}")))?;
 
             let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
             let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
@@ -523,7 +523,7 @@ pub mod bare {
             self.run_git(&["push", "-u", "origin", branch])
                 .await
                 .map_err(|e| {
-                    crate::error::NemoError::Git(format!("Failed to push {branch} to origin: {e}"))
+                    crate::error::NautiloopError::Git(format!("Failed to push {branch} to origin: {e}"))
                 })?;
 
             // Check if a PR already exists for this branch (idempotent on retry)
@@ -557,13 +557,13 @@ pub mod bare {
                 .current_dir(&self.repo_path)
                 .output()
                 .await
-                .map_err(|e| crate::error::NemoError::Git(format!("Failed to run gh: {e}")))?;
+                .map_err(|e| crate::error::NautiloopError::Git(format!("Failed to run gh: {e}")))?;
 
             if output.status.success() {
                 Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                Err(crate::error::NemoError::Git(format!(
+                Err(crate::error::NautiloopError::Git(format!(
                     "Failed to create PR for {branch}: {stderr}"
                 )))
             }
@@ -587,11 +587,11 @@ pub mod bare {
                 .current_dir(&self.repo_path)
                 .output()
                 .await
-                .map_err(|e| crate::error::NemoError::Git(format!("Failed to run gh: {e}")))?;
+                .map_err(|e| crate::error::NautiloopError::Git(format!("Failed to run gh: {e}")))?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                return Err(crate::error::NemoError::Git(format!(
+                return Err(crate::error::NautiloopError::Git(format!(
                     "Failed to merge PR for {branch}: {stderr}"
                 )));
             }
@@ -615,7 +615,7 @@ pub mod bare {
             // Create parent directories
             if let Some(parent) = full_path.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    crate::error::NemoError::Git(format!(
+                    crate::error::NautiloopError::Git(format!(
                         "Failed to create worktree parent dir: {e}"
                     ))
                 })?;
@@ -623,7 +623,7 @@ pub mod bare {
             self.run_git(&["worktree", "add", &full_path.to_string_lossy(), branch])
                 .await
                 .map_err(|e| {
-                    crate::error::NemoError::Git(format!(
+                    crate::error::NautiloopError::Git(format!(
                         "Failed to create worktree for {branch} at {worktree_path}: {e}"
                     ))
                 })?;
@@ -709,7 +709,7 @@ pub mod mock {
             files
                 .get(path)
                 .cloned()
-                .ok_or_else(|| crate::error::NemoError::Git(format!("File not found: {path}")))
+                .ok_or_else(|| crate::error::NautiloopError::Git(format!("File not found: {path}")))
         }
 
         async fn fetch(&self) -> Result<()> {

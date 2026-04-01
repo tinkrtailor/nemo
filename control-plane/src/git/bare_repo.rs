@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use crate::error::{NemoError, Result};
+use crate::error::{NautiloopError, Result};
 
 /// Result of divergence detection between local and remote branch tips.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +41,7 @@ impl BareRepo {
     /// Returns an error if the path does not exist or is not a git repository.
     pub fn new(path: PathBuf, remote_url: String) -> Result<Self> {
         if !path.exists() {
-            return Err(NemoError::Git(format!(
+            return Err(NautiloopError::Git(format!(
                 "Bare repo not found at {}. Run initial clone first.",
                 path.display()
             )));
@@ -87,10 +87,10 @@ impl BareRepo {
         let sha = self
             .run_git(&["rev-parse", base_ref])
             .await
-            .map_err(|e| NemoError::Git(format!("Failed to resolve ref '{base_ref}': {e}")))?;
+            .map_err(|e| NautiloopError::Git(format!("Failed to resolve ref '{base_ref}': {e}")))?;
 
         // 3. Create worktree at resolved SHA in detached HEAD mode
-        let worktree_dir = format!("/tmp/nemo-worktree-{}", uuid::Uuid::new_v4());
+        let worktree_dir = format!("/tmp/nautiloop-worktree-{}", uuid::Uuid::new_v4());
         let worktree_path = PathBuf::from(&worktree_dir);
 
         // Handle stale worktree path (crash recovery)
@@ -102,14 +102,14 @@ impl BareRepo {
         self.run_git(&["worktree", "add", "--detach", &worktree_dir, &sha])
             .await
             .map_err(|e| {
-                NemoError::Git(format!("Failed to create worktree at {worktree_dir}: {e}"))
+                NautiloopError::Git(format!("Failed to create worktree at {worktree_dir}: {e}"))
             })?;
 
         // 4. Create the named branch inside the worktree
         self.run_git_in_dir(&worktree_path, &["checkout", "-b", branch])
             .await
             .map_err(|e| {
-                NemoError::Git(format!(
+                NautiloopError::Git(format!(
                     "Failed to create branch '{branch}' in worktree: {e}"
                 ))
             })?;
@@ -197,7 +197,7 @@ impl BareRepo {
     // Internal helpers
     // =========================================================================
 
-    async fn run_git(&self, args: &[&str]) -> std::result::Result<String, NemoError> {
+    async fn run_git(&self, args: &[&str]) -> std::result::Result<String, NautiloopError> {
         self.run_git_in_dir(&self.path, args).await
     }
 
@@ -205,19 +205,19 @@ impl BareRepo {
         &self,
         dir: &PathBuf,
         args: &[&str],
-    ) -> std::result::Result<String, NemoError> {
+    ) -> std::result::Result<String, NautiloopError> {
         let output = Command::new("git")
             .args(args)
             .current_dir(dir)
             .output()
             .await
-            .map_err(|e| NemoError::Git(format!("Failed to run git: {e}")))?;
+            .map_err(|e| NautiloopError::Git(format!("Failed to run git: {e}")))?;
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Err(NemoError::Git(stderr))
+            Err(NautiloopError::Git(stderr))
         }
     }
 
@@ -225,7 +225,7 @@ impl BareRepo {
         &self,
         args: &[&str],
         timeout_secs: u64,
-    ) -> std::result::Result<String, NemoError> {
+    ) -> std::result::Result<String, NautiloopError> {
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
             self.run_git(args),
@@ -234,7 +234,7 @@ impl BareRepo {
 
         match result {
             Ok(inner) => inner,
-            Err(_) => Err(NemoError::Git(format!(
+            Err(_) => Err(NautiloopError::Git(format!(
                 "git {} timed out after {timeout_secs}s",
                 args.first().unwrap_or(&"")
             ))),

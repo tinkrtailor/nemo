@@ -47,7 +47,7 @@ The nautiloop Terraform module installs on any Linux server with SSH access. You
 
 ```hcl
 module "nautiloop" {
-  source = "github.com/tinkrtailor/nemo//terraform/modules/nautiloop"
+  source = "github.com/tinkrtailor/nautiloop//terraform/modules/nautiloop"
 
   server_ip       = "100.64.0.1"                          # any server with SSH
   ssh_private_key = file("~/.ssh/id_ed25519")
@@ -154,7 +154,7 @@ terraform/
   modules/nautiloop/    Reusable module (k3s + control plane + Postgres)
   examples/hetzner/     Reference: Hetzner VPS + Tailscale + nautiloop
 
-.nemo/prompts/          Agent prompt templates
+.nautiloop/prompts/          Agent prompt templates
 ```
 
 ## Built with Nemo

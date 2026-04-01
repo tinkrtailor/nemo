@@ -157,7 +157,7 @@ async fn wait_for_cancel(cancel: &tokio::sync::watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::NemoConfig;
+    use crate::config::NautiloopConfig;
     use crate::git::mock::MockGitOperations;
     use crate::k8s::mock::MockJobDispatcher;
     use crate::loop_engine::ConvergentLoopDriver;
@@ -174,7 +174,7 @@ mod tests {
             store.clone(),
             dispatcher,
             git,
-            NemoConfig::default(),
+            NautiloopConfig::default(),
         ));
         let wake = Arc::new(Notify::new());
 
