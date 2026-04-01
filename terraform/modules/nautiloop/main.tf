@@ -111,15 +111,15 @@ locals {
     1. Add this deploy key to your repo (Settings > Deploy keys, enable write access):
        ${local.deploy_public_key != null ? trimspace(local.deploy_public_key) : ""}
     2. Re-run terraform apply to sync the repo (the repo-init job will fetch with the new key)
-    3. Install the CLI: cargo install --git https://github.com/tinkrtailor/nautiloop nautiloop-cli
-    4. Configure: nautiloop init && nautiloop auth
+    3. Install the CLI: cargo install --git https://github.com/tinkrtailor/nautiloop nemo-cli
+    4. Configure: nemo init && nemo auth
   EOT
 
   post_apply_instructions_no_key = <<-EOT
     Nautiloop deployed at ${local.server_url}
 
     Next steps:
-    1. Install the CLI: cargo install --git https://github.com/tinkrtailor/nautiloop nautiloop-cli
-    2. Configure: nautiloop init && nautiloop auth
+    1. Install the CLI: cargo install --git https://github.com/tinkrtailor/nautiloop nemo-cli
+    2. Configure: nemo init && nemo auth
   EOT
 }

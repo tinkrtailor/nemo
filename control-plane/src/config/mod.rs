@@ -106,13 +106,13 @@ impl NautiloopConfig {
 /// Ship configuration from `[ship]` in nautiloop.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShipConfig {
-    /// Enable nautiloop ship (default: false).
+    /// Enable nemo ship (default: false).
     #[serde(default)]
     pub allowed: bool,
     /// Wait for CI before merge (default: true).
     #[serde(default = "default_true")]
     pub require_passing_ci: bool,
-    /// Force --harden on nautiloop ship (default: false).
+    /// Force --harden on nemo ship (default: false).
     #[serde(default)]
     pub require_harden: bool,
     /// Max rounds for auto-merge threshold (default: 5).

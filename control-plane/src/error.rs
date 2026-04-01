@@ -44,7 +44,7 @@ pub enum NautiloopError {
     #[error("Git operation failed: {0}")]
     Git(String),
 
-    #[error("nautiloop ship is not enabled for this repo. Set [ship] allowed = true in nautiloop.toml")]
+    #[error("nemo ship is not enabled for this repo. Set [ship] allowed = true in nautiloop.toml")]
     ShipNotEnabled,
 
     #[error("Feature not yet implemented: {feature}")]
