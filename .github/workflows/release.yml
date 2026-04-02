@@ -143,6 +143,9 @@ jobs:
       matrix:
         image: [control-plane, agent-base, sidecar]
     steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -158,14 +161,12 @@ jobs:
         run: |
           TAG=${{ steps.version.outputs.tag }}
           IMAGE=${{ env.REGISTRY }}/nautiloop-${{ matrix.image }}
-          docker manifest create ${IMAGE}:${TAG} \
+          docker buildx imagetools create -t ${IMAGE}:${TAG} \
             ${IMAGE}:${TAG}-amd64 \
             ${IMAGE}:${TAG}-arm64
-          docker manifest push ${IMAGE}:${TAG}
-          docker manifest create ${IMAGE}:latest \
+          docker buildx imagetools create -t ${IMAGE}:latest \
             ${IMAGE}:${TAG}-amd64 \
             ${IMAGE}:${TAG}-arm64
-          docker manifest push ${IMAGE}:latest
 
   # Create GitHub release with binaries
   release:
