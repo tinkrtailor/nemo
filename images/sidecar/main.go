@@ -724,11 +724,26 @@ func main() {
 		Handler: &egressProxy{},
 	}
 
-	// FR-22: Health endpoint on :9093
+	// FR-22: Health endpoint on :9093.
+	//
+	// Bind to all interfaces (0.0.0.0), NOT 127.0.0.1. The kubelet startup
+	// probe (and any future readiness/liveness probes) connects via the pod
+	// IP, not loopback — a listener on 127.0.0.1:9093 only accepts traffic
+	// from inside the pod's loopback interface and refuses every probe with
+	// "connection refused". With native sidecars (initContainers +
+	// restartPolicy: Always) the startup probe strictly gates the agent
+	// container's start, so a permanently-failing probe means the agent
+	// never starts and the loop hangs forever in HARDENING/RUNNING.
+	//
+	// The model proxy (:9090), git SSH proxy (:9091), and egress logger
+	// (:9092) deliberately stay on 127.0.0.1 — they're only meant for the
+	// agent inside the same pod, and binding them to all interfaces would
+	// expand the attack surface for no benefit. Only /healthz needs to be
+	// reachable by the kubelet.
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("/healthz", healthHandler)
 	healthServer := &http.Server{
-		Addr:    "127.0.0.1:9093",
+		Addr:    ":9093",
 		Handler: healthMux,
 	}
 
@@ -764,6 +779,10 @@ func main() {
 	// IMPORTANT: until `ready` is set, /healthz returns 503 — that's what
 	// gates the K8s native sidecar startupProbe and prevents the agent
 	// container from starting before every proxy port is listening.
+	// Probe loopback for the in-pod proxies and the wildcard listener for
+	// the health endpoint. These addresses must match the .Addr fields on
+	// the http.Server instances above (and the git SSH proxy listener) so
+	// the bind check is meaningful.
 	ports := []string{"127.0.0.1:9090", "127.0.0.1:9091", "127.0.0.1:9092", "127.0.0.1:9093"}
 	for _, addr := range ports {
 		bound := false
