@@ -1,5 +1,6 @@
 ## Commit behavior (high priority)
 
+- **Verify branch state before branching**: ALWAYS run `git status` and `git branch --show-current` immediately before `git checkout -b` or any branch-creating operation. Do not assume you are on main. Branch labels can shift between commands (hooks, scripts, prior `cd`s, worktrees). If the current branch is unexpected, stop and investigate — do NOT commit. Committing onto the wrong branch can contaminate an open PR and is not recoverable without force-push.
 - **Branch before work**: Always create and push a branch before starting any feature/task/spec implementation (see `.claude/rules/branch-before-work.md`).
 - **NEVER push to main**: All changes go through branches and PRs. Never commit or push directly to main, even for single-line changes.
 - **Auto-commit on success**: After completing a task (tests pass, build succeeds), commit automatically without waiting to be asked (see `.claude/rules/auto-commit-on-success.md`).
