@@ -143,20 +143,47 @@ run_and_emit_result() {
         exit "$exit_code"
     fi
 
-    # For stream-json output (claude), extract the final result message
-    # For json output (opencode), the whole stdout is the result
-    local result_data
-    if [ "$stage_name" = "implement" ] || [ "$stage_name" = "revise" ]; then
-        # Claude stream-json: last assistant message is the result
-        result_data=$(jq -s '[.[] | select(.type == "assistant")] | last // empty' "$cli_stdout" 2>/dev/null || cat "$cli_stdout")
-    else
-        # OpenCode json: entire output is structured
-        result_data=$(cat "$cli_stdout")
-    fi
-
+    # Build the result envelope WITHOUT passing the stage output through argv.
+    # opencode's streaming JSON output can easily hit 15-30 KB (and claude's
+    # stream-json even more), which pushed `jq -n --arg data "$result_data"`
+    # past the kernel ARG_MAX and made the exec fail with:
+    #
+    #   /usr/local/bin/nautiloop-agent-entry: line 159: /usr/bin/jq:
+    #   Argument list too long
+    #
+    # Both jq calls then failed, $result ended up empty, and the echo below
+    # produced no NAUTILOOP_RESULT line for the loop-engine to ingest —
+    # which the loop-engine logged as "No NAUTILOOP_RESULT line found in
+    # pod logs" and retried until BackoffLimitExceeded.
+    #
+    # The fix is to feed the file to jq directly (--rawfile / --slurpfile /
+    # stdin) so nothing large goes through argv at all.
+    #
+    # Dispatch rules:
+    # - Claude stream-json (implement/revise): slurp the file, keep the
+    #   last `{"type":"assistant",...}` object, fall back to the raw text
+    #   if the file doesn't parse as JSON.
+    # - OpenCode (review/audit): wrap the raw file contents as a string in
+    #   the `data` field. The verdict schema downstream will parse it as
+    #   needed — this keeps parity with the old behavior for the
+    #   happy path and just stops blowing up on size.
     local result
-    result=$(jq -n --arg stage "$stage_name" --argjson data "$result_data" '{stage: $stage, data: $data}' 2>/dev/null || \
-        jq -n --arg stage "$stage_name" --arg data "$result_data" '{stage: $stage, data: $data}')
+    if [ "$stage_name" = "implement" ] || [ "$stage_name" = "revise" ]; then
+        result=$(jq -n \
+            --arg stage "$stage_name" \
+            --slurpfile events "$cli_stdout" \
+            '{stage: $stage, data: ([$events[] | select(.type == "assistant")] | last // null)}' \
+            2>/dev/null) || \
+        result=$(jq -n \
+            --arg stage "$stage_name" \
+            --rawfile data "$cli_stdout" \
+            '{stage: $stage, data: $data}')
+    else
+        result=$(jq -n \
+            --arg stage "$stage_name" \
+            --rawfile data "$cli_stdout" \
+            '{stage: $stage, data: $data}')
+    fi
     echo "$result" > /output/result.json
     echo "NAUTILOOP_RESULT:$result"
 }
