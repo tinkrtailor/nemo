@@ -107,6 +107,10 @@ check_sidecar() {
 # --- Helper: run CLI as child process, extract result, emit NAUTILOOP_RESULT: ---
 # Finding 1: exec replaces the process, preventing NAUTILOOP_RESULT emission.
 # Instead, run as child, capture output, extract final assistant payload.
+#
+# Optional env var STDIN_FILE: if set, redirect that file as the CLI's stdin.
+# Used by review/audit (opencode v1.3+ removed --prompt-file; the prompt has
+# to be piped in to avoid argv length limits on large specs/diffs).
 run_and_emit_result() {
     local stage_name="$1"
     shift
@@ -116,7 +120,11 @@ run_and_emit_result() {
 
     # Run CLI, capturing stdout and stderr separately
     set +e
-    "$@" > "$cli_stdout" 2>"$cli_stderr"
+    if [ -n "${STDIN_FILE:-}" ]; then
+        "$@" < "$STDIN_FILE" > "$cli_stdout" 2>"$cli_stderr"
+    else
+        "$@" > "$cli_stdout" 2>"$cli_stderr"
+    fi
     exit_code=$?
     set -e
 
@@ -168,12 +176,15 @@ case "$STAGE" in
     review|audit)
         # FR-6, FR-7: OpenCode for review/audit (read-only)
         export OPENCODE_PERMISSIONS='{"edit":"deny","bash":"deny","read":"allow"}'
-        # Use --prompt-file to avoid argv length limits on large specs/diffs
-        OPENCODE_ARGS=(run --format json --prompt-file "$PROMPT_FILE")
+        # opencode v1.3+ removed --prompt-file; the message is either a
+        # positional arg or piped in via stdin. We pipe via stdin to avoid
+        # argv length limits for large specs/diffs — same reasoning the
+        # original --prompt-file code had.
+        OPENCODE_ARGS=(run --format json)
         if [ -n "${SESSION_ID:-}" ]; then
             OPENCODE_ARGS+=(-s "$SESSION_ID")
         fi
-        run_and_emit_result "$STAGE" opencode "${OPENCODE_ARGS[@]}"
+        STDIN_FILE="$PROMPT_FILE" run_and_emit_result "$STAGE" opencode "${OPENCODE_ARGS[@]}"
         ;;
 
     test)
