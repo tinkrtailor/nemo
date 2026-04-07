@@ -1,21 +1,42 @@
-# Auth sidecar image for Nautiloop agent jobs
-# FR-14: Single static binary (~10 MB)
-# NFR-2: Under 15 MB
+# Auth sidecar image for Nautiloop agent jobs.
+#
+# Built from the Rust `sidecar/` workspace member. Final image is
+# `FROM scratch` with only the compiled binary and a CA certs bundle
+# (the bundle is present for historical consistency with the Go image
+# while the Go sources remain in tree during the phase 5 bake period;
+# it is NOT consulted by the rustls TLS layer at runtime, which uses
+# `webpki-roots` compiled into the binary). Delete this bundle copy in
+# spec phase 6 once the Go sources are removed.
+#
+# NOTE: `NAUTILOOP_EXTRA_CA_BUNDLE` is test-only per SR-10. Production
+# images MUST NOT set it and this Dockerfile MUST NOT reference it.
 
-FROM golang:1.22-alpine AS builder
+FROM rust:1.83-alpine AS builder
+
+RUN apk add --no-cache musl-dev
 
 WORKDIR /build
-COPY go.mod go.sum* ./
-RUN go mod download 2>/dev/null || true
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /auth-sidecar .
+
+# Copy the full workspace so cargo can resolve the workspace package
+# references. The build only compiles `-p nautiloop-sidecar`, so the
+# other members do not contribute to the final binary.
+COPY Cargo.toml Cargo.lock ./
+COPY control-plane/ control-plane/
+COPY cli/ cli/
+COPY sidecar/ sidecar/
+
+RUN rustup target add x86_64-unknown-linux-musl
+RUN cargo build \
+    -p nautiloop-sidecar \
+    --release \
+    --target x86_64-unknown-linux-musl \
+    --locked
 
 FROM scratch
 
+# Historical CA bundle copy — see header for rationale. Delete in
+# spec phase 6.
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /auth-sidecar /auth-sidecar
-
-# Run as nobody (UID 65534) to avoid UID-based iptables rules
-USER 65534
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/nautiloop-sidecar /auth-sidecar
 
 ENTRYPOINT ["/auth-sidecar"]

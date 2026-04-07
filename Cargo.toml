@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["control-plane", "cli"]
+members = ["control-plane", "cli", "sidecar"]
 
 [workspace.package]
 version = "0.2.9"
@@ -49,3 +49,27 @@ futures = "0.3"
 toml = "0.8"
 async-trait = "0.1"
 async-stream = "0.3"
+
+# Release profile — tuned for the sidecar binary per specs/rust-sidecar.md.
+#
+# `panic = "unwind"` is required (not "abort") so that tokio task panics in
+# the sidecar's request handlers can be caught at the task boundary rather
+# than terminating the whole process. It is the cargo default for release
+# but we set it explicitly to make the requirement visible.
+#
+# `lto = "fat"` and `strip = true` apply workspace-wide because cargo does
+# not allow per-package overrides for those settings. The control-plane
+# and cli binaries get the same treatment; their stripped release binaries
+# are also how they ship.
+#
+# `opt-level` and `codegen-units` are overridden per-package for the
+# sidecar below so we hit NFR-2's 25 MB ceiling without regressing
+# control-plane performance.
+[profile.release]
+lto = "fat"
+strip = true
+panic = "unwind"
+
+[profile.release.package.nautiloop-sidecar]
+opt-level = "z"
+codegen-units = 1

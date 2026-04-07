@@ -1,0 +1,86 @@
+[package]
+name = "nautiloop-sidecar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nautiloop agent auth sidecar (Rust rewrite of the Go auth-sidecar)"
+
+[[bin]]
+name = "nautiloop-sidecar"
+path = "src/main.rs"
+
+[lib]
+name = "nautiloop_sidecar"
+path = "src/lib.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.40", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "signal",
+    "sync",
+    "time",
+    "fs",
+    "process",
+] }
+
+# HTTP server / client (hyper 1.x)
+hyper = { version = "1.4", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = [
+    "tokio",
+    "server",
+    "client-legacy",
+    "http1",
+] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
+
+# SSH server + client
+russh = { version = "0.60", default-features = false, features = ["ring"] }
+
+# TLS for model proxy upstream
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+rustls-pemfile = "2"
+rustls-webpki = ">=0.103.10"
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+] }
+webpki-roots = "0.26"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error types
+thiserror = "2"
+
+# Tracing — NOT used for the FR-19 / FR-26 log schemas, just internal.
+# Version pin clears RUSTSEC-2025-0055 per spec.
+tracing = "0.1"
+tracing-subscriber = { version = ">=0.3.20", features = ["fmt"] }
+
+# OS CSPRNG + URL parsing + CIDR
+# rand 0.10 matches russh 0.60's transitive rand version so that
+# PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519) compiles.
+rand = "0.10"
+url = "2"
+ipnet = "2"
+chrono = { version = "0.4", default-features = false, features = [
+    "clock",
+    "std",
+] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tower-service = "0.3"
+pin-project-lite = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,47 @@
+# cargo-deny configuration for the nautiloop-sidecar crate.
+#
+# Run via: cargo deny check
+#
+# CI is expected to run this on every PR that touches `sidecar/`. Any
+# advisory, yanked dependency, or disallowed license fails the build.
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.8
+# Treat unlicensed crates as an error rather than a warning.
+unused-allowed-license = "warn"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Explicit denials that would be disasters:
+# - native-tls: we use rustls only.
+# - openssl / openssl-sys: rustls only.
+deny = [
+    { name = "native-tls" },
+    { name = "openssl" },
+    { name = "openssl-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
