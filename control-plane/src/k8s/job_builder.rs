@@ -478,13 +478,19 @@ fn build_sidecar_mounts() -> Vec<VolumeMount> {
 /// FR-41a: Init container for iptables network egress enforcement.
 fn build_init_iptables_container() -> Container {
     let script = r#"set -e
-# Install iptables (not shipped with Alpine by default)
-apk add --no-cache iptables
+# Install iptables + ip6tables (not shipped with Alpine by default).
+# The Alpine `iptables` package provides both binaries.
+apk add --no-cache iptables ip6tables
 
-# IPv6: disable entirely in V1
-sysctl -w net.ipv6.conf.all.disable_ipv6=1
-sysctl -w net.ipv6.conf.default.disable_ipv6=1
-sysctl -w net.ipv6.conf.lo.disable_ipv6=1
+# IPv6: block egress entirely in V1.
+# We deliberately do NOT use `sysctl -w net.ipv6.conf.*.disable_ipv6=1` here:
+# /proc/sys is mounted read-only inside the container without
+# `privileged: true`, and the NET_ADMIN capability does not grant write
+# access to it. Using ip6tables to DROP all IPv6 OUTPUT achieves the same
+# goal (no IPv6 egress from the agent or sidecar) without requiring an
+# elevated security context.
+ip6tables -P OUTPUT DROP
+ip6tables -A OUTPUT -o lo -j ACCEPT
 
 # IPv4: strict egress enforcement for agent UID 1000
 # Allow loopback (agent -> sidecar on localhost)
