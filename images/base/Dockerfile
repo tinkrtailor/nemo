@@ -19,9 +19,15 @@ RUN pip install --no-cache-dir yq
 # Pulling the glibc build directly from the upstream release tarball
 # sidesteps this and gets us reproducible, pinned versions.
 FROM debian:bookworm-slim AS opencode-src
-# TARGETARCH is populated by BuildKit (docker buildx). Default to amd64 so
-# plain `docker build` still works on amd64 hosts without requiring buildx.
-ARG TARGETARCH=amd64
+# TARGETARCH is auto-populated by BuildKit (both `docker build` with the
+# default BuildKit builder AND `docker buildx build`) to the target
+# platform. Do NOT set a default here — BuildKit only auto-populates
+# when the ARG has no default value. With a default, the arg becomes a
+# static build arg and BuildKit stops overriding it, which causes
+# multi-platform builds to fetch the wrong binary.
+# For legacy non-BuildKit builds (DOCKER_BUILDKIT=0), pass explicitly:
+#   docker build --build-arg TARGETARCH=amd64 ...
+ARG TARGETARCH
 ARG OPENCODE_VERSION=v1.3.17
 # Pinned SHA256 digests for the two supported arches. If upstream replaces
 # a release asset (or a MITM tampers with it), the shasum check below fails
