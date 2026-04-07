@@ -134,6 +134,14 @@ spec:
                   key: GIT_HOST_TOKEN
             - name: BARE_REPO_PATH
               value: /bare-repo
+            # The api-server shells out to `git fetch` against the upstream
+            # remote (which is configured as git@github.com:owner/repo.git in
+            # the bare repo). Without this, ssh has no key, no known_hosts,
+            # and falls over with "Host key verification failed". The repo-init
+            # job sets these up for the initial clone but the long-running
+            # control-plane pods need them too.
+            - name: GIT_SSH_COMMAND
+              value: "ssh -i /etc/git-ssh/id_ed25519 -o UserKnownHostsFile=/etc/git-ssh-known-hosts/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
           resources:
             requests:
               cpu: 100m
@@ -146,6 +154,12 @@ spec:
               mountPath: /bare-repo
             - name: nautiloop-config
               mountPath: /etc/nautiloop
+              readOnly: true
+            - name: git-ssh-key
+              mountPath: /etc/git-ssh
+              readOnly: true
+            - name: git-ssh-known-hosts
+              mountPath: /etc/git-ssh-known-hosts
               readOnly: true
           startupProbe:
             httpGet:
@@ -172,6 +186,13 @@ spec:
         - name: nautiloop-config
           configMap:
             name: nautiloop-config
+        - name: git-ssh-key
+          secret:
+            secretName: nautiloop-repo-ssh-key
+            defaultMode: 0400
+        - name: git-ssh-known-hosts
+          configMap:
+            name: nautiloop-ssh-known-hosts
 ---
 apiVersion: v1
 kind: Service
@@ -229,11 +250,22 @@ spec:
               value: /bare-repo
             - name: AGENT_IMAGE
               value: ${var.agent_base_image}
+            # See api-server above — the loop-engine also reconciles state by
+            # invoking `git fetch` against the SSH remote. Without this it
+            # crashes the same way.
+            - name: GIT_SSH_COMMAND
+              value: "ssh -i /etc/git-ssh/id_ed25519 -o UserKnownHostsFile=/etc/git-ssh-known-hosts/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
           volumeMounts:
             - name: bare-repo
               mountPath: /bare-repo
             - name: nautiloop-config
               mountPath: /etc/nautiloop
+              readOnly: true
+            - name: git-ssh-key
+              mountPath: /etc/git-ssh
+              readOnly: true
+            - name: git-ssh-known-hosts
+              mountPath: /etc/git-ssh-known-hosts
               readOnly: true
           resources:
             requests:
@@ -255,6 +287,13 @@ spec:
         - name: nautiloop-config
           configMap:
             name: nautiloop-config
+        - name: git-ssh-key
+          secret:
+            secretName: nautiloop-repo-ssh-key
+            defaultMode: 0400
+        - name: git-ssh-known-hosts
+          configMap:
+            name: nautiloop-ssh-known-hosts
 YAML
 }
 

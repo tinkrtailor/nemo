@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{LoopFlag, StateStore};
-use crate::error::{NautiloopError, Result};
+use crate::error::Result;
 use crate::types::{
     EngineerCredential, LogEvent, LoopKind, LoopRecord, LoopState, RoundRecord, SubState,
 };
@@ -38,49 +38,6 @@ impl PgStateStore {
     /// Run database migrations.
     pub async fn run_migrations(&self) -> std::result::Result<(), sqlx::migrate::MigrateError> {
         sqlx::migrate!("./migrations").run(&self.pool).await
-    }
-}
-
-/// Helper to parse LoopState from a string. Returns error on unknown values (Finding #12).
-fn parse_loop_state(s: &str) -> Result<LoopState> {
-    match s {
-        "PENDING" => Ok(LoopState::Pending),
-        "HARDENING" => Ok(LoopState::Hardening),
-        "AWAITING_APPROVAL" => Ok(LoopState::AwaitingApproval),
-        "IMPLEMENTING" => Ok(LoopState::Implementing),
-        "TESTING" => Ok(LoopState::Testing),
-        "REVIEWING" => Ok(LoopState::Reviewing),
-        "CONVERGED" => Ok(LoopState::Converged),
-        "FAILED" => Ok(LoopState::Failed),
-        "CANCELLED" => Ok(LoopState::Cancelled),
-        "PAUSED" => Ok(LoopState::Paused),
-        "AWAITING_REAUTH" => Ok(LoopState::AwaitingReauth),
-        "HARDENED" => Ok(LoopState::Hardened),
-        "SHIPPED" => Ok(LoopState::Shipped),
-        unknown => Err(NautiloopError::Internal(format!(
-            "Corrupt DB: unknown loop_state '{unknown}'"
-        ))),
-    }
-}
-
-fn parse_sub_state(s: &str) -> Result<SubState> {
-    match s {
-        "DISPATCHED" => Ok(SubState::Dispatched),
-        "RUNNING" => Ok(SubState::Running),
-        "COMPLETED" => Ok(SubState::Completed),
-        unknown => Err(NautiloopError::Internal(format!(
-            "Corrupt DB: unknown sub_state '{unknown}'"
-        ))),
-    }
-}
-
-fn parse_loop_kind(s: &str) -> Result<LoopKind> {
-    match s {
-        "harden" => Ok(LoopKind::Harden),
-        "implement" => Ok(LoopKind::Implement),
-        unknown => Err(NautiloopError::Internal(format!(
-            "Corrupt DB: unknown loop_kind '{unknown}'"
-        ))),
     }
 }
 
@@ -124,12 +81,13 @@ fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
         spec_path: row.get("spec_path"),
         spec_content_hash: row.get("spec_content_hash"),
         branch: row.get("branch"),
-        kind: parse_loop_kind(row.get::<String, _>("kind").as_str())?,
-        state: parse_loop_state(row.get::<String, _>("state").as_str())?,
-        sub_state: row
-            .get::<Option<String>, _>("sub_state")
-            .map(|s| parse_sub_state(&s))
-            .transpose()?,
+        // Postgres enum columns (loop_kind, loop_state, sub_state) decode
+        // through the sqlx::Type derives on LoopKind/LoopState/SubState in
+        // crate::types. Decoding them as `String` panics with
+        // "mismatched types ... is not compatible with SQL type `loop_kind`".
+        kind: row.get::<LoopKind, _>("kind"),
+        state: row.get::<LoopState, _>("state"),
+        sub_state: row.get::<Option<SubState>, _>("sub_state"),
         round: row.get("round"),
         max_rounds: row.get("max_rounds"),
         harden: row.get("harden"),
@@ -138,14 +96,8 @@ fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
         cancel_requested: row.get("cancel_requested"),
         approve_requested: row.get("approve_requested"),
         resume_requested: row.get("resume_requested"),
-        paused_from_state: row
-            .get::<Option<String>, _>("paused_from_state")
-            .map(|s| parse_loop_state(&s))
-            .transpose()?,
-        reauth_from_state: row
-            .get::<Option<String>, _>("reauth_from_state")
-            .map(|s| parse_loop_state(&s))
-            .transpose()?,
+        paused_from_state: row.get::<Option<LoopState>, _>("paused_from_state"),
+        reauth_from_state: row.get::<Option<LoopState>, _>("reauth_from_state"),
         failure_reason: row.get("failure_reason"),
         current_sha: row.get("current_sha"),
         session_id: row.get("session_id"),
