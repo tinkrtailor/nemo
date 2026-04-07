@@ -35,3 +35,30 @@ output "post_apply_instructions" {
   description = "Post-apply next steps for the user"
   value       = local.deploy_public_key != null ? local.post_apply_instructions_with_key : local.post_apply_instructions_no_key
 }
+
+# Copy-paste block that the operator runs inside their consumer repo to
+# point the nemo CLI at this nautiloop. See `specs/per-repo-config.md` FR-16.
+#
+# This output is sensitive because it embeds the generated API key. Retrieve
+# with: terraform output -raw nemo_setup_instructions
+#
+# The terraform module does NOT write to arbitrary filesystem paths outside
+# its own state (FR-17) — we only print instructions for the operator to run.
+output "nemo_setup_instructions" {
+  description = "Copy-paste instructions to point your nemo CLI at this nautiloop (per-repo config)"
+  value       = <<-EOT
+    # 1. Add to <your-repo>/nemo.toml:
+    [server]
+    url = "${local.server_url}"
+
+    # 2. From your repo root, create the credentials file:
+    mkdir -p .nemo
+    echo "${random_password.api_key.result}" > .nemo/credentials
+    chmod 600 .nemo/credentials
+
+    # 3. Make sure the credentials file is git-ignored (nemo init does this
+    #    automatically, but if you already have a .gitignore):
+    grep -qxF ".nemo/credentials" .gitignore 2>/dev/null || echo ".nemo/credentials" >> .gitignore
+  EOT
+  sensitive   = true
+}

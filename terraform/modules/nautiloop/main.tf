@@ -112,7 +112,9 @@ locals {
        ${local.deploy_public_key != null ? trimspace(local.deploy_public_key) : ""}
     2. Re-run terraform apply to sync the repo (the repo-init job will fetch with the new key)
     3. Install the CLI: cargo install --git https://github.com/tinkrtailor/nautiloop nemo-cli
-    4. Configure: nemo init && nemo auth
+    4. From your repo root:
+         nemo init                                          # generates nemo.toml + seeds .gitignore
+         terraform output -raw nemo_setup_instructions       # prints [server].url + credentials block to paste
   EOT
 
   post_apply_instructions_no_key = <<-EOT
@@ -120,6 +122,8 @@ locals {
 
     Next steps:
     1. Install the CLI: cargo install --git https://github.com/tinkrtailor/nautiloop nemo-cli
-    2. Configure: nemo init && nemo auth
+    2. From your repo root:
+         nemo init                                          # generates nemo.toml + seeds .gitignore
+         terraform output -raw nemo_setup_instructions       # prints [server].url + credentials block to paste
   EOT
 }
