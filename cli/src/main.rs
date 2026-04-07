@@ -186,7 +186,13 @@ async fn main() -> anyhow::Result<()> {
         global,
     } = cli.command
     {
-        return commands::config::run(set.clone(), get.clone(), local, global);
+        return commands::config::run(
+            cli.server.as_deref(),
+            set.clone(),
+            get.clone(),
+            local,
+            global,
+        );
     }
 
     // Init is local-only — don't require config

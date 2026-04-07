@@ -79,16 +79,19 @@ fn resolve_scope(kind: KeyKind, local: bool, global: bool, inside_repo: bool) ->
 }
 
 /// Entry point for `nemo config`.
-pub fn run(set: Option<String>, get: Option<String>, local: bool, global: bool) -> Result<()> {
+pub fn run(
+    cli_server: Option<&str>,
+    set: Option<String>,
+    get: Option<String>,
+    local: bool,
+    global: bool,
+) -> Result<()> {
     if set.is_some() && get.is_some() {
         bail!("Cannot use --set and --get together");
     }
-    if (get.is_some() || set.is_none()) && (local || global) && set.is_none() {
-        // --local/--global only apply to --set; silently tolerate on display.
-    }
 
     // Resolve once for display and to determine the repo root.
-    let resolved = resolve_for_display();
+    let resolved = resolve_for_display(cli_server);
 
     if let Some(key) = get {
         return handle_get(&resolved, &key);
@@ -106,16 +109,16 @@ pub fn run(set: Option<String>, get: Option<String>, local: bool, global: bool) 
 /// Best-effort resolution for display. Never propagates resolver errors
 /// (e.g., `current_dir` failure) — we want `nemo config` to still show
 /// what it can.
-fn resolve_for_display() -> ResolvedConfig {
+fn resolve_for_display(cli_server: Option<&str>) -> ResolvedConfig {
     // sources::resolve reads the real env/fs. If current_dir() fails or the
     // global file is malformed, fall back to a synthetic "all default" config
     // so display still works.
-    match sources::resolve(None) {
+    match sources::resolve(cli_server) {
         Ok(r) => r,
         Err(_) => {
             let global = crate::config::EngineerConfig::default();
             sources::resolve_from(ResolveInputs {
-                cli_server: None,
+                cli_server: cli_server.map(|s| s.to_string()),
                 env_server: None,
                 env_api_key: None,
                 repo_root: None,
