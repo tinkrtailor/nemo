@@ -56,12 +56,20 @@ pub async fn run(
                     .unwrap_or_else(|| candidates[0].clone())
             }
             "openai" => {
-                // OpenCode / OpenAI credential paths (checked in priority order)
+                // OpenCode / OpenAI credential paths (checked in priority order).
+                // The opencode OAuth bundle (~/.local/share/opencode/auth.json)
+                // is preferred when present so users on a ChatGPT plan don't
+                // need to mint an API key. We push the JWT access token; the
+                // control plane extracts `openai.access` from the bundle and
+                // the sidecar uses it as a Bearer token against api.openai.com.
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                let data_dir = std::env::var("XDG_DATA_HOME")
+                    .unwrap_or_else(|_| format!("{home}/.local/share"));
                 let config_dir =
                     std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{home}/.config"));
                 let candidates = [
-                    format!("{config_dir}/opencode/credentials.json"), // opencode reviewer auth
+                    format!("{data_dir}/opencode/auth.json"), // opencode OAuth bundle
+                    format!("{config_dir}/opencode/credentials.json"), // opencode reviewer auth (raw key)
                     format!("{config_dir}/openai/credentials.json"),   // direct OpenAI
                 ];
                 candidates
@@ -82,7 +90,8 @@ pub async fn run(
             match *provider {
                 "claude" => eprintln!("  Run: claude login"),
                 "openai" => {
-                    eprintln!("  Create {cred_path} with your OpenAI API key as content")
+                    eprintln!("  Either: log in via opencode (writes ~/.local/share/opencode/auth.json),");
+                    eprintln!("  or create {cred_path} with your OpenAI API key as content");
                 }
                 "ssh" => eprintln!("  Run: ssh-keygen -t ed25519"),
                 _ => {}

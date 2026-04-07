@@ -453,16 +453,31 @@ pub async fn upsert_credentials(
         // Store verbatim — not an API key
         raw_content
     } else if raw_content.starts_with('{') {
-        // Try to extract api_key / key / apiKey from JSON
+        // Try to extract api_key / key / apiKey / OAuth access token from JSON.
+        // The opencode OAuth bundle for OpenAI looks like:
+        //   { "openai": { "type": "oauth", "access": "<jwt>", "refresh": "...", "expires": ... } }
+        // For that shape we extract `openai.access` so the sidecar can use it
+        // as a Bearer token. NOTE: the access token is short-lived (~24h) and
+        // the control plane does not currently refresh it — re-run `nemo auth`
+        // when loops hit AWAITING_REAUTH.
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw_content) {
-            parsed
-                .get("api_key")
-                .or_else(|| parsed.get("key"))
-                .or_else(|| parsed.get("apiKey"))
-                .or_else(|| parsed.get("ANTHROPIC_API_KEY"))
-                .or_else(|| parsed.get("OPENAI_API_KEY"))
-                .and_then(|v| v.as_str())
+            let nested_oauth_access = parsed
+                .get("openai")
+                .and_then(|v| v.get("access"))
+                .and_then(|v| v.as_str());
+
+            nested_oauth_access
                 .map(|s| s.to_string())
+                .or_else(|| {
+                    parsed
+                        .get("api_key")
+                        .or_else(|| parsed.get("key"))
+                        .or_else(|| parsed.get("apiKey"))
+                        .or_else(|| parsed.get("ANTHROPIC_API_KEY"))
+                        .or_else(|| parsed.get("OPENAI_API_KEY"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
                 .unwrap_or(raw_content)
         } else {
             raw_content
