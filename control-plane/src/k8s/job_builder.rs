@@ -152,6 +152,12 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
     // race the agent against the sidecar's port-binding code. Generous
     // failure_threshold * period covers slow image pulls and cold starts
     // without ever flapping under steady state.
+    //
+    // The sidecar's /healthz handler returns 503 until ALL four proxy ports
+    // (:9090 model, :9091 git SSH, :9092 egress, :9093 health) are listening,
+    // then flips to 200 (see `ready` atomic flag in images/sidecar/main.go).
+    // So this probe genuinely gates the agent on full sidecar readiness, not
+    // just on the health server having bound its own port.
     let startup_probe = Probe {
         http_get: Some(HTTPGetAction {
             path: Some("/healthz".to_string()),

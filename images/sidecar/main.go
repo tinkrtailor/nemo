@@ -338,9 +338,23 @@ func logEgress(start time.Time, dest, method string, sent, recv int64) {
 }
 
 // --- FR-22: Health check endpoint on :9093 ---
+//
+// `ready` flips to 1 only after every proxy port (:9090 model, :9091 git SSH,
+// :9092 egress logger, :9093 health) is actually listening. The K8s native
+// sidecar startupProbe targets /healthz, so this is the gate that decides
+// when the agent container is allowed to start. Returning 200 too early
+// would race the agent against in-flight port-binding goroutines and let it
+// hit "connection refused" on the proxy ports.
+
+var ready atomic.Bool
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if !ready.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"status":"starting"}`)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, `{"status":"ok"}`)
 }
@@ -743,8 +757,13 @@ func main() {
 		}
 	}()
 
-	// FR-22: Wait until all ports are listening, then write readiness file.
-	// Fail hard if any port doesn't bind within timeout.
+	// FR-22: Wait until all ports are listening, then flip the readiness
+	// flag and write the readiness file. Fail hard if any port doesn't
+	// bind within the timeout.
+	//
+	// IMPORTANT: until `ready` is set, /healthz returns 503 — that's what
+	// gates the K8s native sidecar startupProbe and prevents the agent
+	// container from starting before every proxy port is listening.
 	ports := []string{"127.0.0.1:9090", "127.0.0.1:9091", "127.0.0.1:9092", "127.0.0.1:9093"}
 	for _, addr := range ports {
 		bound := false
@@ -762,7 +781,12 @@ func main() {
 		}
 	}
 
-	// Write readiness file
+	// All ports bound — flip the gate. After this, /healthz returns 200,
+	// the startupProbe passes, and k8s starts the agent container.
+	ready.Store(true)
+
+	// Defense-in-depth: also write the readiness file the agent entrypoint
+	// historically polls. Belt-and-braces with the startupProbe gate.
 	readyPath := "/tmp/shared/ready"
 	if err := os.MkdirAll(filepath.Dir(readyPath), 0755); err != nil {
 		log.Fatalf("failed to create ready dir: %v", err)
