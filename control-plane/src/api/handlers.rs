@@ -774,7 +774,7 @@ mod tests {
             app,
             Request::builder()
                 .method(http::Method::POST)
-                .uri(&format!("/approve/{}", record.id))
+                .uri(format!("/approve/{}", record.id))
                 .body(Body::empty())
                 .unwrap(),
         )
