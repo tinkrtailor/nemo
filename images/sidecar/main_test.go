@@ -2,6 +2,8 @@ package main
 
 import (
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -70,4 +72,36 @@ func TestParseCIDRPanic(t *testing.T) {
 		}
 	}()
 	parseCIDR("invalid")
+}
+
+// FR-22: /healthz must gate on the global `ready` flag, not just whether
+// the health server has bound. The K8s native sidecar startupProbe targets
+// /healthz, so returning 200 too early would let the agent container start
+// before all proxy ports are listening (issue #53 follow-up).
+func TestHealthHandlerGatesOnReadyFlag(t *testing.T) {
+	// Save and restore global state.
+	prev := ready.Load()
+	defer ready.Store(prev)
+
+	// Not ready -> 503
+	ready.Store(false)
+	rr := httptest.NewRecorder()
+	healthHandler(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when not ready, got %d", rr.Code)
+	}
+	if body := rr.Body.String(); body != `{"status":"starting"}` {
+		t.Errorf("expected starting body, got %q", body)
+	}
+
+	// Ready -> 200
+	ready.Store(true)
+	rr = httptest.NewRecorder()
+	healthHandler(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 when ready, got %d", rr.Code)
+	}
+	if body := rr.Body.String(); body != `{"status":"ok"}` {
+		t.Errorf("expected ok body, got %q", body)
+	}
 }

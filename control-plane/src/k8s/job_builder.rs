@@ -30,8 +30,17 @@ pub struct JobBuildConfig {
 ///
 /// The Job contains:
 /// - init container: `init-iptables` for network egress enforcement (FR-41a)
+/// - **native sidecar** initContainer: `auth-sidecar` for model API proxy, git
+///   SSH proxy, egress logging. Uses the K8s 1.29+ native sidecar pattern
+///   (`restartPolicy: Always` on an initContainer) so the sidecar:
+///     1. Starts BEFORE the agent (its `startupProbe` gates agent start),
+///     2. Auto-terminates when the agent exits (k8s native sidecar lifecycle),
+///        which lets the Pod reach `Succeeded` and the Job reach `Complete`
+///        on the success path. Without this, the long-running sidecar would
+///        outlive the agent forever and every successful run would only
+///        terminate via `activeDeadlineSeconds` as a `DeadlineExceeded`
+///        failure (issue #53).
 /// - agent container: runs the agent entrypoint
-/// - sidecar container: `auth-sidecar` for model API proxy, git SSH proxy, egress logging
 ///
 /// Job naming: `nautiloop-{loop_id_short}-{stage}-r{round}-t{attempt}` (FR-31)
 /// Labels: `nautiloop.dev/loop-id`, `nautiloop.dev/stage`, `nautiloop.dev/engineer`, `nautiloop.dev/round` (FR-32)
@@ -40,7 +49,10 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
     // FR-31: Include attempt number in name to avoid AlreadyExists on redispatch.
     // Attempt = retry_count + 1 (first dispatch is attempt 1, first retry is attempt 2).
     let attempt = ctx.retry_count + 1;
-    let job_name = format!("nautiloop-{short_id}-{}-r{}-t{attempt}", stage.name, ctx.round);
+    let job_name = format!(
+        "nautiloop-{short_id}-{}-r{}-t{attempt}",
+        stage.name, ctx.round
+    );
 
     // FR-32: Labels for control plane queries
     let mut labels = BTreeMap::new();
@@ -119,7 +131,8 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
         ..Default::default()
     };
 
-    // FR-22: Sidecar readiness/liveness probes
+    // FR-22: Sidecar readiness probe.
+    // Pod-level "ready" gate. Cheap and frequent.
     let readiness_probe = Probe {
         http_get: Some(HTTPGetAction {
             path: Some("/healthz".to_string()),
@@ -131,14 +144,29 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
         ..Default::default()
     };
 
-    let liveness_probe = Probe {
+    // FR-22: Sidecar startup probe.
+    // For a native sidecar (initContainer with restartPolicy: Always), the
+    // startupProbe is the gate that decides when subsequent containers
+    // (the agent) are allowed to start. Without it, k8s would consider the
+    // sidecar "started" the instant the container process exists and would
+    // race the agent against the sidecar's port-binding code. Generous
+    // failure_threshold * period covers slow image pulls and cold starts
+    // without ever flapping under steady state.
+    //
+    // The sidecar's /healthz handler returns 503 until ALL four proxy ports
+    // (:9090 model, :9091 git SSH, :9092 egress, :9093 health) are listening,
+    // then flips to 200 (see `ready` atomic flag in images/sidecar/main.go).
+    // So this probe genuinely gates the agent on full sidecar readiness, not
+    // just on the health server having bound its own port.
+    let startup_probe = Probe {
         http_get: Some(HTTPGetAction {
             path: Some("/healthz".to_string()),
             port: IntOrString::Int(9093),
             ..Default::default()
         }),
-        initial_delay_seconds: Some(5),
-        period_seconds: Some(10),
+        period_seconds: Some(2),
+        failure_threshold: Some(30), // up to 60s for sidecar to bind all 4 ports
+        timeout_seconds: Some(3),
         ..Default::default()
     };
 
@@ -158,7 +186,12 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
         ..Default::default()
     };
 
-    // FR-24: Auth sidecar container
+    // FR-24: Auth sidecar as a K8s native sidecar (initContainer with
+    // restartPolicy: Always). This is what makes the sidecar auto-terminate
+    // when the agent exits, so the Job actually reaches Complete on the
+    // success path (issue #53). It also gives us free ordering: the agent
+    // container does not start until the sidecar's startupProbe passes,
+    // replacing the historical /tmp/shared/ready polling hack.
     let sidecar_container = Container {
         name: "auth-sidecar".to_string(),
         image: Some(cfg.sidecar_image.clone()),
@@ -166,12 +199,15 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
         volume_mounts: Some(sidecar_mounts),
         resources: Some(sidecar_resources),
         security_context: Some(sidecar_security_ctx),
+        startup_probe: Some(startup_probe),
         readiness_probe: Some(readiness_probe),
-        liveness_probe: Some(liveness_probe),
+        // K8s native sidecar marker. Requires k8s >= 1.29 (GA) and is
+        // available on the k3s versions nautiloop pins (>= v1.32).
+        restart_policy: Some("Always".to_string()),
         ..Default::default()
     };
 
-    // FR-41a: Init container for iptables network enforcement
+    // FR-41a: Init container for iptables network enforcement (runs and exits)
     let init_container = build_init_iptables_container();
 
     let timeout_secs = stage.timeout.as_secs();
@@ -206,8 +242,14 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
                 }),
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".to_string()),
-                    init_containers: Some(vec![init_container]),
-                    containers: vec![agent_container, sidecar_container],
+                    // Order matters: iptables runs and exits before the
+                    // sidecar starts, so the sidecar's outbound traffic
+                    // hits the agent-vs-sidecar UID rules. The sidecar
+                    // (native sidecar via restartPolicy: Always) then
+                    // stays up for the lifetime of the agent and is
+                    // auto-terminated when the agent exits.
+                    init_containers: Some(vec![init_container, sidecar_container]),
+                    containers: vec![agent_container],
                     volumes: Some(volumes),
                     image_pull_secrets,
                     ..Default::default()
@@ -660,31 +702,49 @@ mod tests {
     }
 
     #[test]
-    fn test_build_job_two_containers() {
+    fn test_build_job_pod_layout() {
+        // FR-24, issue #53: agent runs as the only regular container.
+        // The auth-sidecar is a NATIVE SIDECAR (initContainer with
+        // restartPolicy: Always) so it auto-terminates on agent exit.
         let ctx = test_ctx();
         let stage = test_stage();
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let pod_spec = job.spec.unwrap().template.spec.unwrap();
-        // FR-24: Two containers
-        assert_eq!(pod_spec.containers.len(), 2);
+
+        // Exactly one regular container — the agent. The sidecar lives
+        // in init_containers as a native sidecar.
+        assert_eq!(pod_spec.containers.len(), 1);
         assert_eq!(pod_spec.containers[0].name, "agent");
-        assert_eq!(pod_spec.containers[1].name, "auth-sidecar");
+
+        let init = pod_spec.init_containers.as_ref().unwrap();
+        assert_eq!(init.len(), 2);
+        assert_eq!(init[0].name, "init-iptables");
+        assert_eq!(init[1].name, "auth-sidecar");
+
+        // The native sidecar marker: restartPolicy: Always on the
+        // sidecar initContainer. Without this k8s would treat the
+        // sidecar as a normal init container that has to exit before
+        // the agent starts (which would never happen — the sidecar
+        // is a long-running proxy).
+        assert_eq!(init[1].restart_policy.as_deref(), Some("Always"));
+
+        // The iptables init container is NOT a native sidecar — it
+        // runs and exits before anything else starts.
+        assert!(init[0].restart_policy.is_none());
     }
 
     #[test]
-    fn test_build_job_init_container() {
+    fn test_build_job_init_iptables_caps() {
         let ctx = test_ctx();
         let stage = test_stage();
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let pod_spec = job.spec.unwrap().template.spec.unwrap();
-        // FR-41a: Init container for iptables
         let init = pod_spec.init_containers.unwrap();
-        assert_eq!(init.len(), 1);
-        assert_eq!(init[0].name, "init-iptables");
-        // Must have NET_ADMIN capability
-        let caps = init[0]
+        // FR-41a: init-iptables needs NET_ADMIN
+        let iptables = init.iter().find(|c| c.name == "init-iptables").unwrap();
+        let caps = iptables
             .security_context
             .as_ref()
             .unwrap()
@@ -761,13 +821,27 @@ mod tests {
         assert_eq!(sec.read_only_root_filesystem, Some(true));
     }
 
+    /// Sidecar lives in init_containers as a native sidecar (issue #53).
+    /// Test helper to find it cleanly.
+    fn find_sidecar(job: &Job) -> Container {
+        let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        pod_spec
+            .init_containers
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|c| c.name == "auth-sidecar")
+            .expect("auth-sidecar must be present in init_containers as a native sidecar")
+            .clone()
+    }
+
     #[test]
     fn test_build_job_sidecar_security_context() {
         let ctx = test_ctx();
         let stage = test_stage();
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
-        let sidecar = &job.spec.unwrap().template.spec.unwrap().containers[1];
+        let sidecar = find_sidecar(&job);
         let sec = sidecar.security_context.as_ref().unwrap();
         // Sidecar runs as UID 65534 (nobody)
         assert_eq!(sec.run_as_non_root, Some(true));
@@ -780,7 +854,15 @@ mod tests {
         let stage = test_stage();
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
-        let containers = &job.spec.unwrap().template.spec.unwrap().containers;
+        let containers = &job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers;
 
         // Agent resources for implement stage (FR-28)
         let agent_res = containers[0].resources.as_ref().unwrap();
@@ -788,8 +870,9 @@ mod tests {
         assert_eq!(limits["cpu"], Quantity("500m".to_string()));
         assert_eq!(limits["memory"], Quantity("2Gi".to_string()));
 
-        // Sidecar resources (FR-28)
-        let sidecar_res = containers[1].resources.as_ref().unwrap();
+        // Sidecar resources (FR-28) — sidecar is now a native sidecar in init_containers
+        let sidecar = find_sidecar(&job);
+        let sidecar_res = sidecar.resources.as_ref().unwrap();
         let sidecar_limits = sidecar_res.limits.as_ref().unwrap();
         assert_eq!(sidecar_limits["cpu"], Quantity("100m".to_string()));
         assert_eq!(sidecar_limits["memory"], Quantity("128Mi".to_string()));
@@ -840,7 +923,7 @@ mod tests {
         let stage = test_stage();
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
-        let sidecar = &job.spec.unwrap().template.spec.unwrap().containers[1];
+        let sidecar = find_sidecar(&job);
         let env = sidecar.env.as_ref().unwrap();
         let git_url = env.iter().find(|e| e.name == "GIT_REPO_URL").unwrap();
         // FR-18: Sidecar gets the actual git repo URL, not branch
@@ -907,7 +990,9 @@ mod tests {
         let job = build_job(&ctx, &stage, &cfg);
         let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let mounts = agent.volume_mounts.as_ref().unwrap();
-        let claude_mount = mounts.iter().find(|m| m.mount_path == "/home/agent/.claude");
+        let claude_mount = mounts
+            .iter()
+            .find(|m| m.mount_path == "/home/agent/.claude");
         assert!(
             claude_mount.is_some(),
             "Claude session should be mounted for implement"
@@ -959,10 +1044,10 @@ mod tests {
         let stage = test_stage();
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
-        let pod_spec = job.spec.unwrap().template.spec.unwrap();
 
-        // Sidecar has secret mounts
-        let sidecar_mounts = pod_spec.containers[1].volume_mounts.as_ref().unwrap();
+        // Sidecar has secret mounts (lives in init_containers as native sidecar)
+        let sidecar = find_sidecar(&job);
+        let sidecar_mounts = sidecar.volume_mounts.as_ref().unwrap();
         assert!(
             sidecar_mounts
                 .iter()
@@ -975,6 +1060,7 @@ mod tests {
         );
 
         // Agent does NOT have /secrets/ mounts (FR-26)
+        let pod_spec = job.spec.unwrap().template.spec.unwrap();
         let agent_mounts = pod_spec.containers[0].volume_mounts.as_ref().unwrap();
         assert!(
             !agent_mounts
@@ -989,19 +1075,31 @@ mod tests {
         let stage = test_stage();
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
-        let sidecar = &job.spec.unwrap().template.spec.unwrap().containers[1];
+        let sidecar = find_sidecar(&job);
 
-        // FR-22: Readiness and liveness probes on :9093/healthz
+        // FR-22: Readiness probe on :9093/healthz
         let readiness = sidecar.readiness_probe.as_ref().unwrap();
         let http = readiness.http_get.as_ref().unwrap();
         assert_eq!(http.port, IntOrString::Int(9093));
         assert_eq!(http.path.as_deref(), Some("/healthz"));
 
-        let liveness = sidecar.liveness_probe.as_ref().unwrap();
-        let http = liveness.http_get.as_ref().unwrap();
+        // FR-22: Startup probe on :9093/healthz — gates the agent container start
+        // when the sidecar is a native sidecar (initContainer with restartPolicy: Always).
+        let startup = sidecar
+            .startup_probe
+            .as_ref()
+            .expect("native sidecar must have a startupProbe");
+        let http = startup.http_get.as_ref().unwrap();
         assert_eq!(http.port, IntOrString::Int(9093));
-        assert_eq!(liveness.initial_delay_seconds, Some(5));
-        assert_eq!(liveness.period_seconds, Some(10));
+        assert_eq!(http.path.as_deref(), Some("/healthz"));
+        // Generous failure_threshold * period covers slow image pulls.
+        assert!(startup.failure_threshold.unwrap_or(0) >= 30);
+
+        // No liveness probe — kubelet must not restart the sidecar mid-job (issue #53).
+        assert!(sidecar.liveness_probe.is_none());
+
+        // Native sidecar marker
+        assert_eq!(sidecar.restart_policy.as_deref(), Some("Always"));
     }
 
     #[test]
