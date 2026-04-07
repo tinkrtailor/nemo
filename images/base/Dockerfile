@@ -6,8 +6,36 @@
 FROM python:3.12-slim AS python-tools
 RUN pip install --no-cache-dir yq
 
-# Stage 2: Get opencode binary from published image
-FROM ghcr.io/anomalyco/opencode:latest AS opencode-src
+# Stage 2: Fetch opencode binary from the official sst/opencode releases.
+#
+# We deliberately do NOT use ghcr.io/anomalyco/opencode:latest — that image
+# ships the musl (Alpine) build of opencode, which cannot run on the
+# node:22-bookworm-slim (Debian/glibc) base: the binary's PT_INTERP points
+# at /lib/ld-musl-x86_64.so.1 and its C++ symbols come from a musl-built
+# libstdc++, so bash reports "cannot execute: required file not found" and
+# the audit/review/implement stages all fail with exit 127 before the
+# agent does any work.
+#
+# Pulling the glibc build directly from the upstream release tarball
+# sidesteps this and gets us reproducible, pinned versions.
+FROM debian:bookworm-slim AS opencode-src
+ARG TARGETARCH
+ARG OPENCODE_VERSION=v1.3.17
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) asset="opencode-linux-x64.tar.gz" ;; \
+      arm64) asset="opencode-linux-arm64.tar.gz" ;; \
+      *)     echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/opencode.tar.gz \
+      "https://github.com/sst/opencode/releases/download/${OPENCODE_VERSION}/${asset}"; \
+    mkdir -p /opt/opencode; \
+    tar -xzf /tmp/opencode.tar.gz -C /opt/opencode opencode; \
+    chmod +x /opt/opencode/opencode; \
+    /opt/opencode/opencode --version
 
 # Stage 3: Final image
 FROM node:22-bookworm-slim
@@ -35,9 +63,9 @@ COPY --from=python-tools /usr/local/lib/python3.12/site-packages /usr/local/lib/
 # FR-2: Install claude-code
 RUN npm install -g @anthropic-ai/claude-code@2.1.87
 
-# FR-3: Install opencode binary
-COPY --from=opencode-src /usr/local/bin/opencode /usr/local/bin/opencode
-RUN chmod +x /usr/local/bin/opencode
+# FR-3: Install opencode binary (glibc build, see opencode-src stage)
+COPY --from=opencode-src /opt/opencode/opencode /usr/local/bin/opencode
+RUN chmod +x /usr/local/bin/opencode && /usr/local/bin/opencode --version
 
 # FR-4: Entrypoint script
 COPY images/base/nautiloop-agent-entry /usr/local/bin/nautiloop-agent-entry
