@@ -1,9 +1,19 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 
-/// Generate a nemo.toml configuration file by scanning the monorepo.
+/// Generate a nemo.toml configuration file by scanning the monorepo and
+/// seed `.gitignore` entries so the per-repo credentials file never enters
+/// version control.
+///
+/// See `specs/per-repo-config.md` FR-12, FR-13.
 pub fn run(force: bool) -> Result<()> {
-    let nemo_toml = Path::new("nemo.toml");
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    run_in(&cwd, force)
+}
+
+/// Testable entry point — operates on an explicit directory.
+pub fn run_in(cwd: &Path, force: bool) -> Result<()> {
+    let nemo_toml = cwd.join("nemo.toml");
 
     if nemo_toml.exists() && !force {
         anyhow::bail!("nemo.toml already exists. Use --force to overwrite.");
@@ -21,7 +31,7 @@ pub fn run(force: bool) -> Result<()> {
     ];
 
     for (marker, name, test_cmd) in &markers {
-        if Path::new(marker).exists() {
+        if cwd.join(marker).exists() {
             services.push_str(&format!(
                 r#"
 [services.{name}]
@@ -44,13 +54,13 @@ tags = []
     }
 
     // Detect repo name from current directory
-    let repo_name = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+    let repo_name = cwd
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "my-project".to_string());
 
     // Detect default branch from git
-    let default_branch = detect_default_branch().unwrap_or_else(|| "main".to_string());
+    let default_branch = detect_default_branch(cwd).unwrap_or_else(|| "main".to_string());
 
     let config = format!(
         r#"# Nemo Configuration
@@ -78,23 +88,81 @@ reviewer = "gpt-5.4"
 {services}"#
     );
 
-    std::fs::write(nemo_toml, config)?;
-    println!("Created nemo.toml");
+    std::fs::write(&nemo_toml, config)
+        .with_context(|| format!("failed to write {}", nemo_toml.display()))?;
+    println!("Created {}", nemo_toml.display());
     if services.contains("[services.") && !services.contains("# [services.") {
         println!("  Auto-detected project structure. Review and adjust as needed.");
     } else {
         println!("  No project markers found. Add [services.<name>] sections manually.");
     }
 
-    // TODO(V1.5): Use control-plane/src/config/repo.rs nested service scanner
-    // instead of root-only marker detection for full monorepo support.
+    // Seed .nemo/.gitignore and root .gitignore so .nemo/credentials is never
+    // committed (per-repo-config spec FR-12, FR-13).
+    seed_nemo_gitignore(cwd)?;
+    append_root_gitignore_entry(cwd, ".nemo/credentials")?;
 
     Ok(())
 }
 
-/// Detect the default branch from git remote HEAD.
-fn detect_default_branch() -> Option<String> {
+/// Create `<cwd>/.nemo/.gitignore` with a single `credentials` line if it
+/// does not already exist. Does NOT overwrite an existing file — engineers
+/// may have customized it.
+fn seed_nemo_gitignore(cwd: &Path) -> Result<()> {
+    let dir = cwd.join(".nemo");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create directory {}", dir.display()))?;
+
+    let path = dir.join(".gitignore");
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::write(&path, "credentials\n")
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    println!("Seeded {}", path.display());
+    Ok(())
+}
+
+/// Append a single line to `<cwd>/.gitignore` if the exact line is not
+/// already present. Idempotent: running twice produces identical output.
+///
+/// The entry is an exact-line match (trimmed) — matching how git itself
+/// compares ignore patterns. A leading/trailing blank line is preserved
+/// from the existing file.
+fn append_root_gitignore_entry(cwd: &Path, entry: &str) -> Result<()> {
+    let path = cwd.join(".gitignore");
+    let existing = if path.exists() {
+        std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?
+    } else {
+        String::new()
+    };
+
+    let already_present = existing.lines().any(|l| l.trim() == entry);
+    if already_present {
+        return Ok(());
+    }
+
+    let mut new_contents = existing;
+    // Ensure a trailing newline before appending, if the file is non-empty
+    // and does not already end in one.
+    if !new_contents.is_empty() && !new_contents.ends_with('\n') {
+        new_contents.push('\n');
+    }
+    new_contents.push_str(entry);
+    new_contents.push('\n');
+
+    std::fs::write(&path, new_contents)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    println!("Added {entry} to {}", path.display());
+    Ok(())
+}
+
+/// Detect the default branch from git remote HEAD. Best-effort — returns
+/// None if git is not installed, the repo has no origin, or any error occurs.
+fn detect_default_branch(cwd: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
+        .current_dir(cwd)
         .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
         .output()
         .ok()?;
@@ -103,5 +171,129 @@ fn detect_default_branch() -> Option<String> {
         refname.rsplit('/').next().map(String::from)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_init_creates_nemo_toml() {
+        let tmp = tempdir().unwrap();
+        run_in(tmp.path(), false).unwrap();
+        assert!(tmp.path().join("nemo.toml").exists());
+    }
+
+    #[test]
+    fn test_init_refuses_to_overwrite_without_force() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("nemo.toml"), "existing").unwrap();
+        let err = run_in(tmp.path(), false).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        // Original contents preserved.
+        let contents = std::fs::read_to_string(tmp.path().join("nemo.toml")).unwrap();
+        assert_eq!(contents, "existing");
+    }
+
+    #[test]
+    fn test_init_overwrites_with_force() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("nemo.toml"), "old").unwrap();
+        run_in(tmp.path(), true).unwrap();
+        let contents = std::fs::read_to_string(tmp.path().join("nemo.toml")).unwrap();
+        assert!(contents.contains("[repo]"));
+    }
+
+    // ----- FR-12: .nemo/.gitignore -----
+
+    #[test]
+    fn test_init_seeds_nemo_gitignore() {
+        let tmp = tempdir().unwrap();
+        run_in(tmp.path(), false).unwrap();
+        let path = tmp.path().join(".nemo").join(".gitignore");
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(contents.contains("credentials"));
+    }
+
+    #[test]
+    fn test_init_nemo_gitignore_not_overwritten_when_present() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".nemo")).unwrap();
+        std::fs::write(
+            tmp.path().join(".nemo").join(".gitignore"),
+            "custom\nlines\n",
+        )
+        .unwrap();
+        run_in(tmp.path(), false).unwrap();
+        let contents =
+            std::fs::read_to_string(tmp.path().join(".nemo").join(".gitignore")).unwrap();
+        // Unchanged — we don't clobber user customizations.
+        assert_eq!(contents, "custom\nlines\n");
+    }
+
+    // ----- FR-13: root .gitignore -----
+
+    #[test]
+    fn test_init_appends_to_root_gitignore_when_missing() {
+        let tmp = tempdir().unwrap();
+        run_in(tmp.path(), false).unwrap();
+        let path = tmp.path().join(".gitignore");
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(contents.contains(".nemo/credentials"));
+    }
+
+    #[test]
+    fn test_init_does_not_duplicate_gitignore_entry() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), ".nemo/credentials\n").unwrap();
+        run_in(tmp.path(), false).unwrap();
+        let contents = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        let count = contents
+            .lines()
+            .filter(|l| l.trim() == ".nemo/credentials")
+            .count();
+        assert_eq!(count, 1, "expected exactly one matching line, got {count}");
+    }
+
+    #[test]
+    fn test_init_preserves_existing_gitignore_lines() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".gitignore"),
+            "target/\nnode_modules/\n.env\n",
+        )
+        .unwrap();
+        run_in(tmp.path(), false).unwrap();
+        let contents = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(contents.contains("target/"));
+        assert!(contents.contains("node_modules/"));
+        assert!(contents.contains(".env"));
+        assert!(contents.contains(".nemo/credentials"));
+    }
+
+    #[test]
+    fn test_append_gitignore_handles_missing_trailing_newline() {
+        let tmp = tempdir().unwrap();
+        // No trailing newline on existing line
+        std::fs::write(tmp.path().join(".gitignore"), "target/").unwrap();
+        append_root_gitignore_entry(tmp.path(), ".nemo/credentials").unwrap();
+        let contents = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert_eq!(contents, "target/\n.nemo/credentials\n");
+    }
+
+    #[test]
+    fn test_append_gitignore_idempotent_across_many_calls() {
+        let tmp = tempdir().unwrap();
+        for _ in 0..5 {
+            append_root_gitignore_entry(tmp.path(), ".nemo/credentials").unwrap();
+        }
+        let contents = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        let count = contents
+            .lines()
+            .filter(|l| l.trim() == ".nemo/credentials")
+            .count();
+        assert_eq!(count, 1);
     }
 }
