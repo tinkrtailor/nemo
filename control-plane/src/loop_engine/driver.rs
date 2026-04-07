@@ -1368,6 +1368,39 @@ impl ConvergentLoopDriver {
             .ensure_worktree(&record.branch, &worktree_path)
             .await?;
 
+        // Resolve current_sha. The happy path is that POST /start already
+        // set it (create_branch -> set_current_sha before returning 201).
+        // But the handler has an inherent race: the loop row is inserted
+        // with current_sha = NULL *before* create_branch and set_current_sha
+        // run, so a reconciler tick that fires in that 1-3s window picks up
+        // the PENDING loop with no SHA and — via the old
+        // `record.current_sha.clone().unwrap_or_default()` path — dispatches
+        // a job with SHA="". The agent entrypoint correctly rejects that:
+        //
+        //     NAUTILOOP_ERROR: entrypoint: missing required environment
+        //     variables: SHA
+        //
+        // Loop then fails as BackoffLimitExceeded after the K8s Job retries.
+        //
+        // Fall back to resolving the branch tip from the bare repo. By the
+        // time we get here `ensure_worktree` has already succeeded for
+        // `record.branch`, so the branch is guaranteed to exist and
+        // `get_branch_sha` returns a real SHA.
+        let current_sha = match record.current_sha.clone() {
+            Some(sha) if !sha.is_empty() => sha,
+            _ => self
+                .git
+                .get_branch_sha(&record.branch)
+                .await?
+                .ok_or_else(|| {
+                    crate::error::NautiloopError::Internal(format!(
+                        "Failed to resolve current_sha for branch {} — \
+                         branch does not exist in bare repo",
+                        record.branch
+                    ))
+                })?,
+        };
+
         Ok(LoopContext {
             loop_id: record.id,
             engineer: record.engineer.clone(),
@@ -1375,7 +1408,7 @@ impl ConvergentLoopDriver {
             engineer_email,
             spec_path: record.spec_path.clone(),
             branch: record.branch.clone(),
-            current_sha: record.current_sha.clone().unwrap_or_default(),
+            current_sha,
             round: record.round as u32,
             max_rounds: record.max_rounds as u32,
             retry_count: record.retry_count as u32,
@@ -1494,7 +1527,12 @@ mod tests {
             paused_from_state: None,
             reauth_from_state: None,
             failure_reason: None,
-            current_sha: None,
+            // Matches the real /start handler, which always calls
+            // set_current_sha after create_branch before returning 201.
+            // The race-window case (current_sha = None reaching the
+            // reconciler) is covered by its own dedicated test below:
+            // test_build_context_falls_back_to_git_sha_when_record_missing_it
+            current_sha: Some("0000000000000000000000000000000000000000".to_string()),
             session_id: None,
             active_job_name: None,
             retry_count: 0,
@@ -1634,6 +1672,43 @@ mod tests {
 
         let updated = store.get_loop(record.id).await.unwrap().unwrap();
         assert_eq!(updated.sub_state, Some(SubState::Running));
+    }
+
+    /// Regression test for the POST /start race condition: if the reconciler
+    /// wins against the handler's set_current_sha call, `build_context` must
+    /// fall back to resolving the branch tip from git instead of shipping
+    /// SHA="" to the agent. Without this fallback, the agent container
+    /// exits with NAUTILOOP_ERROR: missing required environment variables:
+    /// SHA and the loop FAILs as BackoffLimitExceeded.
+    #[tokio::test]
+    async fn test_build_context_falls_back_to_git_sha_when_record_missing_it() {
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let git = Arc::new(MockGitOperations::new());
+
+        // Simulate the state the API handler produces before it has had
+        // the chance to call set_current_sha: the branch exists in the
+        // bare repo (create_branch ran) but the loop row still has
+        // current_sha = None.
+        git.set_branch_sha("agent/alice/test-abc12345", "deadbeefcafebabe")
+            .await;
+
+        let driver =
+            ConvergentLoopDriver::new(store, dispatcher, git, NautiloopConfig::default());
+
+        let mut record = make_pending_loop(true);
+        record.current_sha = None;
+
+        let ctx = driver.build_context(&record).await.unwrap();
+        assert_eq!(
+            ctx.current_sha, "deadbeefcafebabe",
+            "build_context should fall back to the branch tip in git when \
+             the record's current_sha is None (POST /start race window)"
+        );
+        assert!(
+            !ctx.current_sha.is_empty(),
+            "current_sha must NEVER reach the agent as an empty string"
+        );
     }
 
     #[tokio::test]
@@ -1999,6 +2074,12 @@ mod tests {
         record.sub_state = Some(SubState::Dispatched);
         record.round = 1;
         record.active_job_name = Some("review-job".to_string());
+        // Match the SHA seeded in the mock above so the has_diverged check
+        // during output ingestion doesn't false-positive. make_pending_loop
+        // now sets a placeholder current_sha (to exercise the common
+        // post-/start path), so ingestion tests that also seed a branch in
+        // the mock need to pin the record to the same value.
+        record.current_sha = Some("aabbccdd11223344".to_string());
         store.create_loop(&record).await.unwrap();
 
         // Create the round record (output is None initially)
