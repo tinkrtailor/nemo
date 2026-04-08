@@ -1,0 +1,15 @@
+{
+  "name": "anthropic_client_version_passthrough",
+  "category": "model_proxy",
+  "description": "Client-supplied anthropic-version is passed through unchanged (only set when missing)",
+  "input": {
+    "method": "POST",
+    "path": "/anthropic/v1/messages",
+    "headers": {
+      "content-type": "application/json",
+      "anthropic-version": "2022-01-01"
+    },
+    "body": "{\"model\":\"claude\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"
+  },
+  "expected_parity": true
+}

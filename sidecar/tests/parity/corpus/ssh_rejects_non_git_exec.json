@@ -1,0 +1,10 @@
+{
+  "name": "ssh_rejects_non_git_exec",
+  "category": "git_ssh",
+  "description": "exec 'ls /etc' not in allowlist: BOTH sidecars reject with exit status 1; mock observes zero",
+  "input": {
+    "request_kind": "exec",
+    "exec_command": "ls /etc"
+  },
+  "expected_parity": true
+}

@@ -1,0 +1,12 @@
+{
+  "name": "divergence_bare_exec_receive_pack_rejection",
+  "category": "divergence",
+  "description": "Bare 'git-receive-pack' (no repo arg): Rust rejects locally with exit 1; Go forwards and paramiko rejects with exit 128.",
+  "input": {},
+  "expected_parity": false,
+  "divergence": {
+    "description": "Rust sidecar rejects bare exec locally; Go sidecar forwards unchanged.",
+    "go_expected": "exit_status=128, mock observes 1 exec event",
+    "rust_expected": "exit_status=1, mock observes 0 exec events"
+  }
+}

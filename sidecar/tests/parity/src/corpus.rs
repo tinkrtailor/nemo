@@ -420,6 +420,59 @@ mod tests {
     }
 
     #[test]
+    fn committed_corpus_parses_and_validates() {
+        // Step 5 gate: the committed corpus files under corpus/
+        // must all load, pass invariants, and cover every expected
+        // category. If this test fails, the corpus JSON is
+        // malformed or violates FR-21.
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("corpus");
+        let cases = load_corpus(&dir).expect("committed corpus must load");
+        assert!(
+            cases.len() >= 30,
+            "corpus must contain at least 30 cases, got {}",
+            cases.len()
+        );
+
+        // At least one case per category.
+        let mut seen = std::collections::HashSet::new();
+        for c in &cases {
+            seen.insert(c.category);
+        }
+        for expected in [
+            Category::ModelProxy,
+            Category::Egress,
+            Category::GitSsh,
+            Category::Health,
+            Category::Divergence,
+        ] {
+            assert!(
+                seen.contains(&expected),
+                "corpus missing category {expected:?}"
+            );
+        }
+
+        // All five divergence case names from FR-22 are present.
+        let names: std::collections::HashSet<&str> =
+            cases.iter().map(|c| c.name.as_str()).collect();
+        for n in [
+            "divergence_sse_streaming_openai",
+            "divergence_sse_streaming_anthropic",
+            "divergence_bare_exec_upload_pack_rejection",
+            "divergence_bare_exec_receive_pack_rejection",
+            "divergence_connect_drain_on_sigterm",
+        ] {
+            assert!(names.contains(n), "corpus missing divergence case {n}");
+        }
+
+        // Exactly one order_hint=last case (the drain SIGTERM case).
+        let last_count = cases
+            .iter()
+            .filter(|c| c.order_hint == Some(OrderHint::Last))
+            .count();
+        assert_eq!(last_count, 1, "expected exactly 1 order_hint=last case");
+    }
+
+    #[test]
     fn non_json_files_ignored() {
         let tmp = tempdir().expect("tempdir");
         std::fs::write(tmp.path().join("a.json"), parity_case_bytes("a", "egress")).unwrap();

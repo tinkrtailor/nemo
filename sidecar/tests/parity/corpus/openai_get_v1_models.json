@@ -1,0 +1,15 @@
+{
+  "name": "openai_get_v1_models",
+  "category": "model_proxy",
+  "description": "GET /openai/v1/models: sidecar must rewrite Host to api.openai.com and inject Authorization: Bearer sk-test-openai-key",
+  "input": {
+    "method": "GET",
+    "path": "/openai/v1/models",
+    "headers": {},
+    "body": ""
+  },
+  "expected_parity": true,
+  "normalize": {
+    "body_strip_fields": []
+  }
+}

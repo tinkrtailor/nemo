@@ -1,0 +1,11 @@
+{
+  "name": "ssh_receive_pack_matching_repo",
+  "category": "git_ssh",
+  "description": "exec git-receive-pack 'test/repo.git' with stdin bytes must succeed with exit status 0 and deterministic ack",
+  "input": {
+    "request_kind": "exec",
+    "exec_command": "git-receive-pack 'test/repo.git'",
+    "stdin_hex": "0123456789abcdef"
+  },
+  "expected_parity": true
+}

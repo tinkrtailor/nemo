@@ -1,0 +1,13 @@
+{
+  "name": "divergence_connect_drain_on_sigterm",
+  "category": "divergence",
+  "description": "Open CONNECT tunnel to egress-target, trickle bytes, SIGTERM both sidecars. Go closes immediately (no drain). Rust drains for up to 5s per main.rs SHUTDOWN_DRAIN_TIMEOUT. THIS CASE KILLS THE CONTAINERS — must run last.",
+  "input": {},
+  "expected_parity": false,
+  "divergence": {
+    "description": "Rust gracefully drains long-lived CONNECT tunnels on SIGTERM; Go closes listeners immediately.",
+    "go_expected": "drain_ms <= 400 (fast close)",
+    "rust_expected": "drain_ms >= 1500 (slow drain)"
+  },
+  "order_hint": "last"
+}

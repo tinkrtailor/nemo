@@ -1,0 +1,17 @@
+{
+  "name": "openai_post_chat_completions_nonstream",
+  "category": "model_proxy",
+  "description": "POST /openai/v1/chat/completions non-streaming: both sidecars buffer the response, parity holds",
+  "input": {
+    "method": "POST",
+    "path": "/openai/v1/chat/completions",
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"model\":\"gpt-4\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"
+  },
+  "expected_parity": true,
+  "normalize": {
+    "body_strip_fields": []
+  }
+}

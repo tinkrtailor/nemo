@@ -1,0 +1,10 @@
+{
+  "name": "ssh_upload_pack_matching_repo",
+  "category": "git_ssh",
+  "description": "exec git-upload-pack 'test/repo.git' must succeed with exit status 0 and deterministic pack bytes",
+  "input": {
+    "request_kind": "exec",
+    "exec_command": "git-upload-pack 'test/repo.git'"
+  },
+  "expected_parity": true
+}

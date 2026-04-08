@@ -1,0 +1,11 @@
+{
+  "name": "egress_connect_egress_target",
+  "category": "egress",
+  "description": "CONNECT egress-target:443 through the egress port; tunnel must establish and bytes echo through mock-tcp-echo",
+  "input": {
+    "kind": "connect",
+    "target": "egress-target:443",
+    "payload_hex": "deadbeef"
+  },
+  "expected_parity": true
+}

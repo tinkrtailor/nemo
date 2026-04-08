@@ -1,0 +1,10 @@
+{
+  "name": "egress_dns_error_both_fail_502",
+  "category": "egress",
+  "description": "Egress GET to deliberately-unresolvable.invalid: both sidecars must return a 502-ish error (error-path parity; the fail-closed property is unit-tested in ssrf.rs).",
+  "input": {
+    "kind": "http_dns_error",
+    "url": "http://deliberately-unresolvable.invalid/"
+  },
+  "expected_parity": true
+}

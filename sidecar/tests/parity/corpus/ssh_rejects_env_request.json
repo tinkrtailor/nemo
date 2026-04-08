@@ -1,0 +1,11 @@
+{
+  "name": "ssh_rejects_env_request",
+  "category": "git_ssh",
+  "description": "env request before exec: both sidecars reply with channel_failure (no exit status); mock observes zero",
+  "input": {
+    "request_kind": "env",
+    "env_name": "FOO",
+    "env_value": "bar"
+  },
+  "expected_parity": true
+}
