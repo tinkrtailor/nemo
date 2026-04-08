@@ -4,43 +4,30 @@
 
 Phase 4 of the Rust sidecar migration plan. Build a containerized parity test harness that runs the Go sidecar and the Rust sidecar side-by-side against the same hermetic inputs, diffs their outputs, and gates the cutover decision.
 
-This is the single biggest remaining production-readiness blocker before phase 5 (K8s cutover).
+This is the single biggest remaining production-readiness blocker before phase 5 (K8s cutover). Harness runs locally AND in CI on every PR touching `sidecar/` — without CI enforcement, the harness is ceremony.
 
 ## Baseline
 
-Main at merge of PR #73 (`63d61e8`). The Rust sidecar is committed at `sidecar/` with 93 unit tests + 7 integration tests passing. The Go sidecar is still in the repo at `images/sidecar/main.go` — kept per the migration plan until phase 6. Both binaries compile and build their own Docker images.
+Main at merge of PR #73 (`63d61e8`). The Rust sidecar is committed at `sidecar/` with 93 unit tests + 7 integration tests passing. The Go sidecar is kept per the migration plan until phase 6. Both binaries compile.
 
 ## Problem Statement
 
-After three review passes (codex v1, v2, v3) and one followup batch review (PR #73), the Rust sidecar compiles, passes clippy, passes 100+ tests, and has been adversarially reviewed to the point of diminishing returns. **What we still lack is evidence of behavior parity against the Go implementation under realistic conditions.**
+After three review passes (codex v1, v2, v3) and one followup batch review (PR #73), the Rust sidecar compiles, passes clippy, passes 100+ tests, and has been adversarially reviewed to the point of diminishing returns. **What we still lack is evidence of behavior parity against the Go implementation under realistic conditions** AND a mechanism that prevents future regressions from slipping through.
 
-Specifically:
+The harness this spec builds is the difference between "we think it's behavior-identical" and "we have evidence it's behavior-identical AND CI rejects any change that breaks it."
 
-- All current Rust tests exercise the Rust implementation in isolation. None compare its behavior against the Go binary side-by-side.
-- The only manual validation we have is what the codex reviews surfaced, which are logical / static-analysis checks, not dynamic equivalence.
-- Three intentional deviations from Go are documented in `specs/rust-sidecar.md` (SSRF fail-closed on DNS error, DNS rebinding resolve-once, bare-exec rejection). Without a diff harness, we cannot prove those are the *only* deviations.
-- The cutover plan (phase 5) treats "production bake" as the main safety net. A one-week bake against a 3-binary-wire-protocol (HTTP, TLS, SSH) component is a thin safety net when an alternative — hermetic differential testing — is achievable today.
+### Key design decision up front: use CGNAT addresses (RFC6598) for the Docker network
 
-**The harness this spec builds is the difference between "we think it's behavior-identical" and "we have evidence it's behavior-identical."**
+A naïve design would use Docker's default bridge network, which allocates IPs in `172.16.0.0/12` (RFC1918). But both sidecars' SSRF checks fail-closed on RFC1918 addresses, so mapping `api.openai.com` → `172.x` via `extra_hosts` would make every test return HTTP 403 SSRF-block, not upstream responses.
 
-## Design grounding
+The clean fix: **use a custom Docker bridge network in `100.64.0.0/10` (RFC6598 CGNAT)**. Neither sidecar blocks CGNAT. Verified in `sidecar/src/ssrf.rs:94-99` (explicit comment: "we DO NOT block 100.64.0.0/10") and `images/sidecar/main.go:43-48` (privateRanges list only has RFC1918 + link-local + loopback). So mock service IPs like `100.64.0.10` are indistinguishable from public internet addresses to the sidecars' SSRF logic, and the harness proceeds as intended.
 
-The core harness design is already in `specs/rust-sidecar.md` under the `### Parity test harness (containerized, hermetic)` section. That section includes:
-
-- Docker Compose layout with 5 services (sidecar-go, sidecar-rust, mock-openai, mock-anthropic, mock-github-ssh)
-- Test CA bundle strategy via `NAUTILOOP_EXTRA_CA_BUNDLE` env var (Rust side) + `Dockerfile.go-with-test-ca` variant (Go side)
-- DNS override via compose `extra_hosts` so real hostnames (`api.openai.com`, `github.com`) resolve to mock services
-- Harness corpus: Model proxy, Egress, Git SSH, Health categories with specific inputs per category
-- Comparison logic: HTTP status / body / log lines / exit codes, normalized per-test
-- Acknowledged divergences: the 3 documented bug fixes + the CONNECT drain improvement + `/healthz` method parity
-- Known limitations: concurrent log ordering under load, trailing-newline differences in error bodies, fatal error wording
-
-**This spec implements that design.** Where the `rust-sidecar.md` design is ambiguous or underspecified, this spec makes the calls explicit.
+**No code changes to either sidecar are required.** No test-only feature flags. Just a `subnet: 100.64.0.0/24` line in the compose file's network section.
 
 ## Dependencies
 
-- **Requires:** PR #63 (rust sidecar merged), PR #73 (followups merged including `__test_utils` feature), PR #56 (Go sidecar health bind fix). All three are on main.
-- **Enables:** phase 5 cutover with actual parity evidence. Unblocks retiring the Go sidecar.
+- **Requires:** PR #63 (Rust sidecar merged), PR #73 (followups merged including `__test_utils` feature), PR #56 (Go sidecar health bind fix). All three are on main.
+- **Enables:** phase 5 cutover with actual parity evidence + CI enforcement. Unblocks retiring the Go sidecar.
 - **Blocks:** nothing.
 
 ## Requirements
@@ -52,116 +39,171 @@ The core harness design is already in `specs/rust-sidecar.md` under the `### Par
 - FR-1: The harness lives at `sidecar/tests/parity/` with this structure:
   ```
   sidecar/tests/parity/
-  ├── docker-compose.yml         # orchestrates 5 services
-  ├── Dockerfile.go-with-test-ca # Go sidecar + baked test CA bundle
+  ├── docker-compose.yml                # orchestrates all services
+  ├── Dockerfile.go-sidecar             # builds Go sidecar (see FR-9)
+  ├── Dockerfile.go-with-test-ca        # Go sidecar + baked test CA
   ├── fixtures/
   │   ├── test-ca/
-  │   │   ├── ca.pem             # CA certificate (committed)
-  │   │   └── ca.key             # CA private key (committed — test-only, never used in prod)
+  │   │   ├── ca.pem                    # test CA cert (committed)
+  │   │   ├── ca.key                    # test CA key (committed, test-only)
+  │   │   └── README.md                 # loud "test-only, never used in prod" warning
   │   ├── mock-openai/
-  │   │   ├── server.py          # minimal HTTPS server serving /v1/models, /v1/chat/completions
-  │   │   ├── cert.pem           # mock-openai.test cert signed by test-ca
+  │   │   ├── server.py                 # minimal HTTPS server
+  │   │   ├── Dockerfile
+  │   │   ├── cert.pem                  # signed by test-ca, SAN = api.openai.com
   │   │   └── key.pem
-  │   ├── mock-anthropic/
-  │   │   ├── server.py          # same shape for /v1/messages
-  │   │   ├── cert.pem
-  │   │   └── key.pem
+  │   ├── mock-anthropic/               # same shape for api.anthropic.com
   │   ├── mock-github-ssh/
-  │   │   ├── server.py          # python SSH server accepting git-upload-pack/git-receive-pack
+  │   │   ├── server.py                 # paramiko-based SSH server
+  │   │   ├── Dockerfile
   │   │   ├── host_key
   │   │   └── authorized_keys
+  │   ├── mock-example-http/            # plain HTTP server for egress cases
+  │   │   ├── server.py
+  │   │   └── Dockerfile
+  │   ├── mock-tcp-echo/                # raw TCP echo server for CONNECT drain test
+  │   │   ├── server.py
+  │   │   └── Dockerfile
   │   ├── go-secrets/
-  │   │   ├── model-credentials/openai       # "sk-test-openai-key"
-  │   │   ├── model-credentials/anthropic    # "sk-ant-test-key"
-  │   │   ├── ssh-key/id_ed25519             # harness client key
-  │   │   └── ssh-known-hosts/known_hosts    # includes mock-github-ssh host key
-  │   └── rust-secrets/          # identical content, separate mount
+  │   │   ├── model-credentials/openai          # "sk-test-openai-key"
+  │   │   ├── model-credentials/anthropic       # "sk-ant-test-key"
+  │   │   ├── ssh-key/id_ed25519                # harness client key
+  │   │   └── ssh-known-hosts/known_hosts       # trusts mock-github-ssh
+  │   └── rust-secrets/                         # identical content, separate mount
   ├── corpus/
-  │   └── *.json                 # one file per test case, see corpus design
+  │   └── *.json                        # one file per test case
   ├── src/
-  │   └── main.rs                # the harness driver binary
-  └── Cargo.toml                 # own crate: nautiloop-sidecar-parity-harness
+  │   └── main.rs                       # harness driver binary
+  ├── README.md
+  └── Cargo.toml                        # crate: nautiloop-sidecar-parity-harness
   ```
 
-- FR-2: `docker-compose.yml` shall define exactly 5 services:
-  1. `sidecar-go` — Go binary built from `Dockerfile.go-with-test-ca`, exposes container ports 9090-9093 as host ports 19090-19093, mounts `go-secrets/` at `/secrets/`, sets `GIT_REPO_URL=git@github.com:test/repo.git`, `extra_hosts` maps `api.openai.com`, `api.anthropic.com`, `github.com` to the corresponding mock service IPs on the Docker network.
-  2. `sidecar-rust` — Rust binary from `images/sidecar/Dockerfile`, exposes container ports 9090-9093 as host ports 29090-29093, mounts `rust-secrets/` at `/secrets/` AND `fixtures/test-ca/ca.pem` at `/test-ca/ca.pem`, sets `GIT_REPO_URL=git@github.com:test/repo.git` AND `NAUTILOOP_EXTRA_CA_BUNDLE=/test-ca/ca.pem`, same `extra_hosts`.
-  3. `mock-openai` — serves `api.openai.com:443` on the Docker network. Python-based HTTPS server with cert signed by test-ca. Returns fixed, deterministic responses for `GET /v1/models`, `POST /v1/chat/completions`, `GET /v1/chat/completions/stream-sse`, and a default 404 for unknown paths. Logs every incoming request (method, path, Authorization header, Host header) to a mounted volume for harness inspection.
-  4. `mock-anthropic` — same for `api.anthropic.com:443`. Routes: `POST /v1/messages` (both streaming and non-streaming).
-  5. `mock-github-ssh` — Python SSH server on `github.com:22`. Accepts `git-upload-pack <path>` and `git-receive-pack <path>`. For `test/repo.git`, returns fixed pack data bytes and `ExitStatus(0)`. For any other path, returns an error and `ExitStatus(128)`. Logs exec commands and bytes received.
+- FR-2: `docker-compose.yml` shall define a custom bridge network `parity-net` with `subnet: 100.64.0.0/24` and at minimum these services. The count is not fixed — all services below are required, plus the harness driver can start ad-hoc extras as needed:
+  1. **`sidecar-go`** — Go binary built from `Dockerfile.go-with-test-ca`. Ports: `19090:9090`, `19091:9091`, `19092:9092`, `19093:9093` (host:container). Mounts `go-secrets/` at `/secrets/`. Env: `GIT_REPO_URL=git@github.com:test/repo.git`. `networks: parity-net: ipv4_address: 100.64.0.20`. `extra_hosts`: `api.openai.com:100.64.0.10`, `api.anthropic.com:100.64.0.11`, `github.com:100.64.0.12`, `mock-example:100.64.0.13`, `mock-tcp-echo:100.64.0.14`.
+  2. **`sidecar-rust`** — Rust binary from `images/sidecar/Dockerfile`. Ports: `29090-29093:9090-9093`. Mounts `rust-secrets/` at `/secrets/` AND `fixtures/test-ca/ca.pem` read-only at `/test-ca/ca.pem`. Env: `GIT_REPO_URL=git@github.com:test/repo.git`, `NAUTILOOP_EXTRA_CA_BUNDLE=/test-ca/ca.pem`. Same `extra_hosts` entries, `ipv4_address: 100.64.0.21`.
+  3. **`mock-openai`** — HTTPS server on `100.64.0.10:443`. TLS cert signed by test-ca, SAN includes `api.openai.com`.
+  4. **`mock-anthropic`** — HTTPS server on `100.64.0.11:443`. SAN includes `api.anthropic.com`.
+  5. **`mock-github-ssh`** — paramiko SSH server on `100.64.0.12:22`.
+  6. **`mock-example`** — plain HTTP server on `100.64.0.13:80`. Used for egress plain-HTTP cases.
+  7. **`mock-tcp-echo`** — raw TCP echo server on `100.64.0.14:443`. Used ONLY by the CONNECT drain test. Separate so the CONNECT test can target it without colliding with mock-openai.
 
-- FR-3: Both `sidecar-go` and `sidecar-rust` shall depend on all three mock services being healthy before starting, via Docker Compose `depends_on` with `condition: service_healthy`.
+- FR-3: Both sidecars shall depend on all mock services being healthy before starting, via Compose `depends_on` with `condition: service_healthy`. The sidecars themselves do NOT get Docker-level healthchecks — the harness driver polls `/healthz` via `reqwest` with exponential backoff (200ms initial, up to 10s total) to wait for readiness. This preserves the ability to test the 503 startup window per FR-17.
 
-- FR-4: The `Dockerfile.go-with-test-ca` shall:
-  1. Start from the production Go sidecar build (copy from existing `images/sidecar/Dockerfile` base or use a multi-stage approach to rebuild the Go binary)
-  2. Copy `fixtures/test-ca/ca.pem` to `/etc/ssl/certs/ca-certificates.crt` (appended, not replaced, to preserve any default CAs the Go binary's `crypto/tls` needs)
-  3. Produce a scratch image identical to production except for the CA bundle
+- FR-4: The `Dockerfile.go-sidecar` rebuilds the Go sidecar from source. Because PR #63 replaced `images/sidecar/Dockerfile` with the Rust build, the Go Dockerfile must be resurrected:
+  ```dockerfile
+  FROM golang:1.22-alpine AS builder
+  WORKDIR /build
+  COPY images/sidecar/main.go images/sidecar/main_test.go images/sidecar/go.mod images/sidecar/go.sum ./
+  RUN go build -o auth-sidecar .
 
-  **Alternative:** if the production Go image base is `FROM scratch`, the Dockerfile simply copies the modified CA bundle directly. Document which approach is taken.
+  FROM scratch
+  COPY --from=builder /build/auth-sidecar /auth-sidecar
+  COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+  ENTRYPOINT ["/auth-sidecar"]
+  ```
+  Note: `images/sidecar/go.mod`, `go.sum`, and `main.go` still exist on main per phase 6 schedule (Go code kept until phase 6). If any of those files is missing when this spec is implemented, the implementer must file an issue and stop; the Go source is a hard prerequisite.
 
-- FR-5: The Rust sidecar image (production `images/sidecar/Dockerfile`) is used AS-IS for the `sidecar-rust` service. The test CA is loaded at runtime via `NAUTILOOP_EXTRA_CA_BUNDLE`, not baked into the image. This exercises the production code path.
+- FR-5: The `Dockerfile.go-with-test-ca` builds on top of `Dockerfile.go-sidecar` and appends the harness test CA to the CA bundle:
+  ```dockerfile
+  FROM golang:1.22-alpine AS builder
+  # ... same as Dockerfile.go-sidecar ...
+
+  FROM alpine:3.20 AS ca-builder
+  RUN apk add --no-cache ca-certificates
+  COPY fixtures/test-ca/ca.pem /tmp/test-ca.pem
+  RUN cat /tmp/test-ca.pem >> /etc/ssl/certs/ca-certificates.crt
+
+  FROM scratch
+  COPY --from=builder /build/auth-sidecar /auth-sidecar
+  COPY --from=ca-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+  ENTRYPOINT ["/auth-sidecar"]
+  ```
+  The Go binary reads `/etc/ssl/certs/ca-certificates.crt` via the standard library's `crypto/x509.SystemCertPool()` on Linux, which is populated from that file on Alpine-derived bases. The resulting scratch image trusts the test CA in addition to whatever Mozilla roots ship with Alpine's `ca-certificates` package.
+
+- FR-6: The Rust sidecar image (production `images/sidecar/Dockerfile`) is used AS-IS. The test CA is loaded at runtime via `NAUTILOOP_EXTRA_CA_BUNDLE=/test-ca/ca.pem`, exercising the production code path from `sidecar/src/tls.rs:60` onward. Verified: rustls APPENDS the extra CA to the `webpki-roots` default store rather than replacing it.
 
 #### Mock services behavior
 
-- FR-6: `mock-openai` shall respond to:
-  - `GET /v1/models` → 200 with JSON body `{"data":[{"id":"gpt-4o-mini","object":"model"}]}`, Content-Type `application/json`
-  - `POST /v1/chat/completions` (non-streaming) → 200 with a fixed JSON response containing a known string (e.g. `{"id":"chatcmpl-test","choices":[{"message":{"content":"pong"}}]}`)
-  - `POST /v1/chat/completions` with header `Accept: text/event-stream` OR request body field `"stream": true` → 200 with `Content-Type: text/event-stream`, streams 3 SSE events with deterministic content, then `[DONE]` and closes. **Server must flush between events so the client receives them incrementally.** Required to test the model proxy's streaming pass-through (FR-6 in rust-sidecar.md).
-  - Every other path → 404
+- FR-7: **`mock-openai`** shall respond to these paths (and ONLY these paths; anything else → 404):
+  - `GET /_healthz` → 200 `{"ok":true}` (plain HTTP on an additional port, NOT served over TLS)
+  - `GET /v1/models` → 200 with deterministic JSON body
+  - `POST /v1/chat/completions` (non-streaming, no `stream:true` in body) → 200 with deterministic JSON body
+  - `POST /v1/chat/completions` with `stream: true` in the JSON body → 200 `Content-Type: text/event-stream`, streams 3 SSE events with deterministic content, then `data: [DONE]\n\n` and closes. Server MUST flush between events (see FR-10 for the Python implementation note).
 
-  All responses record the incoming `Host` header, `Authorization` header, and request body to a log file for harness inspection.
+- FR-8: **`mock-anthropic`** shall respond to:
+  - `GET /_healthz` → 200 (plain HTTP)
+  - `POST /v1/messages` (non-streaming) → 200 with deterministic JSON body
+  - `POST /v1/messages` with `stream: true` → 200 SSE stream with 3 deterministic events
+  - Anything else → 404
 
-- FR-7: `mock-anthropic` shall respond to:
-  - `POST /v1/messages` → 200 with fixed JSON response. Non-streaming.
-  - `POST /v1/messages` with request body field `"stream": true` → SSE streaming, same shape as mock-openai's streaming endpoint.
-  - Every other path → 404
+- FR-9: **`mock-github-ssh`** (paramiko-based):
+  - Accepts any SSH client key (no auth challenge beyond key type parsing)
+  - Recognizes `exec` requests with commands `git-upload-pack <path>` and `git-receive-pack <path>`
+  - For `git-upload-pack 'test/repo.git'` or `git-upload-pack test/repo.git`: write deterministic bytes to channel stdout, send `ExitStatus(0)`, close channel
+  - For `git-receive-pack 'test/repo.git'`: consume input bytes from channel stdin, write a deterministic acknowledgement to stdout, send `ExitStatus(0)`, close channel
+  - For any other exec command OR any other repo path: write an error message to stderr, send `ExitStatus(128)`, close channel
+  - `env`, `pty-req`, `subsystem`, `shell`, `x11-req` requests: reject via `channel.send_exit_status(0)` is wrong — reject via returning `False` from the paramiko request handler
+  - Healthcheck: separate plain TCP listener on port 2200 that accepts + closes, used for `depends_on` healthcheck
 
-  All responses record incoming `Host`, `x-api-key`, `anthropic-version`, and request body.
+- FR-10: **Mock service Python implementation constraints.** Because Python's stdlib `http.server` does not reliably flush SSE chunks, ALL mock HTTP services shall use `hypercorn` or `uvicorn` with `asyncio` and explicit `await writer.drain()` between SSE events. Each mock is dockerized with `python:3.12-slim` + `pip install hypercorn uvicorn starlette` (or equivalent lightweight async ASGI). The implementer must verify flush behavior with a manual `curl -N` test against each mock before writing any harness cases.
 
-- FR-8: `mock-github-ssh` shall be a minimal SSH server (Python `paramiko` is acceptable):
-  - Accepts any client key (no auth — the harness key is static)
-  - Recognizes `git-upload-pack` and `git-receive-pack` exec commands
-  - For `git-upload-pack 'test/repo.git'` or `git-upload-pack test/repo.git`: write a fixed byte sequence (a valid minimal pack file or equivalent fixed payload) to the channel stdout, then send `ExitStatus(0)` and close
-  - For `git-receive-pack 'test/repo.git'`: read bytes from channel stdin (the pack the client pushes), write a fixed acknowledgment, send `ExitStatus(0)`
-  - For any other exec command or any other repo path: write an error message to stderr and send `ExitStatus(128)`
-  - For `env`, `pty-req`, `subsystem`, `shell` requests: reject via channel failure
-  - Logs every connection, exec command, and byte count to a file
+- FR-11: **`mock-example`** (plain HTTP): serves:
+  - `GET /_healthz` → 200
+  - `GET /foo` → 200 with fixed body
+  - `GET /redirect` → 302 with `Location: /foo` (used to verify sidecars do NOT follow redirects)
+  - Anything else → 404
 
-- FR-9: Mock services shall have Docker healthchecks:
-  - `mock-openai`, `mock-anthropic`: `curl -kf https://localhost:443/_healthz` returns 200 (serve a `/_healthz` endpoint)
-  - `mock-github-ssh`: TCP connect check on port 22 via `nc -z localhost 22`
+- FR-12: **`mock-tcp-echo`** (raw TCP): accepts connections on port 443, echoes every byte back, never closes until the client closes. Used exclusively by the CONNECT drain test (FR-22 item 4).
+
+- FR-13: **Mock log introspection.** Every mock service (except mock-tcp-echo which has no request/response semantics beyond echoing) exposes an HTTP introspection endpoint on a dedicated plain-HTTP port:
+  - `GET http://<mock>:9999/__harness/logs` → JSON array of every observed request since the mock started, with fields `{id, timestamp, method, path, host_header, headers, body_b64, source_ip}`
+  - `POST http://<mock>:9999/__harness/reset` → clears the in-memory log array
+  - `GET http://<mock>:9999/__harness/healthcheck-only` → JSON count of the subset of the log array that was `/_healthz` requests (for the harness driver to verify that its resets aren't racing healthchecks)
+
+  The introspection endpoint is a separate ASGI app on port 9999, not mixed into the main HTTPS app, so healthcheck and test traffic are not intermingled. Docker-level healthchecks hit the main app's `/_healthz` over HTTP on port 80 (or 443 non-TLS in a separate route — the implementer picks whichever is simpler for the mock's framework). The introspection port is NOT exposed to the host — only reachable from within `parity-net`.
+
+- FR-14: **Mock-github-ssh log introspection.** The SSH mock exposes the same introspection API via an HTTP sidecar listener on port 9999 (paramiko doesn't cleanly expose an HTTP interface, so the mock runs both a paramiko SSH server on 22 and an asyncio HTTP server on 9999). `logs` returns SSH exec commands observed, bytes read/written, channel request types, and any authentication events.
 
 #### Harness driver
 
-- FR-10: The harness driver is a new workspace crate at `sidecar/tests/parity/` named `nautiloop-sidecar-parity-harness`. It is NOT part of the `nautiloop-sidecar` crate — it's a separate member of the Cargo workspace, and only its own `cargo test` or `cargo run -p nautiloop-sidecar-parity-harness` invokes it.
+- FR-15: The harness driver is a new workspace crate at `sidecar/tests/parity/` named `nautiloop-sidecar-parity-harness`. It is a separate member of the Cargo workspace. Only its own `cargo run -p nautiloop-sidecar-parity-harness` or `cargo test -p nautiloop-sidecar-parity-harness` invokes it. The crate is binary-only (`src/main.rs`), with no `lib.rs` required — Cargo supports bin-only workspace members.
 
-- FR-11: The harness driver shall start the `docker-compose.yml` stack, wait for all services to be healthy (up to 60s total, fail with clear error if any service doesn't come up), run the test corpus against both sidecars in parallel, collect outputs, diff them, and report results.
+- FR-16: **Image freshness is enforced by default.** The driver shall run `docker compose build` before every run unless `--no-rebuild` is passed. The rebuild operates on the harness's local `docker-compose.yml` only (the sidecar-rust image rebuild uses `images/sidecar/Dockerfile`, and the sidecar-go image uses `Dockerfile.go-with-test-ca`). This guarantees stale binaries cannot produce false-green results.
 
-- FR-12: The driver shall accept a `--stop` flag that tears down the compose stack after the run regardless of outcome. Default behavior is to leave the stack up if any test fails so the operator can inspect.
+- FR-17: The driver shall:
+  1. Run `docker compose build` (unless `--no-rebuild`)
+  2. Run `docker compose up -d`
+  3. Poll each mock service's `/_healthz` and wait for 200 responses (via `reqwest` to `100.64.0.X:80/_healthz`), fail with clear error if any service isn't healthy within 60s
+  4. **Test the 503 startup window BEFORE flipping readiness:** immediately after `docker compose up -d`, poll both sidecars' `/healthz` once and record the response. The 503 `{"status":"starting"}` case asserts what was observed here. Then continue polling with backoff until both sidecars return 200 `{"status":"ok"}` — this becomes the readiness barrier for the rest of the corpus.
+  5. Run the filtered corpus
+  6. If `--stop` is set OR all tests passed: `docker compose down -v`. Otherwise leave the stack up for inspection.
 
-- FR-13: For each test case in the corpus, the driver shall:
-  1. Reset any per-test mock service state (e.g., delete the mock's log file so only this test's requests are recorded)
+- FR-18: For each test case, the driver shall:
+  1. POST `http://<each-mock>:9999/__harness/reset` to clear their in-memory log arrays
   2. Issue the test input to BOTH sidecars in parallel (against host ports 19090-19093 for Go, 29090-29093 for Rust)
-  3. Capture from each side: HTTP status code, response headers (subset), response body, emitted log lines (by reading docker logs for that container since the test started), SSH exit codes, SSH stderr
-  4. Normalize the captures per the rules in FR-14
-  5. Diff Go vs Rust side. If they match (after normalization), the test passes. If they don't, the test fails with a readable diff.
-  6. For the 4 documented divergences (FR-15), the assertion is flipped: the test passes if Go and Rust differ in the documented direction, and fails if they match.
+  3. Capture from each side: HTTP status code, response headers (subset), response body, emitted container log lines (via `docker logs <container> --since <test-start-time> --timestamps`), SSH exit codes, SSH stderr
+  4. After the request completes, GET `http://<each-mock>:9999/__harness/logs` and capture what the mock observed from BOTH sidecars — this is per-test-case state that the harness driver attributes to each sidecar by `source_ip` (Go = 100.64.0.20, Rust = 100.64.0.21)
+  5. Normalize per FR-19 and diff Go vs Rust
+  6. For the documented divergences (FR-22), flip the assertion
 
-- FR-14: Normalization rules applied before comparing outputs:
-  - Log lines: strip `timestamp` field entirely. All other fields (`level`, `message`, `destination`, `method`, `bytes_sent`, `bytes_recv`, `prefix`) are compared verbatim.
-  - HTTP response headers: compare `Content-Type`, strip `Date`, `Server`, `Via`, and any other connection-specific headers
-  - Response bodies: per-test config can specify fields to strip (for responses that contain timestamps or request IDs)
-  - SSH stderr: trim trailing whitespace (Go `http.Error` appends a newline that Rust hyper does not; same convention applies to SSH error paths if any)
+- FR-19: Normalization rules applied before comparing outputs:
+  - Log lines: strip `timestamp` field entirely. All other fields compared verbatim.
+  - HTTP response headers: compare `Content-Type` + case config. Strip `Date`, `Server`, `Via`, `X-Request-Id`, `Connection`, `Content-Length` (because streaming chunked vs fixed-length can differ).
+  - Response bodies: per-test config can specify fields to strip (e.g. request IDs inside JSON bodies).
+  - SSH stderr: trim trailing whitespace.
+  - Mock log entries: strip `id` and `timestamp` fields; sort by `(path, method, source_ip)` so concurrent interleaving doesn't affect comparison.
+  - Docker log stdout/stderr: sort by normalized content within the per-test time window (acknowledges FR-14 concurrent-log-order limitation from the parent rust-sidecar spec).
 
-- FR-15: The driver shall assert DIVERGENCE (not parity) for these four documented fixes/improvements:
-  1. **SSRF fail-closed on DNS error:** send a request through the egress proxy where DNS lookup fails (e.g. via a test-specific mock DNS response or by using a deliberately unresolvable hostname). Go → connects or errors with upstream 502; Rust → 502 with a log line indicating SSRF block on DNS error. Harness asserts Rust log contains the SSRF indicator AND HTTP response matches.
-  2. **DNS rebinding resolve-once:** harder to test hermetically without a fake DNS. Acceptable scope: verify the Rust sidecar uses `SsrfConnector` and dials the resolved IP, by observing (via mock service logs) that the upstream `Host` header matches the hostname and the request arrived. This is a regression smoke, not a full rebinding simulation.
-  3. **Bare-exec rejection:** send `git-upload-pack` and `git-receive-pack` with no path argument to both sidecars' SSH proxies. Go → proxies through (mock-github-ssh receives the exec and returns ExitStatus 128). Rust → rejects locally with exit_status(1). Harness asserts divergence: Go's exit is 128 (from mock), Rust's exit is 1 (from sidecar reject). Both non-zero, different codes.
-  4. **CONNECT tunnel drain on SIGTERM:** send a CONNECT tunnel request, then SIGTERM the sidecar container while the tunnel is active. Rust should drain (up to 5s) before closing; Go should drop immediately. Harness asserts the Rust tunnel continues to receive bytes for up to 5s after SIGTERM, while the Go tunnel closes within 100ms.
+- FR-20: The driver shall support filtering:
+  - `cargo run -p nautiloop-sidecar-parity-harness -- --category model_proxy` — runs only the model_proxy cases
+  - `cargo run -p nautiloop-sidecar-parity-harness -- --case <case_name>` — runs a single case
+  - `cargo run -p nautiloop-sidecar-parity-harness -- --only-divergence` — runs only the 4 divergence tests
+  - `cargo run -p nautiloop-sidecar-parity-harness -- --stop` — tear down the stack after the run regardless of outcome
+  - `cargo run -p nautiloop-sidecar-parity-harness -- --no-rebuild` — skip `docker compose build` (developer workflow for iterating on test cases)
 
 #### Test corpus
 
-- FR-16: The corpus lives in `sidecar/tests/parity/corpus/` as JSON files. Each file is one test case with fields:
+- FR-21: The corpus lives in `sidecar/tests/parity/corpus/` as JSON files. Each file is one test case. The JSON schema:
   ```json
   {
     "name": "test_case_name",
@@ -169,92 +211,149 @@ The core harness design is already in `specs/rust-sidecar.md` under the `### Par
     "description": "human-readable",
     "input": { ... category-specific ... },
     "expected_parity": true | false,
-    "divergence": null | { "go_should": "...", "rust_should": "..." },
-    "normalize": { "body_strip_fields": ["id"], ... }
+    "divergence": null | { "description": "...", "go_expected": "...", "rust_expected": "..." },
+    "normalize": { "body_strip_fields": ["id"], "extra_header_strip": ["X-Whatever"] },
+    "order_hint": "first" | "last" | null
   }
   ```
+  `order_hint: "last"` forces a case to run last. Used by the CONNECT drain test, which SIGTERMs containers and therefore must run after all other tests. Only one test case may have `order_hint: "last"`; the harness driver panics at startup if more than one case has this hint.
 
-- FR-17: The corpus MUST cover at minimum these cases (expand if the harness framework makes it cheap):
+- FR-22: Corpus contents — updated to match actual sidecar endpoints and mock contracts:
 
-  **Model proxy parity (12 cases):**
-  - GET /openai/v1/models
-  - POST /openai/v1/chat/completions (non-streaming)
-  - POST /openai/v1/chat/completions (SSE streaming, 3 events)
-  - GET /anthropic/v1/messages
-  - POST /anthropic/v1/messages (non-streaming)
-  - POST /anthropic/v1/messages (streaming)
-  - GET /openai (bare path) → maps to upstream /
-  - GET /anthropic (bare path) → maps to upstream /
-  - GET /unknown-route → 403 with exact Go error body
-  - POST /openai/v1/chat/completions with client-supplied Authorization header → verify upstream receives the sidecar-injected Bearer, not client's
-  - POST /anthropic/v1/messages with client-supplied x-api-key → verify upstream receives the sidecar-injected value
-  - POST /anthropic/v1/messages with client-supplied anthropic-version → verify passthrough (not overwritten)
+  **Model proxy parity:**
+  - `openai_get_v1_models` — GET `/openai/v1/models` → mock returns model list JSON. Assert upstream received `Host: api.openai.com`, `Authorization: Bearer sk-test-openai-key`.
+  - `openai_post_chat_completions_nonstream` — POST `/openai/v1/chat/completions` body `{"model":"gpt-4","messages":[{"role":"user","content":"ping"}]}`. Assert upstream received the exact body + auth header.
+  - `openai_post_chat_completions_stream` — POST `/openai/v1/chat/completions` body `{"model":"gpt-4","stream":true,"messages":[...]}`. Assert client receives SSE chunks incrementally (timestamps of chunk arrivals differ, not all at end). Assert mock-openai observed the request with `stream: true` in the body.
+  - `anthropic_post_v1_messages_nonstream` — POST `/anthropic/v1/messages` body `{"model":"claude","messages":[...]}`. Assert upstream received `x-api-key: sk-ant-test-key`, `anthropic-version: 2023-06-01`, `Host: api.anthropic.com`.
+  - `anthropic_post_v1_messages_stream` — POST with `stream:true`. Assert incremental SSE + mock observed body.
+  - `openai_bare_prefix` — GET `/openai` (no trailing `/`) → mock should see upstream path `/` (no /openai prefix). Verifies bare-route handling in both sidecars.
+  - `anthropic_bare_prefix` — GET `/anthropic` (no trailing `/`) → same, upstream `/`.
+  - `unknown_route_returns_403` — GET `/some/unknown/path` → 403 with body `{"error":"only /openai/* and /anthropic/* routes are supported"}`. Assert mock services observed NO incoming request.
+  - `openai_client_auth_header_overwritten` — GET `/openai/v1/models` with `Authorization: Bearer client-supplied-fake`. Assert mock-openai observed `Authorization: Bearer sk-test-openai-key` (the server credential), NOT the client's.
+  - `anthropic_client_api_key_overwritten` — POST `/anthropic/v1/messages` with `x-api-key: client-supplied-fake`. Assert mock-anthropic observed `x-api-key: sk-ant-test-key`.
+  - `anthropic_client_version_passthrough` — POST `/anthropic/v1/messages` with `anthropic-version: 2022-01-01`. Assert mock-anthropic observed `anthropic-version: 2022-01-01` (client value passed through, not overwritten).
+  - `openai_credential_refresh_per_request` — issue request 1, mutate `fixtures/go-secrets/model-credentials/openai` and `fixtures/rust-secrets/model-credentials/openai` to a new value, issue request 2, assert request 2's mock-observed Authorization matches the new credential on BOTH sides.
 
-  **Egress parity (6 cases):**
-  - CONNECT github.com:443 → tunnel, log destination = github.com:443
-  - CONNECT github.com (no port) → tunnel, log destination = github.com:443 (synthesized)
-  - GET http://mock-example/ via egress (mock-example is a Docker-network-only HTTP server, added as 6th mock service) → forwarded, log destination = mock-example (no port per Go URL.Host behavior)
-  - GET http://mock-example:8080/foo → forwarded, log destination = mock-example:8080
-  - GET http://mock-example/ with `Proxy-Connection: keep-alive` header → verify header is stripped on the outgoing request (mock-example logs the incoming headers)
-  - GET http://mock-example/ returning 302 → verify sidecar does NOT follow the redirect (client sees the 302)
+  **Egress parity:**
+  - `egress_connect_github` — CONNECT `github.com:443` via port 19092/29092. Assert tunnel established (bytes flow both directions using mock-github-ssh as the target). Log line `destination: "github.com:443"`.
+  - `egress_connect_github_no_port` — CONNECT `github.com` (no port specified). Log destination `"github.com:443"` (synthesized).
+  - `egress_http_get_example` — GET `http://mock-example/foo` via port 19092/29092 (plain HTTP proxy, absolute-form request URI). Log destination `"mock-example"` (no port, matches Go's `URL.Host`).
+  - `egress_http_get_example_with_port` — GET `http://mock-example:8080/foo`. Log destination `"mock-example:8080"`.
+  - `egress_http_strips_proxy_connection` — GET with `Proxy-Connection: keep-alive` header. Assert mock-example observed NO `Proxy-Connection` header.
+  - `egress_http_no_redirect_follow` — GET `http://mock-example/redirect`. Assert client received 302 with `Location: /foo` (not the final /foo body). Assert mock-example observed only ONE request, not two.
 
-  **Git SSH parity (5 cases):**
-  - git-upload-pack 'test/repo.git' → proxies to mock-github-ssh, receives fixed pack bytes, exit status 0
-  - git-receive-pack 'test/repo.git' → proxies, pushes pack bytes, exit status 0
-  - git-upload-pack 'wrong/repo.git' → rejected locally by sidecar (repo allowlist mismatch), exit status 1
-  - Send `ls /etc` as exec → rejected locally, exit status 1
-  - Send env request (before exec) → rejected via channel_failure, no exit status
+  **Git SSH parity:**
+  - `ssh_upload_pack_matching_repo` — exec `git-upload-pack 'test/repo.git'`. Assert exit status 0, bytes match mock's deterministic pack.
+  - `ssh_receive_pack_matching_repo` — exec `git-receive-pack 'test/repo.git'` with pushing pack bytes. Exit status 0.
+  - `ssh_wrong_repo_path_rejected_locally` — exec `git-upload-pack 'wrong/repo.git'`. Assert exit status 1 from BOTH sidecars (both reject via local allowlist; the mock never sees the request because the sidecar rejects first). Assert mock-github-ssh log shows zero exec events.
+  - `ssh_rejects_non_git_exec` — exec `ls /etc`. Exit status 1. Mock observed zero.
+  - `ssh_rejects_env_request` — send `env` channel request before exec. Assert channel_failure response, no exit status. Mock observed zero (channel never proceeded to exec).
 
-  **Health parity (3 cases):**
-  - GET /healthz immediately after container start → 503 with body `{"status":"starting"}`
-  - Wait for ready, GET /healthz → 200 with body `{"status":"ok"}`
-  - HEAD /healthz after ready → 200 (method parity per Go's mux.HandleFunc which accepts any method)
+  **Health parity:**
+  - `healthz_pre_ready_returns_503` — poll `/healthz` IMMEDIATELY after `docker compose up -d`, before the readiness loop. Assert 503 `{"status":"starting"}`. This test is run implicitly by the driver during startup (FR-17 step 4), not via the normal corpus driver. Corpus file exists so the `--category health` filter finds it and can re-run a synthetic version if needed, but the actual 503 window observation happens once at startup.
+  - `healthz_post_ready_returns_200` — after readiness barrier. GET `/healthz`. Assert 200 `{"status":"ok"}`.
+  - `healthz_head_method_parity` — after readiness. HEAD `/healthz`. Assert 200 (Go's mux doesn't method-check; Rust matches per FR-21 of parent spec).
 
-  **Documented divergences (4 cases, must fail IF identical):**
-  - SSRF DNS error path (FR-15 item 1)
-  - DNS rebinding smoke (FR-15 item 2)
-  - Bare git-upload-pack (FR-15 item 3)
-  - CONNECT drain on SIGTERM (FR-15 item 4)
+  **Documented divergences (4 cases, must FAIL if Go and Rust match):**
+  - `divergence_ssrf_dns_error_failclosed` — issue an egress GET to a hostname whose mock DNS responder returns SERVFAIL. **Implementation of this case is DEFERRED** (see FR-23 scope reduction). For now, this case asserts a weaker property: issuing an egress GET to `http://deliberately-unresolvable.invalid/` returns 502 from BOTH sidecars (parity on the error path). The "fail-closed vs fail-open" divergence is verified by unit tests in `sidecar/src/ssrf.rs`, not by this harness case. Marked as a known scope reduction; true DNS-mock-based divergence testing is a followup.
+  - `divergence_bare_exec_upload_pack_rejection` — exec `git-upload-pack` (no path argument) via the SSH proxy. Assert Go exits with code 128 (mock received and errored), Rust exits with code 1 (sidecar rejected locally). Assert mock-github-ssh logs show 1 observed exec from Go, 0 from Rust.
+  - `divergence_bare_exec_receive_pack_rejection` — same for `git-receive-pack`.
+  - `divergence_connect_drain_on_sigterm` — establish a CONNECT tunnel through port 19092/29092 to `mock-tcp-echo:443`. Begin sending bytes at 1 byte per 100ms. After 500ms of steady traffic, send SIGTERM to each sidecar container via `docker kill --signal SIGTERM`. Measure time from SIGTERM to when the tunnel bytes stop flowing. Assert Go stops within 200ms, Rust continues for 2-5 seconds (drain up to 5s deadline). **`order_hint: "last"`** — this test kills the containers so it must run after all parity tests. The harness driver restarts the stack at the end if `--stop` is not set, or tears it down if `--stop` is set.
 
-- FR-18: The harness driver shall support filtering: `cargo run -p nautiloop-sidecar-parity-harness -- --category model_proxy` runs only the model_proxy cases. `--case test_case_name` runs only one case.
+- FR-23: **Scope reductions documented explicitly in the corpus:**
+  - `divergence_ssrf_dns_error_failclosed` is weakened per FR-22 above. True hermetic DNS divergence testing requires a DNS mock that SERVFAILs specific hostnames and is configured via the sidecar's DNS resolver. Deferred to followup issue after the harness lands.
+  - The parent rust-sidecar spec's FR-18 guarantees "resolve once, pass SocketAddr to dialer, never redial by hostname." This harness does NOT verify the resolve-once property — it verifies upstream routing smoke (the request arrived at the expected mock). True rebinding testing requires a DNS mock that returns different IPs on successive calls. Deferred as a followup — the rebinding property is currently enforced by code review of `sidecar/src/ssrf_connector.rs`, not by this harness.
 
-#### CI integration (minimal)
+#### CI integration
 
-- FR-19: The harness shall NOT be wired into any GitHub Actions workflow in this spec. It runs only when explicitly invoked locally via `cargo run -p nautiloop-sidecar-parity-harness` (which starts the compose stack) or `docker compose -f sidecar/tests/parity/docker-compose.yml up --abort-on-container-exit` (manual debugging). CI wiring is deferred to a followup once the harness itself is stable.
+- FR-24: The harness shall be wired into a NEW `.github/workflows/ci.yml` workflow that runs on every pull request AND every push to main. The workflow contains these jobs:
+  1. **`rust-checks`**: installs rust stable, runs `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+  2. **`rust-checks-with-test-utils`**: same as above but with `--features nautiloop-sidecar/__test_utils` (this covers the integration tests from PR #73 that were previously silently skipped — closes issue #71).
+  3. **`parity-harness`**: installs Docker (GitHub runners have docker pre-installed on `ubuntu-latest`), installs rust stable, runs `cargo run -p nautiloop-sidecar-parity-harness --release -- --stop`. Fails the CI run on any harness failure. Runs only on changes touching `sidecar/**`, `images/sidecar/**`, or `specs/rust-sidecar*.md` (path filter).
+  4. **`prod-leak-lint`**: runs `sidecar/scripts/lint-no-test-utils-in-prod.sh`. Fails the build on any hit (as extended in FR-28 for `NAUTILOOP_EXTRA_CA_BUNDLE`).
 
-- FR-20: A `sidecar/tests/parity/README.md` shall document:
-  - Prerequisites (Docker Desktop, Rust stable)
-  - How to build the required images (`docker compose build`)
-  - How to run the full corpus (`cargo run -p nautiloop-sidecar-parity-harness`)
-  - How to run a single category or case
-  - Expected runtime (target: <5 minutes for the full corpus on a developer workstation)
-  - How to inspect mock service logs when a test fails
-  - How to add a new corpus case (template + example)
+- FR-25: The `parity-harness` CI job has a 10-minute timeout. If the harness runs longer (likely a stuck container or healthcheck), the job fails with a clear error. Typical runtime target: <5 minutes per NFR-2.
+
+- FR-26: The `parity-harness` job uploads `sidecar/tests/parity/harness-run.log` and `docker compose logs --timestamps` output as artifacts on failure, so the failure can be debugged from the CI UI without re-running locally.
+
+#### Cargo-deny
+
+- FR-27: The harness crate's dependencies are gated by the existing workspace `deny.toml` (if it exists) or a new one added in this spec. The new deps (`reqwest`, `russh` client-side, `clap`, `anyhow`) inherit the license allowlist from the rest of the workspace. Any new advisory against them fails CI.
+
+#### Security lint extension
+
+- FR-28: The existing `sidecar/scripts/lint-no-test-utils-in-prod.sh` from PR #73 shall be extended to ALSO check for `NAUTILOOP_EXTRA_CA_BUNDLE` references in `.github/workflows/` and in production K8s manifests under `terraform/`. Fail the script if any production workflow or manifest references the variable. The `ci.yml` workflow itself IS allowed to set it in the `parity-harness` job, so the script whitelists any `.github/workflows/ci.yml` matches that are in a job named `parity-harness` (pattern match on the context). The script's exit code is consumed by the `prod-leak-lint` CI job.
 
 ### Non-Functional Requirements
 
-- NFR-1: The harness shall be runnable on any developer workstation with Docker Desktop and Rust stable installed. No other prerequisites.
-- NFR-2: The full corpus run shall complete in under 5 minutes on a 2024-era laptop (modest bar; we're not optimizing for CI-scale throughput).
-- NFR-3: The harness driver shall be `cargo clippy --workspace -- -D warnings` green, same bar as the rest of the workspace.
-- NFR-4: The harness shall be hermetic — no network access outside the Docker Compose network during test runs. Both sidecars see `api.openai.com`, `api.anthropic.com`, `github.com` as Docker-internal IPs.
-- NFR-5: Test case failures shall produce readable diffs with the exact fields that differ, not just "outputs don't match". The diff format should point at the corpus file name so the operator can fix a specific case.
+- NFR-1: The harness shall be runnable on any developer workstation with Docker Desktop + Rust stable.
+- NFR-2: Full corpus run under 5 minutes on a 2024-era laptop (cold compose build excluded; `--no-rebuild` path target).
+- NFR-3: `cargo clippy --workspace -- -D warnings` green, including the harness crate.
+- NFR-4: Hermetic — no external network access during test runs. Both sidecars resolve `api.openai.com`, `api.anthropic.com`, `github.com`, `mock-example`, `mock-tcp-echo` via `extra_hosts` to `parity-net` IPs.
+- NFR-5: Failures produce diffs with the exact fields that differ, not "outputs don't match." Diff points at the corpus JSON filename.
+- NFR-6: **Determinism** — running the same corpus twice against unchanged code produces identical pass/fail. No flakes from ordering, timing, or container state.
+- NFR-7: **Isolation** — the harness MUST NOT leave dangling containers, volumes, or networks on failure. On any panic or early exit in the driver, a `Drop` guard runs `docker compose down -v --remove-orphans` to clean up.
+- NFR-8: **Resource bounds** — the harness configures a per-container memory limit of 512MB and logs a warning if any container approaches it.
+- NFR-9: **Observability** — on failure, the harness dumps full mock logs AND full `docker compose logs` to `sidecar/tests/parity/harness-run.log` in a deterministic format, so post-mortem is possible without re-running. The CI uploads this file as an artifact.
 
 ### Security Requirements
 
-- SR-1: The test CA private key (`fixtures/test-ca/ca.key`) is committed to the repo. It is marked clearly as test-only in the README and in the file header comment. Its only purpose is to sign certificates for mock HTTPS services that are unreachable outside the harness.
-- SR-2: The harness client SSH key (`fixtures/go-secrets/ssh-key/id_ed25519` and `rust-secrets/` equivalent) is also committed. Same test-only justification.
-- SR-3: The mock model credentials (e.g. `"sk-test-openai-key"`) are committed and are obviously non-production. They never leave the harness network.
-- SR-4: The harness MUST NOT reuse any production certificate, key, or credential from anywhere in the repo. All harness secrets are freshly generated for this spec and committed. A comment at the top of each key file identifies it as harness-only.
-- SR-5: The `NAUTILOOP_EXTRA_CA_BUNDLE` env var set on the `sidecar-rust` service is scoped to the harness docker-compose.yml only. No production K8s manifest sets this variable (SR-10 from the rust-sidecar spec).
-- SR-6: `sidecar/scripts/lint-no-test-utils-in-prod.sh` (from PR #73) shall also be extended to check for `NAUTILOOP_EXTRA_CA_BUNDLE` references in CI workflow files, marking any such reference as a failure. Update the script in this spec.
+- SR-1: The test CA private key is committed under `sidecar/tests/parity/fixtures/test-ca/ca.key` with a loud header comment identifying it as test-only. The directory also has a `README.md` with the same warning plus an expiration reminder.
+- SR-2: The harness client SSH key is committed similarly under `fixtures/go-secrets/ssh-key/id_ed25519` and `rust-secrets/ssh-key/id_ed25519`. Same headers.
+- SR-3: Mock model credentials are obviously non-production strings (`sk-test-openai-key`, `sk-ant-test-key`). Committed.
+- SR-4: The harness MUST NOT reuse any production certificate, key, or credential. All harness secrets are freshly generated for this spec.
+- SR-5: `NAUTILOOP_EXTRA_CA_BUNDLE` is set ONLY in the harness compose file and ONLY in the CI `parity-harness` job. FR-28's lint enforces this at CI time.
+- SR-6: `NAUTILOOP_SSRF_TEST_ALLOWLIST` does NOT exist in this spec — CGNAT addresses handle SSRF transparently, so no test-only env var bypasses the SSRF check.
+- SR-7: Test CA generation is pinned:
+  ```bash
+  openssl req -x509 -newkey rsa:2048 -keyout ca.key -out ca.pem \
+    -sha256 -days 3650 -nodes \
+    -subj "/CN=Nautiloop Parity Harness Test CA" \
+    -addext "basicConstraints=critical,CA:TRUE"
+  ```
+  Mock service cert generation is pinned:
+  ```bash
+  # Per mock (openai, anthropic, example):
+  openssl req -newkey rsa:2048 -keyout key.pem -out csr.pem -nodes \
+    -sha256 \
+    -subj "/CN=api.openai.com" \
+    -addext "subjectAltName=DNS:api.openai.com"
+  openssl x509 -req -in csr.pem -CA ca.pem -CAkey ca.key \
+    -CAcreateserial -out cert.pem -days 3650 -sha256 \
+    -copy_extensions copy
+  ```
+  RSA-2048 + SHA-256 is acceptable to rustls-webpki 0.103.x and Go's `crypto/tls` without any extra config. All certs MUST include a `subjectAltName` DNS entry matching the hostname the sidecar will try to verify — otherwise rustls rejects with `NameMismatch` and Go's verifier rejects with a `SAN` error.
+- SR-8: The test CA has a 10-year validity (3650 days). A `sidecar/tests/parity/fixtures/test-ca/README.md` notes the expiration date and points to a regeneration script committed alongside (`regenerate-test-ca.sh`) so the future operator can rotate without guessing openssl flags.
+- SR-9: The harness SSH key (`fixtures/go-secrets/ssh-key/id_ed25519`) has a fixed fingerprint. Mock-github-ssh's `authorized_keys` trusts only this fingerprint. This is a footgun (anyone who obtains the committed key can spoof tests locally) but acceptable because the key's trust boundary is the test mock only. The README documents this clearly.
 
 ## Architecture
 
+### Network topology
+
+```
+parity-net (custom bridge, subnet 100.64.0.0/24)
+│
+├── sidecar-go       100.64.0.20
+├── sidecar-rust     100.64.0.21
+├── mock-openai      100.64.0.10  (:443 HTTPS, :9999 introspection, :80 healthz)
+├── mock-anthropic   100.64.0.11  (:443 HTTPS, :9999 introspection, :80 healthz)
+├── mock-github-ssh  100.64.0.12  (:22 SSH, :9999 introspection, :2200 healthz)
+├── mock-example     100.64.0.13  (:80 HTTP, :9999 introspection)
+└── mock-tcp-echo    100.64.0.14  (:443 raw TCP, no introspection, no healthz — harness uses TCP connect check)
+```
+
+`extra_hosts` on both sidecars maps `api.openai.com → 100.64.0.10`, `api.anthropic.com → 100.64.0.11`, `github.com → 100.64.0.12`. These are CGNAT addresses; neither sidecar's SSRF logic blocks them (verified against `sidecar/src/ssrf.rs:94-99` and `images/sidecar/main.go:43-48`).
+
+Host port mappings:
+- sidecar-go: 19090 (model), 19091 (ssh), 19092 (egress), 19093 (health)
+- sidecar-rust: 29090, 29091, 29092, 29093
+
+The harness driver runs on the host and connects to the sidecars via these mapped ports, AND directly to the mock services' introspection endpoints at `http://100.64.0.X:9999` by being attached to `parity-net` itself (see FR-18). The driver attaches by running inside a container for the CI job, or on the host with a secondary bridge connection for developer runs. **Developer workflow alternative:** the introspection ports can additionally be mapped to host ports (e.g. `49999-49999:9999`) so the host-based driver can hit them via `localhost`. The driver uses whichever is available, detected at startup.
+
 ### Crate structure
 
-`sidecar/tests/parity/` becomes a new workspace member. Top-level `Cargo.toml` gets:
-
 ```toml
+# Cargo.toml (workspace root)
 [workspace]
 members = [
     "cli",
@@ -264,13 +363,13 @@ members = [
 ]
 ```
 
-The harness crate's own `Cargo.toml`:
-
 ```toml
+# sidecar/tests/parity/Cargo.toml
 [package]
 name = "nautiloop-sidecar-parity-harness"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 [[bin]]
 name = "nautiloop-sidecar-parity-harness"
@@ -278,7 +377,7 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1.40", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
@@ -288,173 +387,147 @@ russh = { version = "0.60", default-features = false, features = ["ring"] }
 russh-keys = "0.60"
 tracing = "0.1"
 tracing-subscriber = ">=0.3.20"
+rustls-pemfile = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 ```
 
-Note: the harness depends on `russh` because it needs to speak SSH client-side to `sidecar-go:9091` and `sidecar-rust:9091` to issue exec commands and capture exit statuses. `reqwest` is used for the HTTP side (both `:9090` model proxy and `:9092` egress logger). `reqwest` with `rustls-tls` + a custom root store loaded from `fixtures/test-ca/ca.pem` lets it trust the mock HTTPS services.
+The harness driver uses `reqwest` with a custom `rustls::ClientConfig` that loads the test CA from `fixtures/test-ca/ca.pem` — so the driver itself trusts the mock TLS services exactly the way the sidecars do. The egress raw-TCP cases (CONNECT, absolute-form, origin-form) use `tokio::net::TcpStream` directly and write bytes by hand (FR-4 — `reqwest` is inadequate for raw proxy semantics). The `russh` client-side is used for the git_ssh cases, connecting to sidecar-go:19091 / sidecar-rust:29091 and issuing exec requests.
 
 ### Driver program structure
 
-`sidecar/tests/parity/src/main.rs` roughly:
+`sidecar/tests/parity/src/main.rs` pseudocode:
 
 ```rust
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let corpus = load_corpus("corpus/")?;
-    let filtered = filter_corpus(&corpus, args.category, args.case);
+    let filtered = filter_corpus(&corpus, &args);
 
-    let compose = ComposeStack::up("docker-compose.yml").await?;
-    compose.wait_healthy(Duration::from_secs(60)).await?;
+    let compose = ComposeStack::new("docker-compose.yml");
+    if !args.no_rebuild { compose.build().await?; }
+    compose.up().await?;
+    let _guard = ComposeGuard::new(&compose, args.stop); // Drop impl tears down on panic (NFR-7)
+
+    compose.wait_mock_healthchecks(Duration::from_secs(60)).await?;
+
+    // FR-17 step 4: capture the 503 startup window BEFORE sidecar readiness flips.
+    let startup_503_capture = capture_503_window(&compose).await?;
+
+    compose.wait_sidecar_readiness(Duration::from_secs(60)).await?;
 
     let mut results = Vec::new();
-    for case in &filtered {
-        let result = run_case(case).await;
-        print_case_result(&result);
-        results.push(result);
+    results.push(assert_startup_503(&startup_503_capture));
+
+    // Run parity tests first (order-independent), then any order_hint=last.
+    let (ordered_last, rest): (Vec<_>, Vec<_>) = filtered.iter().partition(|c| c.order_hint == Some("last"));
+    for case in rest {
+        let r = run_case(case, &compose).await;
+        print_case_result(&r);
+        results.push(r);
+    }
+    for case in ordered_last {
+        let r = run_case(case, &compose).await;
+        print_case_result(&r);
+        results.push(r);
     }
 
     let summary = summarize(&results);
     print_summary(&summary);
+    dump_logs_to_artifact_file(&compose, &summary, "sidecar/tests/parity/harness-run.log").await?;
 
     if args.stop || summary.all_passed {
-        compose.down().await?;
-    } else {
-        println!("Stack left running for inspection; run `docker compose down` when done.");
+        drop(_guard); // triggers compose down
     }
-
-    if !summary.all_passed {
-        std::process::exit(1);
-    }
+    if !summary.all_passed { std::process::exit(1); }
     Ok(())
 }
-
-async fn run_case(case: &TestCase) -> CaseResult {
-    let go_future = exercise_sidecar(case, SidecarSide::Go);
-    let rust_future = exercise_sidecar(case, SidecarSide::Rust);
-    let (go_out, rust_out) = tokio::join!(go_future, rust_future);
-
-    let go_norm = normalize(&go_out, &case.normalize);
-    let rust_norm = normalize(&rust_out, &case.normalize);
-
-    match case.expected_parity {
-        true => compare_parity(&go_norm, &rust_norm),
-        false => compare_divergence(&go_norm, &rust_norm, &case.divergence.unwrap()),
-    }
-}
-
-async fn exercise_sidecar(case: &TestCase, side: SidecarSide) -> SidecarOutput {
-    match case.category.as_str() {
-        "model_proxy" => exercise_model_proxy(case, side).await,
-        "egress" => exercise_egress(case, side).await,
-        "git_ssh" => exercise_git_ssh(case, side).await,
-        "health" => exercise_health(case, side).await,
-        _ => SidecarOutput::error("unknown category"),
-    }
-}
 ```
 
-Each `exercise_*` function uses the appropriate client library (`reqwest` for HTTP, `russh::client` for SSH) to send the case's input to the sidecar at its host-mapped port, capture the response + exit status + logs, and return a structured `SidecarOutput`.
+Each `run_case` dispatches on `case.category` to a dedicated driver module (`model_proxy_driver.rs`, `egress_driver.rs`, `git_ssh_driver.rs`, `health_driver.rs`). Each module uses the appropriate client technique (reqwest for HTTPS, raw tokio TCP for egress, russh client for SSH) and returns a structured `CaseResult`.
 
-Log capture uses `docker logs <container> --since <test_start_time>` executed via `tokio::process::Command`. Parse the log lines as JSON (FR-19/FR-26 schemas from the rust-sidecar spec), normalize per FR-14, and include in the `SidecarOutput` for comparison.
+`CaseResult` includes both sidecars' captured outputs AND the mock logs observed during the test window. Comparison logic (in a separate `compare.rs` module) runs normalization and diffing.
 
-### Normalization helper
+### Normalization + diffing
 
-A single `normalize(output: &SidecarOutput, rules: &NormalizeRules) -> NormalizedOutput` function applies:
-
-- Strip `timestamp` from all log line JSON objects
-- Strip any body fields listed in `rules.body_strip_fields`
-- Strip volatile HTTP response headers: `Date`, `Server`, `Via`, `X-Request-Id`, any header matching a per-case allowlist
-- Trim trailing whitespace from all text bodies and stderr strings
-- Sort log lines by (destination, method) tuple so order-dependence is removed (acknowledges the FR-14 concurrent-log-order limitation in the rust-sidecar spec)
-
-### Comparison output format
-
-On failure, the harness prints:
+See FR-19. Output format on failure:
 
 ```
-FAIL: test_case_name (model_proxy)
-   Description: POST /openai/v1/chat/completions with streaming
+FAIL: openai_post_chat_completions_stream (model_proxy)
+  Description: POST /openai/v1/chat/completions with stream:true
 
-   HTTP status: Go=200, Rust=200 (match)
-   Response body (normalized):
-      - chunk 0: match
-      - chunk 1: DIFF
-         Go:   "event: delta\ndata: {\"content\":\"pong\"}"
-         Rust: "event: delta\ndata: {\"content\":\"pong\" }"   # trailing space
-   Log lines:
-      Go (4 lines): match
-      Rust (4 lines): match
+  HTTP status: Go=200, Rust=200 (match)
 
-Corpus file: sidecar/tests/parity/corpus/openai_streaming.json
+  Response body (normalized, SSE events):
+    - event 0: match
+    - event 1: DIFF
+        Go:   data: {"choices":[{"delta":{"content":"p"}}]}
+        Rust: data: {"choices":[{"delta":{"content":"p" }}]}   # trailing space
+    - event 2: match
+    - [DONE]: match
+
+  Mock logs (mock-openai):
+    Go saw request:   {method:POST, path:/v1/chat/completions, host:api.openai.com, body:...}
+    Rust saw request: {method:POST, path:/v1/chat/completions, host:api.openai.com, body:...}
+    Match.
+
+  Docker logs: match
+
+Corpus file: sidecar/tests/parity/corpus/openai_post_chat_completions_stream.json
 ```
-
-Clear enough for an operator to locate the case file and fix whichever side is wrong.
-
-### Handling the CONNECT drain divergence test
-
-FR-15 item 4 needs the harness to SIGTERM a running container mid-operation and observe behavior. Approach:
-
-1. Establish a CONNECT tunnel to `github.com:443` via the sidecar egress
-2. Begin sending bytes through the tunnel at a trickle (1 byte every 100ms via mock-github-ssh — we'll reuse the SSH server as a TCP target for this case)
-3. Issue `docker kill --signal SIGTERM sidecar-go` (and separately for sidecar-rust)
-4. Measure time until the tunnel bytes stop flowing
-5. Assert: Go stops within 100ms of SIGTERM, Rust continues for 2-5 seconds (up to the 5s drain deadline), then stops
-6. After this test, the containers are dead — the harness driver must recreate them before running any subsequent test cases. Keep this test LAST in the corpus ordering so the restart only happens once.
-
-### Handling the DNS error path divergence test
-
-FR-15 item 1: the harness needs to trigger a DNS error on the sidecar's upstream resolution, NOT the harness's own resolution.
-
-Approach: add a 7th "mock service" — a custom DNS responder (`dnsmasq` or a small Python server) on the Docker network. Configure the compose stack so `sidecar-go` and `sidecar-rust` use it via `dns:` field. The responder is configured to return `SERVFAIL` for a specific hostname (e.g. `broken.test.docker`). The harness then asks each sidecar to CONNECT to `broken.test.docker:443` and observes:
-
-- Go → logs an error about DNS lookup but still tries to dial (fail-open), resulting in an HTTP 502 from the dial failure
-- Rust → logs an SSRF block entry AND returns HTTP 502 with a specific error body indicating the DNS fail-closed path
-
-Assert that the log lines DIFFER in the documented direction.
-
-This adds complexity but is the cleanest way to hermetically validate the fix. If the DNS mock proves too much scope for phase 4, it can be deferred to a followup and this specific divergence case marked as manually verified.
-
-**Simpler alternative** (acceptable if DNS mock is too much scope): use a hostname that resolves inside both containers to a TCP port where nothing is listening. DNS succeeds, dial fails. Both sidecars should return 502. This doesn't test the DNS error path specifically but proves basic failure handling parity. Document the limitation in the corpus file for this case.
 
 ## Migration plan
 
-Five commits on one branch `feat/sidecar-parity-harness`, in order:
+Six commits on branch `feat/sidecar-parity-harness`:
 
-### Commit 1 — scaffolding
+### Commit 1 — scaffolding + fixtures
 - New workspace member at `sidecar/tests/parity/`
-- `Cargo.toml` with the full dependency list
-- Stub `src/main.rs` that just prints "harness not yet implemented"
-- `sidecar/tests/parity/README.md` with the overview and usage placeholder
-- Top-level `Cargo.toml` workspace member added
-- `cargo build -p nautiloop-sidecar-parity-harness` green
-- `cargo clippy -p nautiloop-sidecar-parity-harness --all-targets -- -D warnings` green
+- `Cargo.toml` with full dep list
+- Stub `src/main.rs` printing "harness not implemented"
+- `fixtures/test-ca/` with ca.pem + ca.key + README.md generated by the committed `regenerate-test-ca.sh`
+- `fixtures/mock-*/cert.pem` + `key.pem` for HTTPS mocks, signed by test-ca, SANs pinned
+- `fixtures/go-secrets/` and `fixtures/rust-secrets/` populated
+- Harness README with the overview
+- Top-level workspace `Cargo.toml` member added
+- `cargo build -p nautiloop-sidecar-parity-harness` green, `cargo clippy -p nautiloop-sidecar-parity-harness --all-targets -- -D warnings` green
+- All committed files with test-only header comments
 
-### Commit 2 — fixtures + mock services
-- `fixtures/test-ca/{ca.pem,ca.key}` generated with openssl (self-signed, 10-year validity, test-only)
-- `fixtures/mock-openai/{server.py,cert.pem,key.pem}` — Python HTTPS server with fixed responses per FR-6
-- `fixtures/mock-anthropic/{server.py,cert.pem,key.pem}` — per FR-7
-- `fixtures/mock-github-ssh/{server.py,host_key,authorized_keys}` — Python SSH server per FR-8
-- `fixtures/go-secrets/` and `fixtures/rust-secrets/` directories with test credentials + known_hosts
-- Each cert and key has a comment header marking it as test-only
-- Mock service Dockerfiles (or inline in the compose YAML) documented
+### Commit 2 — mock services + Dockerfiles
+- `fixtures/mock-openai/server.py` implementing FR-7 (hypercorn-based)
+- `fixtures/mock-anthropic/server.py` implementing FR-8
+- `fixtures/mock-github-ssh/server.py` implementing FR-9 (paramiko) + HTTP introspection on 9999 (asyncio)
+- `fixtures/mock-example/server.py` implementing FR-11
+- `fixtures/mock-tcp-echo/server.py` implementing FR-12
+- `Dockerfile.go-sidecar` (FR-4) — resurrect Go sidecar build
+- `Dockerfile.go-with-test-ca` (FR-5) — Go sidecar with test CA appended
+- Each mock has its own Dockerfile under `fixtures/mock-*/Dockerfile`
+- `docker compose -f sidecar/tests/parity/docker-compose.yml build` succeeds for all images
+- Manual smoke: `curl -k --cacert fixtures/test-ca/ca.pem https://localhost:<mapped-port>/v1/models` against mock-openai (after spinning up the compose stack) returns a deterministic response
 
-### Commit 3 — docker-compose.yml + Dockerfile.go-with-test-ca
-- Full compose file with all 5 services wired
-- `Dockerfile.go-with-test-ca` for the Go sidecar variant
-- `docker compose up` brings the stack up; `docker compose ps` shows all 5 services as healthy
-- `docker compose down` tears it down cleanly
-- Manual smoke: `curl https://localhost:443/v1/models --cacert fixtures/test-ca/ca.pem` (pointing at mock-openai port-mapped to host) succeeds
+### Commit 3 — docker-compose.yml + driver scaffolding
+- Full `docker-compose.yml` with all services, `parity-net` network, `extra_hosts`, mounts, ports, env
+- `docker compose up` brings the full stack up; all mock healthchecks pass
+- Driver's `ComposeStack` helper implemented (build, up, down, wait_healthy)
+- Driver's `ComposeGuard` implemented (NFR-7 Drop-based teardown)
+- Driver can run `cargo run -p nautiloop-sidecar-parity-harness -- --stop` and cleanly bring up + tear down the stack
 
-### Commit 4 — corpus + harness driver
-- `corpus/` populated with all cases from FR-17
-- `src/main.rs` implements the driver per the Architecture section
-- Parity tests pass, divergence tests pass (both as expected)
-- README updated with actual usage commands
+### Commit 4 — corpus + driver cases
+- `corpus/` populated with all cases from FR-22
+- Driver modules for model_proxy, egress, git_ssh, health implemented
+- Normalization + diffing in `compare.rs`
+- Mock log introspection client code
+- First full `cargo run -p nautiloop-sidecar-parity-harness` succeeds — all parity tests green, divergence tests green in their divergent direction, artifact log file written
 
-### Commit 5 — polish and followup tracking
-- `sidecar/scripts/lint-no-test-utils-in-prod.sh` extended per SR-6 to check for `NAUTILOOP_EXTRA_CA_BUNDLE` in CI workflows
-- README's "how to add a new corpus case" section filled in with a real template
-- If any DNS-mock scope was deferred, followup issues filed and referenced in the README
+### Commit 5 — CI workflow + lint script extension
+- `.github/workflows/ci.yml` per FR-24 — 4 jobs: rust-checks, rust-checks-with-test-utils, parity-harness, prod-leak-lint
+- `sidecar/scripts/lint-no-test-utils-in-prod.sh` extended per FR-28 to also check for `NAUTILOOP_EXTRA_CA_BUNDLE` outside the parity-harness job
+- CI run on the branch itself should pass all 4 jobs — this is the final gate before merge
+
+### Commit 6 — polish, README, followups
+- `sidecar/tests/parity/README.md` final version: prerequisites, how to run, how to debug failures, how to add a case, known limitations (DNS mock deferred per FR-23, rebinding test deferred)
+- Followup issues filed for the deferred DNS mock work and rebinding coverage
+- Workspace-level `deny.toml` check that the new deps are clean
+- Any remaining TODO comments in the harness source resolved
 
 ## Test plan
 
@@ -462,62 +535,101 @@ Five commits on one branch `feat/sidecar-parity-harness`, in order:
 
 - `cargo build --workspace` green
 - `cargo clippy --workspace --all-targets -- -D warnings` green
-- `cargo test --workspace` — no regressions in the sidecar crate's unit/integration tests
-- `cargo test -p nautiloop-sidecar-parity-harness` — any internal unit tests for the normalization, corpus loading, or compose orchestration helpers
+- `cargo clippy --workspace --all-targets --features nautiloop-sidecar/__test_utils -- -D warnings` green
+- `cargo test --workspace` — no regressions in sidecar crate unit/integration tests
+- `cargo test --workspace --features nautiloop-sidecar/__test_utils` — integration tests that require the feature (7 currently)
+- `bash sidecar/scripts/lint-no-test-utils-in-prod.sh` — exits 0
 
 ### End-to-end runs
 
-- `cargo run -p nautiloop-sidecar-parity-harness --release` — full corpus, all cases green
-- Full corpus run under 5 minutes
-- Forcing a known failure (e.g., modifying a Go binary response fixture) causes the harness to report a readable diff pointing at the correct corpus case
-- Running with `--stop` on a failing run leaves the stack torn down
-- Running without `--stop` on a failing run leaves the stack up; subsequent `docker compose down -f sidecar/tests/parity/docker-compose.yml` cleans up
+- `cargo run -p nautiloop-sidecar-parity-harness --release -- --stop` (cold, first run with build) completes in <10 minutes
+- `cargo run -p nautiloop-sidecar-parity-harness --release -- --stop --no-rebuild` (warm) completes in <5 minutes per NFR-2
+- All parity tests pass, all divergence tests pass
+- Intentional regression check: temporarily modify mock-openai to drop a required header, re-run, harness reports a readable diff pointing at the correct corpus file
+- Intentional regression check: temporarily flip the expected divergence direction in one divergence test, re-run, that test fails
 
-### Divergence assertion checks
+### Divergence assertion validity checks
 
-For each of the 4 documented divergences, verify that:
-- If the Rust sidecar were "fixed" to match Go (the bug-compatible path), the corresponding test would FAIL (i.e., the divergence assertion is real, not a no-op)
-- This can be verified manually by temporarily hacking the mock service or the assertion to check the other direction
+For each of the 3 active divergence cases (DNS-error case is scope-reduced), verify that:
+- If the Rust sidecar were "fixed" to match Go (bug-compatible behavior), the corresponding test would fail
+- Verified manually by temporarily hacking the harness assertion to check the wrong direction
 
 ### Manual smoke (out of harness)
 
-- `docker compose up` by itself with the harness stack
-- Manually hit `curl http://localhost:19090/openai/v1/models -H 'Authorization: Bearer anything'` — should return mock-openai's response with the sidecar-injected Bearer
-- Manually ssh through the proxy: `ssh -p 19091 -i fixtures/go-secrets/ssh-key/id_ed25519 git@localhost git-upload-pack 'test/repo.git'` — should return mock pack bytes
-- Same commands against ports 29090/29091 hit the Rust sidecar
-- The two responses should be identical modulo normalization
+- After `docker compose up`, manually:
+  - `curl http://localhost:19090/openai/v1/models -H 'Authorization: Bearer x'` returns the expected mock response with sidecar-injected Bearer
+  - `ssh -p 19091 -i fixtures/go-secrets/ssh-key/id_ed25519 git@localhost git-upload-pack 'test/repo.git'` returns mock pack bytes
+  - Same against 29090/29091 hits the Rust sidecar and returns identical results
+- Manually verify `curl http://localhost:19093/healthz` returns 200 before the harness flips to ready (proves the 503 window is observable)
+
+### CI
+
+- Push the harness branch and confirm all 4 CI jobs pass:
+  - `rust-checks`
+  - `rust-checks-with-test-utils`
+  - `parity-harness`
+  - `prod-leak-lint`
+- On a deliberate failure injection, confirm the CI job fails AND uploads the artifact log file
+- On a PR that doesn't touch `sidecar/`, confirm the `parity-harness` job is SKIPPED via the path filter (saves CI minutes)
 
 ## Security considerations
 
-This spec introduces test infrastructure that ships test certificates and keys in the repo. Every piece is marked test-only and can never run against production hosts because the hostnames are overridden via `extra_hosts` inside a sandboxed Docker network.
+This spec introduces test infrastructure that ships test certificates, keys, and mock credentials. Every piece is test-only, committed with loud headers, and cannot run against production hosts because the hostnames are overridden via `extra_hosts` inside a sandboxed Docker network.
 
-### Non-negotiables
+### Non-negotiables (no reviewer leniency)
 
-1. **No production certificates, keys, or credentials appear anywhere in `sidecar/tests/parity/fixtures/`.** Every file in `fixtures/` is freshly generated and committed with a test-only header comment.
-2. **`NAUTILOOP_EXTRA_CA_BUNDLE` is only set on the `sidecar-rust` service in the harness compose file.** No production image or K8s manifest references this env var. SR-6's extended lint script enforces this.
-3. **The test CA's trust boundary is the harness compose network.** The CA never signs certificates for real hostnames.
-4. **The harness SSH key never authenticates against real GitHub.** It's only trusted by `mock-github-ssh`'s `authorized_keys`.
+1. **No production certificates, keys, or credentials appear anywhere in `sidecar/tests/parity/fixtures/`.** Every file is freshly generated per SR-7 and committed with a test-only header comment.
+2. **`NAUTILOOP_EXTRA_CA_BUNDLE` is set only in the harness compose file and only in the parity-harness CI job.** FR-28's lint enforces this with a CI gate.
+3. **No `NAUTILOOP_SSRF_TEST_ALLOWLIST` or equivalent bypass exists.** SSRF is handled via CGNAT network addressing instead of code bypass.
+4. **Test CA private key is committed but clearly marked test-only.** README + header comments + file path. Cannot sign certificates for real hostnames (CA is self-signed and untrusted by anything outside the harness).
+5. **The harness SSH key's trust boundary is mock-github-ssh only.** The mock's `authorized_keys` trusts exactly one fingerprint. That key, if obtained, allows spoofing tests locally but not against real GitHub.
 
-### New risks
+### New risks specific to this spec
 
-1. **Operator confusion.** A developer sees `fixtures/test-ca/ca.key` and thinks it's a leaked production key. Mitigation: loud README comments + file header comments + a top-level `HARNESS.md` link from the main README.
-2. **A rogue CI config enables `NAUTILOOP_EXTRA_CA_BUNDLE` in a prod build.** Mitigation: SR-6 lint script + grep + CI config review in code review.
-3. **Mock services drift from real behavior.** If OpenAI changes their SSE wire format, the mock doesn't know and the harness still passes. This is a known limitation — the harness tests Go↔Rust parity, not correctness against live upstreams. Real upstream correctness is covered by the phase 5 manual smoke test.
+1. **CGNAT network address leakage.** If the host machine has a VPN or other network interface in 100.64.0.0/10, there could be routing confusion. Mitigation: use 100.64.0.0/24 (smaller subnet), document the collision risk in the README, and verify at Docker network creation time that the subnet doesn't overlap existing routes.
+2. **Python dependency supply chain.** The mock services use Python with hypercorn, uvicorn, starlette, paramiko. These are new to the repo. The Dockerfiles pin exact versions (`pip install hypercorn==0.17.3 paramiko==3.4.0 ...`) to prevent drift. A new advisory against any of these packages should trigger a rebuild.
+3. **Docker compose network teardown on panic.** If the harness driver panics mid-run, the Drop guard in NFR-7 runs `docker compose down -v`. If that also panics, dangling containers linger. Mitigation: the CI job runs `docker compose down -v --remove-orphans` in an `always()` step as belt-and-braces.
+4. **CGNAT collision with real CGNAT users.** Some ISPs use CGNAT (100.64.0.0/10) for customer-facing NAT. If the developer is on such an ISP AND docker's bridge networking conflicts with the VPN/ISP route, there could be issues. Workaround: the README documents a `subnet` override flag so developers can pick a different non-private range if needed.
+
+### What this spec does NOT change
+
+- Production sidecar behavior — zero code changes to `sidecar/src/` or `images/sidecar/main.go`.
+- Production Dockerfile — unchanged; Go sidecar Dockerfile is NEW (harness-only), but does not affect production.
+- K8s manifests — unchanged.
 
 ## Out of scope
 
-- **CI integration.** No GitHub Actions wiring in this spec. The harness runs locally only.
-- **`cargo-deny` integration for the harness crate.** Inherits the workspace cargo-deny config; no changes needed.
+- **True DNS rebinding testing.** Deferred to followup (see FR-23). The harness tests upstream routing smoke only.
+- **True hermetic DNS SERVFAIL divergence testing.** Deferred to followup. The SSRF fail-closed property is verified by unit tests in `sidecar/src/ssrf.rs`.
+- **Fault injection testing.** The harness doesn't inject random mock failures. That's a followup for chaos testing.
 - **Performance benchmarking.** Not a performance harness. Parity only.
-- **Real upstream tests.** The harness is strictly hermetic. Real-API smoke testing is phase 5's job.
-- **DNS rebinding full simulation.** The hermetic DNS mock for the rebinding test is optional per FR-15 item 2. A smoke-only assertion is acceptable if full simulation proves too much scope.
-- **Retrofitting the harness to test any previous sidecar release.** The harness runs against whatever Go and Rust binaries are built from the current workspace. Historical regression testing is a separate concern.
+- **Real upstream smoke tests.** Covered by phase 5's manual checklist, not this harness.
+- **`cargo-deny` for the harness crate.** Inherits workspace `deny.toml`; no new deny config in this spec.
 
 ## Open questions
 
-1. **Is `paramiko` acceptable for the mock SSH server, or should it be a small Rust program using russh's server API?** Paramiko is simpler and proven; russh would dogfood our own dependency but adds implementation scope. Lean paramiko for phase 4; revisit in followup if the Python install becomes a friction point. Not blocking.
-2. **Should the harness use `testcontainers-rs` instead of direct `docker compose` orchestration?** `testcontainers` gives nicer Rust ergonomics. `docker compose` gives better debuggability (`docker compose logs`, `docker compose ps`). Lean compose for visibility; testcontainers can be a followup refactor if useful. Not blocking.
-3. **How to handle the mock-example HTTP service (referenced in FR-17 egress cases)?** Easiest: add a 6th mock service that's just `nginx:alpine` serving a static file. Or: use Python's `http.server`. Either works. Not blocking.
-4. **Should the harness measure wall-clock time for the CONNECT drain test, or trust docker event timestamps?** Wall-clock is simpler but racey. Docker events are precise but require API access. Lean wall-clock with a generous tolerance (assert Rust > 2s, Go < 1s). Not blocking.
+1. **Python version pinning.** The mock Dockerfiles use `python:3.12-slim`. If 3.12 reaches EOL before this harness is retired, the images need a bump. Tracked implicitly via Docker base image freshness; no blocker.
+2. **paramiko SSH server flush behavior.** Paramiko is a client-first library; its server-side channel flush after `ExitStatus` has been known to race on some versions. Phase 2 of the migration plan verifies this works; if it doesn't, the implementer falls back to `asyncssh` (also Python, more server-oriented). Not blocking the spec.
+3. **Mock introspection port exposure in CI.** The FR-18 note about host-mapping the introspection ports for developer workflows — in CI, the harness driver runs INSIDE the same Docker network as a separate container, so it has direct access to `100.64.0.X:9999`. For developer workflows on the host, the mapped ports are used. The compose file defines both, and the driver auto-detects. Not blocking.
+4. **CI runtime budget.** The 10-minute timeout in FR-25 is based on the NFR-2 target. If the first few CI runs exceed this, it's tuned. Not blocking.
 
 None are blocking. The spec is implementable as written.
+
+## Changelog
+
+### v1 → v2: Codex adversarial review (14 findings: 3 P0, 11 P1)
+
+- **P0-1 (extra_hosts + SSRF collision):** FIXED. v2 uses a custom Docker bridge in 100.64.0.0/24 (CGNAT) instead of the default RFC1918 bridge. Neither sidecar's SSRF logic blocks CGNAT (verified against `sidecar/src/ssrf.rs:94-99` and `images/sidecar/main.go:43-48`). Zero code changes to either sidecar required. Much cleaner than the test-only env var I initially considered.
+- **P0-2 (service count contradiction):** FIXED. v2 lists 7 concrete services (sidecar-go, sidecar-rust, mock-openai, mock-anthropic, mock-github-ssh, mock-example, mock-tcp-echo) with no "exactly N" claim. The DNS mock from v1's FR-15 is deferred to followup (see FR-23).
+- **P0-3 (SidecarOutput doesn't include mock logs):** FIXED. FR-13 defines mock introspection endpoints on port 9999 per mock. FR-18 steps 1 and 4 explicitly reset and capture mock logs per test case. FR-19 normalizes and diffs mock logs alongside sidecar outputs.
+- **P1-4 (reqwest can't do raw proxy semantics):** FIXED. FR-4 discussion + Architecture notes the driver uses `reqwest` for HTTPS (model_proxy) and raw `tokio::net::TcpStream` for egress cases. Each category has its own driver module.
+- **P1-5 (health/startup impossibility):** FIXED. FR-3 explicitly removes Docker healthchecks from the sidecars. FR-17 step 4 captures the 503 window BEFORE the readiness poll loop. The harness driver, not Docker, gates on sidecar readiness.
+- **P1-6 (mock log reset nondeterminism):** FIXED. FR-13 separates healthcheck traffic (`/_healthz` on main port) from test traffic (mock introspection on port 9999) into distinct ASGI apps, so healthcheck probes don't pollute the per-test log arrays.
+- **P1-7 (CONNECT drain lacks upstream):** FIXED. v2 adds `mock-tcp-echo` as a dedicated raw-TCP service at 100.64.0.14:443. The CONNECT drain test targets it explicitly. Ordering is enforced via `order_hint: "last"` in the corpus JSON schema (FR-21), not by filename ordering.
+- **P1-8 (image freshness undefined):** FIXED. FR-16 mandates `docker compose build` before every run unless `--no-rebuild` is passed.
+- **P1-9 (Go Dockerfile reference wrong):** FIXED. FR-4 defines a new `Dockerfile.go-sidecar` that resurrects the Go build from `images/sidecar/main.go` (still on main per phase 6). FR-5 layers the test CA on top of it. v1's reference to the current `images/sidecar/Dockerfile` (which is now the Rust build after PR #63) is no longer relied on.
+- **P1-10 (TLS fixture params under-specified):** FIXED. SR-7 pins RSA-2048 + SHA-256 + `basicConstraints=critical,CA:TRUE` for the CA and RSA-2048 + SAN matching the hostname for each mock service cert. Exact openssl commands committed.
+- **P1-11 (rebinding case mislabeled):** FIXED. FR-23 documents the scope reduction. The case is renamed from "rebinding" to explicit upstream-routing smoke, and true rebinding coverage is explicitly deferred to a followup.
+- **P1-12 (CI deferral removes enforcement):** FIXED. v2 adds FR-24 defining a new `.github/workflows/ci.yml` with 4 jobs including `parity-harness`. The harness runs on every PR touching sidecar code. Without CI enforcement, the harness was ceremony — v2 fixes this.
+- **P1-13 (SR-6 mitigation is fake without CI):** FIXED. FR-28 extends the existing lint script to check `NAUTILOOP_EXTRA_CA_BUNDLE` references, AND FR-24's `prod-leak-lint` CI job runs the script on every PR. The enforcement is real.
+- **P1-14 (corpus and mock API contracts misaligned):** FIXED. FR-22's corpus has been rewritten to match the actual sidecar routing exactly: `POST /v1/chat/completions` (with `stream:true` in body, not a separate `/stream-sse` path), `GET /v1/models` (not `GET /v1/messages` for anthropic). Every case's HTTP method + path now matches a mock endpoint defined in FR-7, FR-8, or FR-11.
