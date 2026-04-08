@@ -35,8 +35,8 @@ Issue [#66](https://github.com/tinkrtailor/nautiloop/issues/66) — Go sidecar `
 **The Go sidecar will NOT be fixed.** The earlier parallel branch that was developing a `streamBody` helper (`fix/sidecar-sse-flush`) is being abandoned. The **Rust sidecar is THE fix for #66** — it uses hyper 1.x `BoxBody` which streams frames immediately via the http1 codec, without the ResponseWriter buffer-then-flush-on-full behavior that bit Go.
 
 **Implications:**
-- The harness's SSE streaming cases are reframed as **documented divergences**, not parity tests (see FR-22 divergence category): Rust delivers SSE chunks incrementally, Go delivers them all at upstream-close time (or not at all). The harness measures wall-clock inter-chunk delays on the client side and asserts the divergence in the documented direction.
-- This adds a **5th entry** to the documented-divergence list (alongside SSRF DNS fail-closed, DNS rebinding, bare-exec rejection, CONNECT drain on SIGTERM).
+- The harness's SSE streaming cases are reframed as **documented divergences**, not parity tests (see FR-22 divergence category): Rust delivers SSE chunks incrementally before upstream close, Go delivers nothing until upstream close (or delivers all buffered bytes at once at close time).
+- The complete divergence set is **5 cases total**: `divergence_sse_streaming_openai`, `divergence_sse_streaming_anthropic`, `divergence_bare_exec_upload_pack_rejection`, `divergence_bare_exec_receive_pack_rejection`, `divergence_connect_drain_on_sigterm`. The earlier SSRF-DNS-fail-closed and DNS-rebinding cases are NOT in the divergence list — they've been moved out of harness scope (covered by unit tests and code review respectively, see FR-23).
 - **Phase 5 cutover urgency is elevated**: the current release (v0.2.10) is broken for opencode/SSE, and the only working path is to retire the Go sidecar. The parity harness does double duty: (a) proves Rust is behavior-identical where it should be, (b) proves Rust fixes Go's broken streaming in the documented-divergence direction. Once this spec lands, phase 5 is a P0 production fix — not a cleanup migration.
 
 ### Rust-side streaming — trust and verify
@@ -102,14 +102,14 @@ The alternative (manually verifying Rust streaming before writing the spec) was 
   └── Cargo.toml                        # crate: nautiloop-sidecar-parity-harness
   ```
 
-- FR-2: `docker-compose.yml` shall define a custom bridge network `parity-net` with `subnet: ${PARITY_NET_SUBNET:-100.64.0.0/24}` (see FR-29 for the override mechanism) and these 7 services:
-  1. **`sidecar-go`** — Go binary built from `Dockerfile.go-with-test-ca`. Container ports 9090-9093 published to host ports 19090-19093. Mounts `go-secrets/` at `/secrets/`. Env: `GIT_REPO_URL=git@github.com:test/repo.git`. `networks: parity-net: ipv4_address: 100.64.0.20`. `extra_hosts`: `api.openai.com:100.64.0.10`, `api.anthropic.com:100.64.0.11`, `github.com:100.64.0.12`, `mock-example:100.64.0.13`, `egress-target:100.64.0.14` (new dedicated hostname for egress CONNECT tests, points at mock-tcp-echo).
+- FR-2: `docker-compose.yml` shall define a custom bridge network `parity-net` with `subnet: ${PARITY_NET_SUBNET:-100.64.0.0/24}` (see FR-29 for the override mechanism) and these 7 services. **Every port the harness driver needs from the host is published explicitly** (healthcheck, manual smoke, introspection). The driver reaches mocks via `localhost:<published-port>`; the sidecars reach mocks internally via `parity-net` IPs.
+  1. **`sidecar-go`** — Go binary built from `Dockerfile.go-with-test-ca`. Container ports 9090-9093 published to host ports 19090-19093. Mounts `go-secrets/` at `/secrets/`. Env: `GIT_REPO_URL=git@github.com:test/repo.git`. `networks: parity-net: ipv4_address: 100.64.0.20`. `extra_hosts`: `api.openai.com:100.64.0.10`, `api.anthropic.com:100.64.0.11`, `github.com:100.64.0.12`, `mock-example:100.64.0.13`, `egress-target:100.64.0.14` (dedicated hostname for egress CONNECT tests, points at mock-tcp-echo).
   2. **`sidecar-rust`** — Rust binary from `images/sidecar/Dockerfile`. Container ports 9090-9093 published to host ports 29090-29093. Mounts `rust-secrets/` at `/secrets/` AND `fixtures/test-ca/ca.pem` read-only at `/test-ca/ca.pem`. Env: `GIT_REPO_URL=git@github.com:test/repo.git`, `NAUTILOOP_EXTRA_CA_BUNDLE=/test-ca/ca.pem`. Same `extra_hosts`. `ipv4_address: 100.64.0.21`.
-  3. **`mock-openai`** — HTTPS server on `100.64.0.10:443` (TLS cert SAN = api.openai.com), plain HTTP on `:80` (healthcheck + introspection mux). Introspection port `:9999` ALSO published to host port `49990`.
-  4. **`mock-anthropic`** — HTTPS server on `100.64.0.11:443` (TLS cert SAN = api.anthropic.com), plain HTTP on `:80`. Introspection port `:9999` ALSO published to host port `49991`.
-  5. **`mock-github-ssh`** — paramiko SSH server on `100.64.0.12:22`. Health TCP listener on `:2200`. Introspection port `:9999` ALSO published to host port `49992`.
-  6. **`mock-example`** — plain HTTP server on `100.64.0.13:80` AND `100.64.0.13:8080` (same handlers on both, used for the `with_port` egress case). Introspection port `:9999` ALSO published to host port `49993`.
-  7. **`mock-tcp-echo`** — raw TCP echo server on `100.64.0.14:443`. Dual use: the egress CONNECT tests target it via the `egress-target` hostname, and the CONNECT drain SIGTERM test uses it. No introspection (echo has nothing interesting to log beyond byte counts, captured by the harness driver). No `/_healthz` endpoint — health gating uses a TCP connect probe to `:443` (its service port).
+  3. **`mock-openai`** — HTTPS server on `100.64.0.10:443` (TLS cert SAN = api.openai.com), plain HTTP on `:80` (healthcheck + introspection mux). Published host ports: `:80 → 50010` (driver health polling), `:443 → 50011` (manual smoke `curl`), `:9999 → 49990` (introspection).
+  4. **`mock-anthropic`** — HTTPS server on `100.64.0.11:443` (TLS cert SAN = api.anthropic.com), plain HTTP on `:80`. Published: `:80 → 50020`, `:443 → 50021`, `:9999 → 49991`.
+  5. **`mock-github-ssh`** — paramiko SSH server on `100.64.0.12:22`. Health TCP listener on `:2200`. Published: `:2200 → 50030` (driver health polling via TCP connect), `:9999 → 49992` (introspection). **`:22` is NOT published** — the sidecars reach it via `parity-net`, the driver never needs to connect directly.
+  6. **`mock-example`** — plain HTTP server on `100.64.0.13:80` AND `100.64.0.13:8080` (same handlers on both, used for the `with_port` egress case). Published: `:80 → 50040` (driver health polling), `:8080 → 50041` (reserved for potential host-side manual tests; not required for core operation), `:9999 → 49993` (introspection).
+  7. **`mock-tcp-echo`** — raw TCP echo server on `100.64.0.14:443`. Dual use: the egress CONNECT tests target it via the `egress-target` hostname from within the sidecars, and the CONNECT drain SIGTERM test uses it. Published: `:443 → 50050` (driver health polling via TCP connect only; no application-level use from host). No introspection (echo has nothing to log beyond byte counts, which the driver captures through its sidecar-client connection).
 
 - FR-3: Both sidecars shall depend on all mock services being healthy before starting, via Compose `depends_on` with `condition: service_healthy`. The sidecars themselves do NOT get Docker-level healthchecks. The harness driver polls `/healthz` via `reqwest` to gate on sidecar readiness AFTER compose reports mock services healthy.
 
@@ -177,7 +177,7 @@ The alternative (manually verifying Rust streaming before writing the spec) was 
       starlette==0.38.6 \
       paramiko==3.4.0
   ```
-  The implementer MUST manually verify SSE flush behavior by running `curl -N --cacert fixtures/test-ca/ca.pem https://localhost:<port>/v1/chat/completions -H 'Content-Type: application/json' -d '{"stream":true}'` against each streaming mock before writing any harness cases and confirming inter-chunk delays are observable (~100ms as configured).
+  The implementer MUST manually verify SSE flush behavior by running `curl -N --cacert fixtures/test-ca/ca.pem https://localhost:50011/v1/chat/completions -H 'Content-Type: application/json' -d '{"stream":true,"model":"gpt-4","messages":[{"role":"user","content":"ping"}]}'` (and the equivalent `https://localhost:50021/v1/messages` for anthropic) before writing any harness cases and confirming inter-chunk delays are observable (~100ms as configured).
 
 - FR-11: **`mock-example`** (plain HTTP, dual port):
   - Listens on BOTH `:80` AND `:8080` inside the container. Same routes on both ports.
@@ -218,10 +218,12 @@ The alternative (manually verifying Rust streaming before writing the spec) was 
 - FR-17: The driver shall:
   1. Run `docker compose build` (unless `--no-rebuild`)
   2. Run `docker compose up -d`
-  3. Wait for mock services to be healthy. The healthcheck mechanism is per-mock (declared in docker-compose.yml and verified by the driver polling in the same way):
-     - `mock-openai`, `mock-anthropic`, `mock-example`: HTTP GET `http://localhost:<published-port-80>/_healthz` → expect 200
-     - `mock-github-ssh`: TCP connect to `localhost:<published-port-2200>` → expect successful connect
-     - `mock-tcp-echo`: TCP connect to `localhost:<published-port-443>` → expect successful connect
+  3. Wait for mock services to be healthy via these concrete polls (host-port addresses from FR-2):
+     - `mock-openai`: HTTP GET `http://localhost:50010/_healthz` → expect 200
+     - `mock-anthropic`: HTTP GET `http://localhost:50020/_healthz` → expect 200
+     - `mock-example`: HTTP GET `http://localhost:50040/_healthz` → expect 200
+     - `mock-github-ssh`: TCP connect to `localhost:50030` → expect successful connect
+     - `mock-tcp-echo`: TCP connect to `localhost:50050` → expect successful connect
 
      Fail with a clear error naming the specific mock if any service isn't healthy within 60s.
   4. Wait for sidecar readiness by polling `http://localhost:19093/healthz` and `http://localhost:29093/healthz` with 200ms exponential backoff up to 30s. Expect both to return 200 `{"status":"ok"}`. **There is no 503 startup-window observation in the parity suite.** See "Test cases removed" at the bottom of FR-22.
@@ -306,10 +308,19 @@ The alternative (manually verifying Rust streaming before writing the spec) was 
   - `healthz_post_ready_returns_200` — GET `/healthz` after readiness barrier. Expect 200 `{"status":"ok"}`.
   - `healthz_head_method_parity` — HEAD `/healthz` after readiness. Expect 200 (matches Go's mux which does not method-check).
 
-  **Documented divergences (5 cases, must FAIL if Go and Rust match):**
-  - `divergence_sse_streaming_incremental_chunks` **(NEW — covers #66)** — POST `/openai/v1/chat/completions` body `{"model":"gpt-4","stream":true,"messages":[...]}`. Measure wall-clock timestamps of each SSE chunk's arrival on the client side. **Rust expected: 3 chunks arriving ~100ms apart (matching the mock's configured 100ms spacing, ±50ms tolerance).** **Go expected: 0 chunks received OR all 3 chunks arriving simultaneously at upstream-close time (inter-chunk delays <10ms because they were buffered in the ResponseWriter).** Harness asserts the divergence in the documented direction: Rust streams, Go buffers. The mock-openai's 300ms total stream duration provides a generous bound; if Go hasn't delivered anything by t=500ms, the test passes (Go is confirmed buffered); if Rust delivers chunks with >200ms spacing, that's also a PASS (Rust is streaming).
+  **Documented divergences (5 distinct cases, each with its own corpus file per FR-21 one-file-per-case schema, must FAIL if Go and Rust match):**
+  - `divergence_sse_streaming_openai` **(NEW — covers #66, OpenAI path)** — POST `/openai/v1/chat/completions` with body `{"model":"gpt-4","stream":true,"messages":[{"role":"user","content":"ping"}]}`. Mock-openai streams 3 SSE events spaced 100ms apart (total stream duration ~300ms).
 
-    Also runs the same test shape against `/anthropic/v1/messages`. Two test cases — one per provider — but both assert the same divergence property.
+    **Primary assertion: wall-clock time from request send to FIRST chunk received on the client side.**
+    - **Rust expected: first chunk arrives within 200ms of request send** (the mock emits the first chunk almost immediately after receiving the request, so if Rust streams, the first chunk should reach the client in one round-trip time — ~10-50ms — plus any trivial processing overhead).
+    - **Go expected: first chunk arrives ≥250ms after request send** (because Go's `http.ResponseWriter` buffers until either the ~4 KiB buffer fills OR the upstream closes; with 3 small SSE events, the buffer never fills, so Go doesn't emit anything until upstream close at ~300ms — minus a small margin for scheduling the "upstream closed → flush response" path).
+
+    The 50ms gap between the Rust bound (<200ms) and the Go bound (≥250ms) is the decision boundary. On a quiet machine this is comfortably wide; on a noisy CI runner we may see wider variance. If CI flakes, widen the gap by slowing the mock spacing (e.g. 200ms per chunk, Rust bound <300ms, Go bound ≥450ms) rather than blurring the assertion.
+
+    The inter-chunk spacing (whether Rust's chunks 1-2-3 arrive with ~100ms between them) is a **secondary confirmation check** — nice to have but not the normative assertion. The normative check is time-to-first-chunk.
+
+    **Not a valid pass:** Rust's chunks arriving with ≥200ms inter-chunk spacing means Rust is streaming but slowly; that's still a PASS for "Rust streams." Rust's first chunk arriving ≥200ms after request send means Rust is buffered and has the same bug as Go; that's a FAIL and triggers a NEW P0 issue against Rust.
+  - `divergence_sse_streaming_anthropic` **(NEW — covers #66, Anthropic path)** — same test shape as the OpenAI case, but POST `/anthropic/v1/messages` with `stream:true` against mock-anthropic. Separate corpus file, same assertion thresholds. Testing both providers independently because Rust's model_proxy has a separate routing branch per provider (`UpstreamKind::OpenAi` vs `UpstreamKind::Anthropic`) and either path could regress independently.
   - `divergence_bare_exec_upload_pack_rejection` — exec `git-upload-pack` (no path argument). Rust exits with 1 (sidecar reject), Go exits with 128 (mock reject, because Go's SSH proxy forwards). Mock-github-ssh logs: 1 exec observed from Go (source_ip 100.64.0.20), 0 from Rust (source_ip 100.64.0.21).
   - `divergence_bare_exec_receive_pack_rejection` — same for `git-receive-pack`.
   - `divergence_connect_drain_on_sigterm` — establish CONNECT tunnel through egress port to `egress-target:443` (mock-tcp-echo). Begin trickling bytes at 1 byte per 100ms. After 500ms steady traffic, `docker kill --signal SIGTERM` each sidecar container. Measure time from SIGTERM to tunnel bytes stopping. Assert Go stops within 200ms, Rust continues for 2-5 seconds (up to 5s drain deadline). **`order_hint: "last"`** — this test kills the containers and must run last. After this test, the stack is dead; the driver either tears down (if `--stop`) or reports the stack needs manual restart.
@@ -343,18 +354,31 @@ The alternative (manually verifying Rust streaming before writing the spec) was 
 
 #### Security lint extension
 
-- FR-28: The existing `sidecar/scripts/lint-no-test-utils-in-prod.sh` from PR #73 shall be extended to ALSO check for `NAUTILOOP_EXTRA_CA_BUNDLE` references anywhere in the repo EXCEPT the single allowed file `.github/workflows/parity.yml`. The allowed-file exclusion is implemented as an explicit hardcoded `grep -v` filter in the script, not as YAML parsing:
+- FR-28: The existing `sidecar/scripts/lint-no-test-utils-in-prod.sh` from PR #73 shall be extended to ALSO check for `NAUTILOOP_EXTRA_CA_BUNDLE` references anywhere in the repo EXCEPT the two specific files allowed by SR-5. The allowed-file list is hardcoded in the script, not a directory glob — a broad directory exclusion would let future references leak in under other parity-tree files:
   ```bash
-  if git grep -l NAUTILOOP_EXTRA_CA_BUNDLE -- ':!sidecar/tests/parity/' ':!.github/workflows/parity.yml' | grep -q .; then
-    echo "ERROR: NAUTILOOP_EXTRA_CA_BUNDLE referenced outside the allowlist"
+  MATCHES=$(git grep -l NAUTILOOP_EXTRA_CA_BUNDLE \
+    -- ':!sidecar/tests/parity/docker-compose.yml' \
+       ':!.github/workflows/parity.yml')
+  if [ -n "$MATCHES" ]; then
+    echo "ERROR: NAUTILOOP_EXTRA_CA_BUNDLE referenced outside the allowlist:"
+    echo "$MATCHES"
+    echo "The only files allowed to reference this env var are:"
+    echo "  - sidecar/tests/parity/docker-compose.yml"
+    echo "  - .github/workflows/parity.yml"
     exit 1
   fi
   ```
-  Robust to formatting changes because the allowlist is file-level, not job-level.
+  Narrow file-level exclusion; robust to formatting changes because the allowlist is two exact file paths. Match to SR-5 exactly — any drift between SR-5 and this script's allowlist is a spec/implementation bug.
 
 #### Network subnet override
 
-- FR-29: The `parity-net` subnet is configurable via the `PARITY_NET_SUBNET` environment variable. Default: `100.64.0.0/24`. The docker-compose.yml uses `${PARITY_NET_SUBNET:-100.64.0.0/24}`. The harness driver has a `--subnet <cidr>` flag that sets the env var before calling `docker compose`. Override use cases: (a) developer is on an ISP that routes 100.64.0.0/10 for CGNAT and docker can't claim it, (b) another docker bridge on the host already claimed 100.64.0.0/24. If the user picks a subnet that overlaps with either sidecar's SSRF blocklist (RFC1918, link-local, loopback, ULA), the harness driver detects this at startup and fails with a clear error pointing back to the CGNAT rationale in the Problem Statement.
+- FR-29: The `parity-net` subnet is configurable via the `PARITY_NET_SUBNET` environment variable. Default: `100.64.0.0/24`. The docker-compose.yml uses `${PARITY_NET_SUBNET:-100.64.0.0/24}`. The harness driver has a `--subnet <cidr>` flag that sets the env var before calling `docker compose`. Override use cases: (a) developer is on an ISP that routes 100.64.0.0/10 for CGNAT and docker can't claim it, (b) another docker bridge on the host already claimed 100.64.0.0/24.
+
+  **Subnet validation reuses the sidecar's own SSRF classifier, NOT a duplicated prose list.** The harness crate depends on `nautiloop-sidecar` as a workspace path dependency (see Crate structure below) and calls `nautiloop_sidecar::ssrf::is_private_ip(addr)` on a sample address from the proposed subnet. If `is_private_ip` returns `true`, the harness rejects the subnet with a clear error and refuses to start. This guarantees the harness's accepted/rejected set matches the Rust sidecar's runtime behavior exactly — a future change to `sidecar/src/ssrf.rs` automatically propagates to the harness validator without any spec update.
+
+  **Drift between Rust and Go classifiers is a secondary concern acknowledged here:** the Go sidecar's `isPrivateIP` list at `images/sidecar/main.go:42-75` is currently a strict subset of the Rust classifier (Rust adds `0.0.0.0/8`, broadcast, and IPv4-mapped handling; Go does not). A subnet that Rust rejects but Go accepts would pass the harness validator (Rust-based) but the Go sidecar would still allow it — which is fine for the harness (the harness wants Rust to be strict, and Go's looser behavior is an existing divergence not triggered by any corpus case). The inverse — a subnet Go rejects but Rust accepts — is impossible given the current Rust-is-strict-superset relationship. If Go ever adds blocks Rust doesn't have, file a followup issue; until then, Rust-classifier-based validation is sufficient.
+
+  **Requires exposing `is_private_ip` from the sidecar crate.** `sidecar/src/lib.rs` must `pub use ssrf::is_private_ip` (or equivalent) so the harness crate can import it. This is a library-surface addition to `nautiloop-sidecar` but NOT a behavior change — it's only re-exporting an existing pub function from `ssrf.rs`. No new runtime code, no new dependencies, no new attack surface. The harness crate must be added to `nautiloop-sidecar`'s public API consumers list for clippy and reverse-dependency tracking; mention this in the harness crate's `Cargo.toml` with a comment explaining why the path dep exists.
 
 ### Non-Functional Requirements
 
@@ -454,6 +478,14 @@ name = "nautiloop-sidecar-parity-harness"
 path = "src/main.rs"
 
 [dependencies]
+# Path dep on the sidecar crate for FR-29 subnet validation —
+# the harness reuses nautiloop_sidecar::ssrf::is_private_ip so that
+# any change to the sidecar's SSRF blocklist automatically propagates
+# to the harness validator (no drift between prose and code).
+# Build cost: the sidecar crate is already part of the workspace and
+# already built by the rust-checks CI job, so this adds no new compile.
+nautiloop-sidecar = { path = "../../" }
+
 tokio = { version = "1.40", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
@@ -469,7 +501,9 @@ rustls-pemfile = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 ```
 
-The harness uses `reqwest` with a `rustls::ClientConfig` that loads the test CA from `fixtures/test-ca/ca.pem` (same pattern as the sidecar). Egress raw-TCP cases use `tokio::net::TcpStream` directly. `russh` client drives git_ssh cases.
+The harness uses `reqwest` with a `rustls::ClientConfig` that loads the test CA from `fixtures/test-ca/ca.pem` (same pattern as the sidecar). Egress raw-TCP cases use `tokio::net::TcpStream` directly. `russh` client drives git_ssh cases. FR-29 subnet validation calls `nautiloop_sidecar::ssrf::is_private_ip` directly.
+
+**Required exposure in `sidecar/src/lib.rs`:** add `pub use ssrf::is_private_ip;` (or equivalent) so the harness can import the classifier. This is a library-API addition, no behavior change.
 
 ### Driver program structure
 
@@ -674,3 +708,19 @@ All 14 addressed. See v2 changelog section (no longer duplicated here for brevit
 - **P2-10 (NAUTILOOP_EXTRA_CA_BUNDLE whitelist hand-wavy):** FIXED. FR-28 uses a hardcoded file-level `git grep` exclusion for `.github/workflows/parity.yml`. Robust to formatting changes because the allowlist is file-level, not job-level.
 - **P2-11 (CGNAT collision mitigation not a real FR):** FIXED. New FR-29 defines the `PARITY_NET_SUBNET` env var + `--subnet` CLI flag + a validation guard that rejects SSRF-blocked subnets.
 - **P2-12 (Python pinning incomplete):** FIXED. FR-10 now pins all four Python dependencies exactly: `hypercorn==0.17.3 uvicorn==0.30.6 starlette==0.38.6 paramiko==3.4.0`.
+
+### v3 → v4: Codex v3 review (5 findings: 1 P0 V1, 2 P1, 2 P2)
+
+Convergence pattern: 14 → 12 → 5.
+
+- **P0-1 (mock host ports unspecified):** FIXED. FR-2 now enumerates EVERY host port the driver or manual smoke needs: `mock-openai :80→50010, :443→50011, :9999→49990`; `mock-anthropic :80→50020, :443→50021, :9999→49991`; `mock-github-ssh :2200→50030, :9999→49992` (no `:22` publishing — sidecars reach it via parity-net); `mock-example :80→50040, :8080→50041, :9999→49993`; `mock-tcp-echo :443→50050`. FR-17 step 3 was updated to cite concrete `localhost:500XX` addresses. FR-10 manual smoke example was updated to use `localhost:50011` and `localhost:50021`.
+
+- **P1-2 (SSE divergence assertion weak / contradictory):** FIXED. The SSE divergence cases now assert **time-to-first-chunk** as the normative discriminator, not inter-chunk spacing. Rust expected: first chunk within 200ms of request send. Go expected: first chunk ≥250ms after request send (because Go buffers until upstream close at ~300ms). The 50ms gap is the decision boundary. Contradictory "100ms ±50ms" and ">200ms also passes" language removed. Inter-chunk spacing is documented as a secondary confirmation check, not the normative assertion.
+
+- **P1-3 (divergence count/naming inconsistent):** FIXED.
+  - Dependencies section's "Implications" bullet now lists the 5 actual divergence case names: `divergence_sse_streaming_openai`, `divergence_sse_streaming_anthropic`, `divergence_bare_exec_upload_pack_rejection`, `divergence_bare_exec_receive_pack_rejection`, `divergence_connect_drain_on_sigterm`. Explicitly notes that SSRF DNS fail-closed and DNS rebinding are NOT in the divergence list (moved out of scope per FR-23).
+  - FR-22's SSE divergence entry is now split into TWO distinct cases with distinct names (`divergence_sse_streaming_openai` and `divergence_sse_streaming_anthropic`), matching FR-21's one-file-per-case schema. Both providers are tested independently because Rust's `UpstreamKind::OpenAi` and `UpstreamKind::Anthropic` routing branches could regress independently.
+
+- **P2-4 (lint allowlist too broad):** FIXED. FR-28 now uses file-level hardcoded exclusion for exactly two files: `sidecar/tests/parity/docker-compose.yml` and `.github/workflows/parity.yml`. Matches SR-5 exactly.
+
+- **P2-5 (FR-29 subnet validator drift risk):** FIXED. FR-29 now specifies that the harness reuses the sidecar's own SSRF classifier via `nautiloop_sidecar::ssrf::is_private_ip`, imported through a workspace path dependency. No prose duplication; any change to `sidecar/src/ssrf.rs` automatically propagates to the harness validator. Requires a one-line `pub use` addition to `sidecar/src/lib.rs` (noted in the Crate structure section).
