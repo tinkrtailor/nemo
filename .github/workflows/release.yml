@@ -97,7 +97,12 @@ jobs:
             context: .
           - name: sidecar
             dockerfile: images/sidecar/Dockerfile
-            context: images/sidecar
+            # The Rust sidecar Dockerfile needs workspace root as context
+            # (it COPYs sidecar/, cli/, control-plane/, Cargo.toml, Cargo.lock).
+            # This replaces the Go sidecar that only needed images/sidecar/
+            # as context. Do NOT revert this to images/sidecar without also
+            # reverting the Rust Dockerfile to be self-contained.
+            context: .
         platform:
           - runner: ubuntu-latest
             docker: linux/amd64
