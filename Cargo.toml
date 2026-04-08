@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["control-plane", "cli", "sidecar"]
+members = ["control-plane", "cli", "sidecar", "sidecar/tests/parity"]
 
 [workspace.package]
 version = "0.2.10"
