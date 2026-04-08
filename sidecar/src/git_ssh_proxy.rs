@@ -24,9 +24,11 @@
 //!    agent rather than hanging indefinitely (10s connect timeout per
 //!    FR-28).
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use russh::ChannelId;
@@ -37,6 +39,7 @@ use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, MethodKind, MethodSet};
 use thiserror::Error;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::git_url::GitRemote;
@@ -44,11 +47,61 @@ use crate::logging;
 use crate::shutdown::ConnectionTracker;
 use crate::ssrf;
 
+/// Messages pushed from the russh server `Handler::data` / `channel_eof`
+/// callbacks into the spawned upstream proxy task. The proxy task pumps
+/// these messages to the upstream SSH channel's writer. Using an mpsc
+/// channel lets the handler stay synchronous while the upstream flow is
+/// driven by its own async task.
+#[derive(Debug)]
+enum AgentToUpstream {
+    /// Raw bytes from the agent channel that must be written to the
+    /// upstream channel's stdin.
+    Data(Vec<u8>),
+    /// The agent sent EOF. The upstream channel's stdin should be
+    /// closed; any already-buffered data must flush first.
+    Eof,
+}
+
+/// Shared per-connection state that maps `ChannelId` to a sender the
+/// russh `Handler::data` callback can use to pump bytes into the
+/// upstream proxy task. The map is held behind a sync `Mutex` because
+/// every access is a fast insert / lookup / remove — no `.await` is
+/// held while the lock is taken.
+type UpstreamPumpMap = Arc<Mutex<HashMap<ChannelId, mpsc::UnboundedSender<AgentToUpstream>>>>;
+
 /// Path to the agent-facing SSH private key used to authenticate to the
 /// upstream git server. Fixed mount per spec.
 pub const SSH_KEY_PATH: &str = "/secrets/ssh-key/id_ed25519";
 /// Path to the known_hosts file. Mandatory, no bypass.
 pub const KNOWN_HOSTS_PATH: &str = "/secrets/ssh-known-hosts/known_hosts";
+
+/// Paths the upstream proxy reads for auth. Production uses the
+/// [`SSH_KEY_PATH`] / [`KNOWN_HOSTS_PATH`] defaults; tests pass
+/// temporary files so an end-to-end piping test can be wired up
+/// without touching `/secrets`.
+#[derive(Debug, Clone)]
+pub struct SshAuthPaths {
+    pub key_path: String,
+    pub known_hosts_path: String,
+    /// Test-only escape hatch: if set, the upstream proxy dials this
+    /// `SocketAddr` directly instead of running
+    /// [`ssrf::resolve_safe`]. Production **must** leave this `None`
+    /// so FR-18 SSRF protection remains intact. Only the
+    /// `git_ssh_proxy` module's `#[cfg(test)]` code and the
+    /// integration tests in this file construct a value with this
+    /// field populated.
+    pub test_override_addr: Option<std::net::SocketAddr>,
+}
+
+impl Default for SshAuthPaths {
+    fn default() -> Self {
+        Self {
+            key_path: SSH_KEY_PATH.to_string(),
+            known_hosts_path: KNOWN_HOSTS_PATH.to_string(),
+            test_override_addr: None,
+        }
+    }
+}
 /// FR-28 upstream SSH dial timeout.
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -146,9 +199,29 @@ pub fn repo_path_matches(allowed: &str, requested: &str) -> bool {
 /// Serve the git SSH proxy until `shutdown_rx` receives `true`.
 pub async fn serve(
     listener: TcpListener,
+    shutdown_rx: watch::Receiver<bool>,
+    drain_tracker: ConnectionTracker,
+    remote: GitRemote,
+) -> Result<(), GitSshError> {
+    serve_with_auth(
+        listener,
+        shutdown_rx,
+        drain_tracker,
+        remote,
+        SshAuthPaths::default(),
+    )
+    .await
+}
+
+/// Variant of [`serve`] that accepts an [`SshAuthPaths`] override so
+/// integration tests can point the upstream-proxy at a tempfile key
+/// and known_hosts file.
+pub async fn serve_with_auth(
+    listener: TcpListener,
     mut shutdown_rx: watch::Receiver<bool>,
     drain_tracker: ConnectionTracker,
     remote: GitRemote,
+    auth_paths: SshAuthPaths,
 ) -> Result<(), GitSshError> {
     // Generate an ephemeral Ed25519 host key via rand 0.10's thread rng
     // (OS-backed CSPRNG). Never persisted.
@@ -172,6 +245,7 @@ pub async fn serve(
     let mut server = GitSshServer {
         remote: Arc::new(remote),
         drain_tracker,
+        auth_paths: Arc::new(auth_paths),
     };
     let running = server.run_on_socket(config, &listener);
     let handle = running.handle();
@@ -200,6 +274,7 @@ pub async fn serve(
 struct GitSshServer {
     remote: Arc<GitRemote>,
     drain_tracker: ConnectionTracker,
+    auth_paths: Arc<SshAuthPaths>,
 }
 
 impl server::Server for GitSshServer {
@@ -209,6 +284,8 @@ impl server::Server for GitSshServer {
         GitSshHandler {
             remote: Arc::clone(&self.remote),
             drain_tracker: self.drain_tracker.clone(),
+            upstream_pumps: Arc::new(Mutex::new(HashMap::new())),
+            auth_paths: Arc::clone(&self.auth_paths),
         }
     }
 }
@@ -216,6 +293,11 @@ impl server::Server for GitSshServer {
 struct GitSshHandler {
     remote: Arc<GitRemote>,
     drain_tracker: ConnectionTracker,
+    /// Per-channel senders that pump agent-side bytes into the upstream
+    /// proxy task. Populated in `exec_request` and cleared in
+    /// `channel_close` / on upstream completion.
+    upstream_pumps: UpstreamPumpMap,
+    auth_paths: Arc<SshAuthPaths>,
 }
 
 impl server::Handler for GitSshHandler {
@@ -352,6 +434,69 @@ impl server::Handler for GitSshHandler {
         Ok(())
     }
 
+    // FR-13: forward agent-side channel data into the upstream SSH
+    // session. Without this override russh's default `data` is a no-op
+    // and the upstream never receives the pack-protocol bytes the git
+    // client is streaming (git-receive-pack push phase, smart-HTTP
+    // refs advertisement reply, etc.). Bugfix for Codex finding #2.
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let sender = {
+            let guard = match self.upstream_pumps.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.get(&channel).cloned()
+        };
+        if let Some(tx) = sender {
+            // Ignore send errors — the upstream task has already
+            // exited and closed the receiver, so the channel is
+            // about to be torn down anyway. The git client will see
+            // the exit status.
+            let _ = tx.send(AgentToUpstream::Data(data.to_vec()));
+        }
+        Ok(())
+    }
+
+    // Forward EOF. Git clients send EOF after the final pack delimiter
+    // on push; without this the upstream blocks waiting for more data.
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let sender = {
+            let guard = match self.upstream_pumps.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.get(&channel).cloned()
+        };
+        if let Some(tx) = sender {
+            let _ = tx.send(AgentToUpstream::Eof);
+        }
+        Ok(())
+    }
+
+    // Drop the pump entry when the agent-side channel closes. This is
+    // best-effort cleanup — the upstream proxy task also removes the
+    // entry itself when it finishes so the map is already empty in
+    // the happy path.
+    async fn channel_close(
+        &mut self,
+        channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if let Ok(mut guard) = self.upstream_pumps.lock() {
+            guard.remove(&channel);
+        }
+        Ok(())
+    }
+
     // FR-11 + FR-13: validate the exec command and spawn the upstream
     // proxy task. Malformed payloads → channel_failure. Non-allowlisted
     // commands or repo path mismatches → exit status 1.
@@ -408,16 +553,42 @@ impl server::Handler for GitSshHandler {
             parsed.command, self.remote.host, self.remote.port
         ));
 
+        // Create the agent→upstream pump channel. The Handler::data /
+        // channel_eof callbacks will push bytes/EOF into the sender;
+        // the upstream proxy task below drains the receiver.
+        let (pump_tx, pump_rx) = mpsc::unbounded_channel::<AgentToUpstream>();
+        {
+            let mut guard = match self.upstream_pumps.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.insert(channel, pump_tx);
+        }
+
         // Spawn the upstream proxy. The ChannelId lives in the session's
         // channel map; we use the session handle to send data back.
         let handle = session.handle();
         let remote = Arc::clone(&self.remote);
         let drain = self.drain_tracker.clone();
+        let pumps = Arc::clone(&self.upstream_pumps);
+        let auth_paths = Arc::clone(&self.auth_paths);
         tokio::spawn(async move {
             let _guard = drain.track();
-            if let Err(e) =
-                proxy_upstream(handle.clone(), channel, remote.as_ref().clone(), parsed).await
-            {
+            let result = proxy_upstream(
+                handle.clone(),
+                channel,
+                remote.as_ref().clone(),
+                parsed,
+                pump_rx,
+                auth_paths.as_ref().clone(),
+            )
+            .await;
+            // Remove the pump entry regardless of outcome so the
+            // handler stops forwarding bytes into a dead channel.
+            if let Ok(mut guard) = pumps.lock() {
+                guard.remove(&channel);
+            }
+            if let Err(e) = result {
                 logging::error(&format!("upstream git proxy error: {e}"));
                 let _ = handle.exit_status_request(channel, 1).await;
                 let _ = handle.close(channel).await;
@@ -453,17 +624,25 @@ pub enum UpstreamError {
 }
 
 /// Drive an upstream SSH session proxied to/from the agent's channel.
+///
+/// `pump_rx` carries the agent→upstream byte stream pushed by the
+/// russh `Handler::data` / `channel_eof` callbacks (see Codex finding
+/// #2). We pump those bytes into the upstream channel writer on one
+/// concurrent branch while the other branch drains upstream messages
+/// and forwards them back to the agent via the server `Handle`.
 async fn proxy_upstream(
     handle: server::Handle,
     channel_id: ChannelId,
     remote: GitRemote,
     parsed: ExecParsed,
+    mut pump_rx: mpsc::UnboundedReceiver<AgentToUpstream>,
+    auth_paths: SshAuthPaths,
 ) -> Result<(), UpstreamError> {
     // Read and parse the private key.
-    let key_bytes = tokio::fs::read_to_string(SSH_KEY_PATH)
+    let key_bytes = tokio::fs::read_to_string(&auth_paths.key_path)
         .await
         .map_err(|source| UpstreamError::KeyRead {
-            path: SSH_KEY_PATH.to_string(),
+            path: auth_paths.key_path.clone(),
             source,
         })?;
     let private_key =
@@ -471,16 +650,21 @@ async fn proxy_upstream(
 
     // Load the known_hosts file. FR-15: missing or empty file is a hard
     // refusal.
-    let known_hosts_path = PathBuf::from(KNOWN_HOSTS_PATH);
+    let known_hosts_path = PathBuf::from(&auth_paths.known_hosts_path);
     verify_known_hosts_file_nonempty(&known_hosts_path).map_err(|reason| {
         UpstreamError::KnownHosts {
-            path: KNOWN_HOSTS_PATH.to_string(),
+            path: auth_paths.known_hosts_path.clone(),
             reason,
         }
     })?;
 
-    // SSRF-safe upstream resolution.
-    let socket_addr = ssrf::resolve_safe(&remote.host, remote.port).await?;
+    // SSRF-safe upstream resolution. The `test_override_addr` escape
+    // hatch bypasses resolve_safe so integration tests can point at a
+    // loopback mock upstream; production config leaves this None.
+    let socket_addr = match auth_paths.test_override_addr {
+        Some(addr) => addr,
+        None => ssrf::resolve_safe(&remote.host, remote.port).await?,
+    };
 
     // FR-28 10s connect timeout. We dial plain TCP first, then pass
     // the stream to russh::client::connect_stream so we retain control
@@ -518,59 +702,103 @@ async fn proxy_upstream(
     }
 
     // Open session + exec the git command.
-    let upstream_channel = upstream.channel_open_session().await?;
+    let mut upstream_channel = upstream.channel_open_session().await?;
     let full_command = format!("{} '{}'", parsed.command, remote.repo_path);
     upstream_channel.exec(true, full_command.as_bytes()).await?;
 
-    // Pipe bytes bidirectionally. Read from the upstream channel and
-    // forward to the agent's channel via the server handle; read from
-    // the agent's channel (which arrives via our Handler's `data`
-    // callback) — for simplicity, we use the upstream channel's
-    // `into_stream()` AsyncRead/AsyncWrite and manually forward.
+    // Pipe bytes bidirectionally. Two concurrent branches on each
+    // `tokio::select!` iteration:
     //
-    // Rather than wire agent→upstream through the data() callback (which
-    // would require mutable access to an async-spawned task), we use
-    // the upstream channel's blocking loop: read incoming data, forward
-    // it to the server handle, and watch for exit-status.
-
-    let mut upstream_channel = upstream_channel;
+    //   * upstream → agent: `upstream_channel.wait()` returns the
+    //     next `ChannelMsg` from upstream. Data/ExtendedData frames
+    //     are forwarded to the agent via the server `Handle`;
+    //     ExitStatus/Close trigger a clean return.
+    //
+    //   * agent → upstream: `pump_rx.recv()` returns the next
+    //     `AgentToUpstream` pushed by our `Handler::data` callback.
+    //     Data frames are written to the upstream channel's writer;
+    //     Eof closes the write half. If the receiver is closed we
+    //     simply drop that branch and keep draining upstream.
+    //
+    // This is the fix for Codex finding #2 — previously this loop
+    // only polled upstream output and never forwarded agent bytes,
+    // so git-receive-pack pushes hung indefinitely.
+    let mut agent_eof_sent = false;
+    let mut agent_closed = false;
     loop {
-        let msg = match upstream_channel.wait().await {
-            Some(m) => m,
-            None => break,
-        };
-        match msg {
-            russh::ChannelMsg::Data { data } => {
-                handle.data(channel_id, data).await.map_err(|_| {
-                    UpstreamError::Russh(russh::Error::from(std::io::Error::other(
-                        "failed to forward upstream data to agent",
-                    )))
-                })?;
+        tokio::select! {
+            biased;
+            maybe_msg = upstream_channel.wait() => {
+                let Some(msg) = maybe_msg else { break };
+                match msg {
+                    russh::ChannelMsg::Data { data } => {
+                        handle.data(channel_id, data).await.map_err(|_| {
+                            UpstreamError::Russh(russh::Error::from(std::io::Error::other(
+                                "failed to forward upstream data to agent",
+                            )))
+                        })?;
+                    }
+                    russh::ChannelMsg::ExtendedData { data, ext } => {
+                        handle
+                            .extended_data(channel_id, ext, data)
+                            .await
+                            .map_err(|_| {
+                                UpstreamError::Russh(russh::Error::from(std::io::Error::other(
+                                    "failed to forward upstream extended data to agent",
+                                )))
+                            })?;
+                    }
+                    russh::ChannelMsg::ExitStatus { exit_status } => {
+                        let _ = handle.exit_status_request(channel_id, exit_status).await;
+                        let _ = handle.eof(channel_id).await;
+                        let _ = handle.close(channel_id).await;
+                        return Ok(());
+                    }
+                    russh::ChannelMsg::Eof => {
+                        let _ = handle.eof(channel_id).await;
+                    }
+                    russh::ChannelMsg::Close => {
+                        let _ = handle.close(channel_id).await;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
             }
-            russh::ChannelMsg::ExtendedData { data, ext } => {
-                handle
-                    .extended_data(channel_id, ext, data)
-                    .await
-                    .map_err(|_| {
-                        UpstreamError::Russh(russh::Error::from(std::io::Error::other(
-                            "failed to forward upstream extended data to agent",
-                        )))
-                    })?;
+            pump = pump_rx.recv(), if !agent_closed => {
+                match pump {
+                    Some(AgentToUpstream::Data(bytes)) => {
+                        // Write agent bytes into the upstream channel.
+                        // Failure here generally means the upstream
+                        // channel is closed; log once and stop
+                        // accepting further agent bytes.
+                        if let Err(e) = upstream_channel.data(bytes.as_slice()).await {
+                            logging::warn(&format!(
+                                "failed to forward agent data to upstream: {e}"
+                            ));
+                            agent_closed = true;
+                        }
+                    }
+                    Some(AgentToUpstream::Eof) => {
+                        if !agent_eof_sent {
+                            agent_eof_sent = true;
+                            if let Err(e) = upstream_channel.eof().await {
+                                logging::warn(&format!(
+                                    "failed to forward agent EOF to upstream: {e}"
+                                ));
+                            }
+                        }
+                    }
+                    None => {
+                        // Receiver closed — handler dropped its sender.
+                        // Flush an implicit EOF so upstream finishes.
+                        if !agent_eof_sent {
+                            agent_eof_sent = true;
+                            let _ = upstream_channel.eof().await;
+                        }
+                        agent_closed = true;
+                    }
+                }
             }
-            russh::ChannelMsg::ExitStatus { exit_status } => {
-                let _ = handle.exit_status_request(channel_id, exit_status).await;
-                let _ = handle.eof(channel_id).await;
-                let _ = handle.close(channel_id).await;
-                return Ok(());
-            }
-            russh::ChannelMsg::Eof => {
-                let _ = handle.eof(channel_id).await;
-            }
-            russh::ChannelMsg::Close => {
-                let _ = handle.close(channel_id).await;
-                return Ok(());
-            }
-            _ => {}
         }
     }
 

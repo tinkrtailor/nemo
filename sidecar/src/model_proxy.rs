@@ -13,16 +13,18 @@
 
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::Request;
 use hyper::Response;
 use hyper::body::Bytes;
 use hyper::body::Incoming;
+use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto;
+use hyper_util::server::graceful::GracefulShutdown;
 use rustls::ClientConfig;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -117,7 +119,29 @@ pub fn upstream_uri(target: &RouteTarget, query: Option<&str>) -> String {
     }
 }
 
+/// Upstream request body type. We forward the inbound
+/// [`hyper::body::Incoming`] directly to the upstream via [`BoxBody`] so
+/// bytes stream through without being fully buffered (FR-28 parity with
+/// Go's `http.Client`).
+type UpstreamBody = BoxBody<Bytes, hyper::Error>;
+
+/// Shared client type for upstream requests. Using `BoxBody` lets us
+/// send either a streamed `Incoming` body or a `Full<Bytes>` empty body
+/// (for error paths) through the same `Client`.
+type UpstreamClient = Client<SsrfConnector, UpstreamBody>;
+
+/// Upper bound on how long we wait for in-flight model proxy
+/// connections to finish after shutdown is signaled. Matches the whole
+/// sidecar drain budget (`main::SHUTDOWN_DRAIN_TIMEOUT`).
+const GRACEFUL_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Serve the model proxy until `shutdown_rx` receives `true`.
+///
+/// Uses `hyper_util::server::graceful::GracefulShutdown` so in-flight
+/// HTTP requests finish before the server returns (FR-27). When
+/// `shutdown_rx` flips to `true` we stop accepting new connections,
+/// ask every watched connection to shut down, and wait up to
+/// [`GRACEFUL_DRAIN_TIMEOUT`] for them to finish.
 pub async fn serve(
     listener: TcpListener,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -126,9 +150,10 @@ pub async fn serve(
     // Build the upstream client once. The SsrfConnector re-runs
     // resolve_safe on every call, so sharing the client is safe.
     let connector = SsrfConnector::new(tls_config);
-    let client: Client<SsrfConnector, Full<Bytes>> =
-        Client::builder(TokioExecutor::new()).build(connector);
+    let client: UpstreamClient = Client::builder(TokioExecutor::new()).build(connector);
     let client = Arc::new(client);
+
+    let graceful = GracefulShutdown::new();
 
     loop {
         tokio::select! {
@@ -141,17 +166,28 @@ pub async fn serve(
             accept = listener.accept() => {
                 let (stream, _) = accept.map_err(ModelProxyError::Accept)?;
                 let client = Arc::clone(&client);
+                let io = TokioIo::new(stream);
+                let svc = service_fn(move |req: Request<Incoming>| {
+                    let client = Arc::clone(&client);
+                    async move { Ok::<_, Infallible>(handle(req, client.as_ref()).await) }
+                });
+                // HTTP/1 only, matching Go parity. `http1::Builder` wires
+                // into GracefulShutdown via the impl in hyper-util.
+                let conn = http1::Builder::new().serve_connection(io, svc);
+                let watched = graceful.watch(conn);
                 tokio::spawn(async move {
-                    let io = TokioIo::new(stream);
-                    let svc = service_fn(move |req: Request<Incoming>| {
-                        let client = Arc::clone(&client);
-                        async move { Ok::<_, Infallible>(handle(req, client.as_ref()).await) }
-                    });
-                    let builder = auto::Builder::new(TokioExecutor::new());
-                    let _ = builder.serve_connection(io, svc).await;
+                    let _ = watched.await;
                 });
             }
         }
+    }
+
+    // FR-27: wait up to GRACEFUL_DRAIN_TIMEOUT for in-flight requests
+    // to finish. The listener has already stopped accepting at this
+    // point because we broke out of the loop above.
+    match tokio::time::timeout(GRACEFUL_DRAIN_TIMEOUT, graceful.shutdown()).await {
+        Ok(()) => logging::info("model proxy drained in-flight requests"),
+        Err(_) => logging::warn("model proxy drain timed out, forcing shutdown"),
     }
     Ok(())
 }
@@ -159,7 +195,7 @@ pub async fn serve(
 /// Handle a single request end-to-end.
 async fn handle(
     req: Request<Incoming>,
-    client: &Client<SsrfConnector, Full<Bytes>>,
+    client: &UpstreamClient,
 ) -> Response<BoxBody<Bytes, hyper::Error>> {
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(|s| s.to_string());
@@ -187,30 +223,17 @@ async fn handle(
         Err(_) => return error_response(500, "invalid upstream URI"),
     };
 
-    // Read the request body into memory. The model proxy's upstream
-    // client uses Full<Bytes> because hyper-util's legacy client does
-    // not have a first-class streaming-body upload path that composes
-    // with our custom connector type in stable hyper 1.x. The request
-    // bodies are bounded by the client's transport buffers; long SSE
-    // streaming happens on the RESPONSE side, which we stream back
-    // without buffering.
-    //
-    // This matches Go parity for the vast majority of requests (chat
-    // completions with short prompts, bearer-auth GETs). Pathological
-    // multi-gigabyte uploads are out of scope per FR-28 ("no body size
-    // limits" — parity with Go, accepted tradeoff).
-    let body_bytes = match collect_request_body(req).await {
-        Ok(b) => b,
-        Err(e) => {
-            logging::error(&format!("failed to read request body: {e}"));
-            return error_response(502, "request body read failed");
-        }
-    };
+    // Stream the inbound body directly to the upstream request without
+    // buffering. Converting `Incoming` into a `BoxBody` preserves
+    // streaming semantics — each frame flows through hyper's client
+    // transport as it arrives. FR-28 "no body size limits" is honoured
+    // by memory: bytes are never fully materialized at our layer.
+    let body = req.into_body().boxed();
 
     // Build the outgoing request.
     let mut builder = Request::builder().method(method).uri(uri);
-    // Copy every header through, then overwrite the auth header that
-    // matches the upstream's expected value.
+    // Copy every header through, then overwrite the auth header and
+    // Host header so upstream sees the correct values.
     {
         let Some(h) = builder.headers_mut() else {
             return error_response(500, "failed to build upstream request headers");
@@ -218,9 +241,14 @@ async fn handle(
         for (k, v) in headers.iter() {
             h.append(k.clone(), v.clone());
         }
+        // FR-18 / SR-5: the inbound Host header reflects the sidecar's
+        // loopback bind (e.g. `127.0.0.1:9090`). Forwarding that verbatim
+        // would poison upstream virtual-host routing and break TLS-SNI
+        // audit expectations. Rewrite it to the upstream hostname.
+        rewrite_host_header(h, target.kind.host());
         inject_auth_header(h, target.kind, &cred);
     }
-    let upstream_req = match builder.body(Full::new(body_bytes)) {
+    let upstream_req = match builder.body(body) {
         Ok(r) => r,
         Err(e) => {
             logging::error(&format!("failed to build upstream request: {e}"));
@@ -262,10 +290,27 @@ pub async fn read_credential(path: &str) -> std::io::Result<String> {
     Ok(data.trim().to_string())
 }
 
-/// Collect the request body into a single `Bytes`.
-async fn collect_request_body(req: Request<Incoming>) -> Result<Bytes, hyper::Error> {
-    let collected = req.into_body().collect().await?;
-    Ok(collected.to_bytes())
+/// Rewrite the outgoing request's `Host` header to the upstream
+/// hostname. Exposed for unit testing. The inbound request's Host
+/// header is whatever the client sent to the sidecar (almost always
+/// `127.0.0.1:9090`); upstream needs to see the real hostname so
+/// virtual-host routing works and the HTTP Host parity with Go's
+/// `http.NewRequestWithContext` (which derives Host from the URL) is
+/// preserved.
+pub fn rewrite_host_header(headers: &mut hyper::HeaderMap, upstream_host: &str) {
+    match http::HeaderValue::from_str(upstream_host) {
+        Ok(v) => {
+            headers.remove(http::header::HOST);
+            headers.insert(http::header::HOST, v);
+        }
+        Err(_) => {
+            // Unreachable in practice: our upstream hosts are compile-time
+            // static ASCII constants (`api.openai.com`, `api.anthropic.com`).
+            // Fall through without setting — the client transport will
+            // still fill it in from the URI.
+            headers.remove(http::header::HOST);
+        }
+    }
 }
 
 /// Pure function: inject the right auth header based on the target.
@@ -454,6 +499,149 @@ mod tests {
                 .to_str()
                 .expect("valid utf8"),
             "2024-01-01"
+        );
+    }
+
+    // --- rewrite_host_header ---
+
+    #[test]
+    fn test_rewrite_host_header_replaces_loopback_with_upstream() {
+        // Regression test for Codex finding #1: a client-supplied Host
+        // header of 127.0.0.1:9090 (the model proxy bind address) must
+        // NOT be forwarded to upstream. After rewrite we expect the
+        // upstream hostname.
+        let mut h = HeaderMap::new();
+        h.insert(
+            http::header::HOST,
+            http::HeaderValue::from_static("127.0.0.1:9090"),
+        );
+        rewrite_host_header(&mut h, "api.openai.com");
+        assert_eq!(
+            h.get(http::header::HOST)
+                .expect("host header present")
+                .to_str()
+                .expect("utf8"),
+            "api.openai.com"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_host_header_inserts_when_missing() {
+        let mut h = HeaderMap::new();
+        rewrite_host_header(&mut h, "api.anthropic.com");
+        assert_eq!(
+            h.get(http::header::HOST)
+                .expect("host header present")
+                .to_str()
+                .expect("utf8"),
+            "api.anthropic.com"
+        );
+    }
+
+    #[test]
+    fn test_outgoing_request_host_header_is_upstream_not_local_bind() {
+        // Regression for Codex finding #1: the full header build flow
+        // (copy client headers -> rewrite host -> inject auth) must
+        // produce a request whose Host header is the upstream host,
+        // not 127.0.0.1:9090. Simulates the relevant subset of
+        // handle()'s header-building sequence.
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert(
+            http::header::HOST,
+            http::HeaderValue::from_static("127.0.0.1:9090"),
+        );
+        client_headers.insert(
+            "user-agent",
+            http::HeaderValue::from_static("claude-cli/1.0"),
+        );
+        client_headers.insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_static("Bearer client-forged"),
+        );
+
+        let target = route_target("/openai/v1/chat/completions").expect("routed");
+        let mut builder = Request::builder()
+            .method(http::Method::POST)
+            .uri(upstream_uri(&target, None));
+        {
+            let h = builder.headers_mut().expect("builder headers");
+            for (k, v) in client_headers.iter() {
+                h.append(k.clone(), v.clone());
+            }
+            rewrite_host_header(h, target.kind.host());
+            inject_auth_header(h, target.kind, "sk-server-key");
+        }
+        // Build with an empty streamed body so we can inspect the
+        // parts without bringing in hyper::Incoming.
+        let req = builder
+            .body(BoxBody::new(
+                Full::new(Bytes::new()).map_err(|never| match never {}),
+            ))
+            .expect("request builds");
+
+        let host = req
+            .headers()
+            .get(http::header::HOST)
+            .expect("host header present")
+            .to_str()
+            .expect("utf8");
+        assert_eq!(
+            host, "api.openai.com",
+            "model proxy must rewrite Host to the upstream hostname, not leak the sidecar's bind address"
+        );
+        // Authorization should have been overwritten.
+        assert_eq!(
+            req.headers()
+                .get(http::header::AUTHORIZATION)
+                .expect("auth present")
+                .to_str()
+                .expect("utf8"),
+            "Bearer sk-server-key"
+        );
+        // User agent preserved.
+        assert_eq!(
+            req.headers()
+                .get("user-agent")
+                .expect("user-agent present")
+                .to_str()
+                .expect("utf8"),
+            "claude-cli/1.0"
+        );
+        // Exactly one Host header.
+        assert_eq!(req.headers().get_all(http::header::HOST).iter().count(), 1);
+    }
+
+    #[test]
+    fn test_outgoing_request_host_header_for_anthropic_route() {
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert(
+            http::header::HOST,
+            http::HeaderValue::from_static("127.0.0.1:9090"),
+        );
+        let target = route_target("/anthropic/v1/messages").expect("routed");
+        let mut builder = Request::builder()
+            .method(http::Method::POST)
+            .uri(upstream_uri(&target, None));
+        {
+            let h = builder.headers_mut().expect("builder headers");
+            for (k, v) in client_headers.iter() {
+                h.append(k.clone(), v.clone());
+            }
+            rewrite_host_header(h, target.kind.host());
+            inject_auth_header(h, target.kind, "anthropic-key");
+        }
+        let req = builder
+            .body(BoxBody::new(
+                Full::new(Bytes::new()).map_err(|never| match never {}),
+            ))
+            .expect("request builds");
+        assert_eq!(
+            req.headers()
+                .get(http::header::HOST)
+                .expect("host header present")
+                .to_str()
+                .expect("utf8"),
+            "api.anthropic.com"
         );
     }
 

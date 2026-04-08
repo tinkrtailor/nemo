@@ -1,29 +1,39 @@
 //! Egress logger and HTTP proxy (FR-17 through FR-19, FR-28 timeouts).
 //!
-//! Accepts HTTP/1.1 on `127.0.0.1:9092` and handles two paths:
+//! Accepts HTTP/1.1 on `127.0.0.1:9092` and handles three request
+//! shapes:
 //!
 //! 1. **`CONNECT`**: hijacks the TCP stream and tunnels bytes bidirectionally
 //!    to the upstream host:port. 10s connect timeout (FR-28). Manual
 //!    CloseWrite half-close sequence on client→upstream EOF to match Go.
-//! 2. **Plain HTTP**: repairs missing `URL.scheme` to `http` and `URL.host`
-//!    to the `Host` header, strips `Proxy-Connection` and
-//!    `Proxy-Authorization` headers, dials upstream, and forwards the
-//!    request. **Does not follow redirects.**
+//! 2. **Plain HTTP (origin-form or absolute `http://`)**: repairs
+//!    missing scheme/host, strips `Proxy-Connection` and
+//!    `Proxy-Authorization` headers, dials upstream as plain TCP, and
+//!    forwards the request byte-for-byte.
+//! 3. **Absolute `https://`**: same as plain HTTP except the upstream
+//!    dial is wrapped in a TLS client using the shared rustls
+//!    `ClientConfig` and SNI set to the upstream hostname. This
+//!    matches Go's `http.Client` which silently upgrades `https://`
+//!    absolute-form targets to TLS. **Does not follow redirects.**
 //!
-//! SSRF protection (FR-18) runs before any dial in both paths. CONNECT
-//! tunnels are registered with the [`ConnectionTracker`] so FR-27 step
-//! 3 drains them on shutdown.
+//! SSRF protection (FR-18) runs before any dial in all paths. Every
+//! accepted connection is registered with the [`ConnectionTracker`] so
+//! FR-27 step 3 drains them on shutdown.
 //!
 //! Every completed request emits one FR-19 egress log line to stdout.
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
+use rustls::ClientConfig;
+use rustls::pki_types::ServerName;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::time::timeout as tokio_timeout;
+use tokio_rustls::TlsConnector;
 
 use crate::logging;
 use crate::shutdown::ConnectionTracker;
@@ -209,10 +219,14 @@ pub fn serialize_request(head: &RequestHead, target_override: Option<&str>) -> V
 }
 
 /// Serve the egress logger until `shutdown_rx` receives `true`.
+///
+/// `tls_config` is the shared rustls client config used to wrap
+/// upstream connections for absolute-form `https://` forwards (Fix #5).
 pub async fn serve(
     listener: TcpListener,
     mut shutdown_rx: watch::Receiver<bool>,
     drain_tracker: ConnectionTracker,
+    tls_config: Arc<ClientConfig>,
 ) -> Result<(), EgressError> {
     loop {
         tokio::select! {
@@ -225,8 +239,13 @@ pub async fn serve(
             accept = listener.accept() => {
                 let (stream, _) = accept.map_err(EgressError::Accept)?;
                 let drain = drain_tracker.clone();
+                let tls_config = Arc::clone(&tls_config);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, drain).await {
+                    // FR-27: register every egress connection with the
+                    // drain tracker so shutdown waits for in-flight
+                    // HTTP forwards as well as CONNECT tunnels.
+                    let _guard = drain.track();
+                    if let Err(e) = handle_connection(stream, drain.clone(), tls_config).await {
                         logging::warn(&format!("egress connection error: {e}"));
                     }
                 });
@@ -239,6 +258,7 @@ pub async fn serve(
 async fn handle_connection(
     mut client: TcpStream,
     drain_tracker: ConnectionTracker,
+    tls_config: Arc<ClientConfig>,
 ) -> io::Result<()> {
     // Buffer incoming bytes until we have a full request head.
     let mut buf = Vec::with_capacity(4096);
@@ -264,14 +284,14 @@ async fn handle_connection(
     if head.method.eq_ignore_ascii_case("CONNECT") {
         handle_connect(client, head, drain_tracker).await
     } else {
-        handle_plain_http(client, head, buf).await
+        handle_plain_http(client, head, buf, tls_config).await
     }
 }
 
 async fn handle_connect(
     mut client: TcpStream,
     head: RequestHead,
-    drain_tracker: ConnectionTracker,
+    _drain_tracker: ConnectionTracker,
 ) -> io::Result<()> {
     let dest = destination_for_connect(&head.target);
     let (host, port) = split_host_port_with_default(&head.target, 443);
@@ -307,10 +327,9 @@ async fn handle_connect(
         }
     };
 
-    // Register the tunnel with the shutdown tracker BEFORE sending the
-    // 200 back — that way SIGTERM immediately after the 200 still waits
-    // for us to finish.
-    let _guard = drain_tracker.track();
+    // Drain tracking is done at the connection-accept level in
+    // `serve`, so this tunnel is already counted toward the
+    // FR-27 drain budget.
 
     // Send the tunnel-established line to the client.
     client
@@ -343,17 +362,45 @@ async fn handle_connect(
     Ok(())
 }
 
+/// Upstream scheme of a plain-HTTP forward, chosen from the parsed
+/// request target. `Http` is the default (origin-form `/path` or
+/// `http://` absolute-form). `Https` is set for absolute-form
+/// `https://` targets and triggers a TLS-wrapped upstream dial per
+/// Fix #5. Exposed for unit testing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamScheme {
+    Http,
+    Https,
+}
+
+/// Pure helper that decides the upstream scheme for a given request
+/// target. Exposed so tests can pin down the absolute-form `https://`
+/// parity bug regression.
+pub fn upstream_scheme_for_target(target: &str) -> UpstreamScheme {
+    if target.starts_with("https://") {
+        UpstreamScheme::Https
+    } else {
+        UpstreamScheme::Http
+    }
+}
+
 async fn handle_plain_http(
     mut client: TcpStream,
     mut head: RequestHead,
     buf: Vec<u8>,
+    tls_config: Arc<ClientConfig>,
 ) -> io::Result<()> {
     // Repair the request target: if it's origin-form `/path`, combine
-    // with the Host header. If it's absolute-form `http://host/path`,
+    // with the Host header. If it's absolute-form `http[s]://host/path`,
     // extract the authority as the upstream host and convert to
     // origin-form for the forwarded request.
     let host_header = head.get_header("host").map(str::to_string);
     let dest = destination_for_http(&head.target, host_header.as_deref());
+    let scheme = upstream_scheme_for_target(&head.target);
+    let default_port = match scheme {
+        UpstreamScheme::Https => 443,
+        UpstreamScheme::Http => 80,
+    };
 
     // Determine upstream host/port + rewritten target (origin-form).
     let (upstream_host, upstream_port, forward_target) =
@@ -366,10 +413,11 @@ async fn handle_plain_http(
                 .and_then(|rest| rest.find('/').map(|i| &rest[i..]))
                 .unwrap_or("/")
                 .to_string();
-            let (h, p) = split_host_port_with_default(authority, 80);
+            let (h, p) = split_host_port_with_default(authority, default_port);
             (h, p, origin)
         } else if let Some(host) = host_header.clone() {
-            let (h, p) = split_host_port_with_default(&host, 80);
+            // Origin-form: scheme is implicitly http per Go parity.
+            let (h, p) = split_host_port_with_default(&host, default_port);
             (h, p, head.target.clone())
         } else {
             write_simple_response(
@@ -405,7 +453,7 @@ async fn handle_plain_http(
     // Dial upstream. No explicit timeout (parity with Go's http.Client
     // default). The underlying TCP connect will still fail eventually
     // on a bad host.
-    let mut upstream = match TcpStream::connect(socket_addr).await {
+    let tcp = match TcpStream::connect(socket_addr).await {
         Ok(s) => s,
         Err(e) => {
             let body = format!(r#"{{"error":"connect failed: {e}"}}"#);
@@ -414,37 +462,140 @@ async fn handle_plain_http(
         }
     };
 
-    // Serialize the rewritten head and write it along with any already-
-    // buffered body bytes.
+    // Serialize the rewritten head now — same bytes for both plain and
+    // TLS paths.
     let head_bytes = serialize_request(&head, Some(&forward_target));
-    upstream.write_all(&head_bytes).await?;
-    if buf.len() > head.head_len {
-        upstream.write_all(&buf[head.head_len..]).await?;
-    }
+    let buffered_body = if buf.len() > head.head_len {
+        buf[head.head_len..].to_vec()
+    } else {
+        Vec::new()
+    };
 
-    // For methods with a body (POST/PUT/PATCH), the body may still be
-    // streaming from the client. Spawn a task that reads more from the
-    // client and writes to upstream until client EOF. In parallel, read
-    // from upstream and write to the client.
-    //
-    // Because we disabled redirect following at the "no redirect client"
-    // layer in Go via CheckRedirect, and we do not follow redirects
-    // ourselves, the forwarding is a single raw byte-for-byte exchange.
-    let (mut bytes_sent, mut bytes_recv) = (0i64, 0i64);
-    match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
-        Ok((c2u, u2c)) => {
-            bytes_sent = c2u as i64;
-            bytes_recv = u2c as i64;
+    let (bytes_sent, bytes_recv) = match scheme {
+        UpstreamScheme::Http => {
+            forward_plain(client, tcp, &head_bytes, &buffered_body, &dest).await
         }
-        Err(e) => {
-            logging::warn(&format!("HTTP forward copy error: {e}"));
+        UpstreamScheme::Https => {
+            forward_tls(
+                client,
+                tcp,
+                &upstream_host,
+                &head_bytes,
+                &buffered_body,
+                &dest,
+                tls_config,
+            )
+            .await
         }
-    }
-    let _ = upstream.shutdown().await;
-    let _ = client.shutdown().await;
+    };
 
     logging::egress(dest, head.method, bytes_sent, bytes_recv);
     Ok(())
+}
+
+/// Forward a plain-HTTP request/response over an un-TLS-wrapped TCP
+/// stream. Returns `(bytes_sent, bytes_recv)`. Errors are logged and
+/// turned into `(0, 0)` so the caller can still emit an egress log
+/// line.
+async fn forward_plain(
+    mut client: TcpStream,
+    mut upstream: TcpStream,
+    head_bytes: &[u8],
+    buffered_body: &[u8],
+    dest: &str,
+) -> (i64, i64) {
+    if let Err(e) = upstream.write_all(head_bytes).await {
+        logging::warn(&format!("HTTP forward write error to {dest}: {e}"));
+        return (0, 0);
+    }
+    if !buffered_body.is_empty()
+        && let Err(e) = upstream.write_all(buffered_body).await
+    {
+        logging::warn(&format!("HTTP forward body write error to {dest}: {e}"));
+        return (0, 0);
+    }
+
+    let (mut c2u, mut u2c) = (0i64, 0i64);
+    match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
+        Ok((s, r)) => {
+            c2u = s as i64;
+            u2c = r as i64;
+        }
+        Err(e) => logging::warn(&format!("HTTP forward copy error to {dest}: {e}")),
+    }
+    let _ = upstream.shutdown().await;
+    let _ = client.shutdown().await;
+    (c2u, u2c)
+}
+
+/// Forward an absolute-form `https://` request: wrap the upstream TCP
+/// stream in TLS using the shared rustls `ClientConfig` and SNI set to
+/// the upstream hostname, then pipe bytes bidirectionally. Go's
+/// `http.Client` performs this automatically for `https://` URLs, so
+/// without this path a previously-working Go-sidecar client that sent
+/// an absolute-form `https://` target would get a silent HTTP-on-TLS
+/// downgrade — see Fix #5 in the codex review.
+async fn forward_tls(
+    mut client: TcpStream,
+    tcp: TcpStream,
+    upstream_host: &str,
+    head_bytes: &[u8],
+    buffered_body: &[u8],
+    dest: &str,
+    tls_config: Arc<ClientConfig>,
+) -> (i64, i64) {
+    let server_name = match ServerName::try_from(upstream_host.to_string()) {
+        Ok(n) => n,
+        Err(e) => {
+            logging::warn(&format!("invalid DNS name for TLS upstream {dest}: {e}"));
+            let _ = write_simple_response(
+                &mut client,
+                502,
+                "Bad Gateway",
+                r#"{"error":"invalid upstream DNS name"}"#,
+            )
+            .await;
+            return (0, 0);
+        }
+    };
+    let connector = TlsConnector::from(tls_config);
+    let mut upstream = match connector.connect(server_name, tcp).await {
+        Ok(s) => s,
+        Err(e) => {
+            logging::warn(&format!("TLS handshake to {dest} failed: {e}"));
+            let _ = write_simple_response(
+                &mut client,
+                502,
+                "Bad Gateway",
+                r#"{"error":"upstream TLS handshake failed"}"#,
+            )
+            .await;
+            return (0, 0);
+        }
+    };
+
+    if let Err(e) = upstream.write_all(head_bytes).await {
+        logging::warn(&format!("HTTPS forward write error to {dest}: {e}"));
+        return (0, 0);
+    }
+    if !buffered_body.is_empty()
+        && let Err(e) = upstream.write_all(buffered_body).await
+    {
+        logging::warn(&format!("HTTPS forward body write error to {dest}: {e}"));
+        return (0, 0);
+    }
+
+    let (mut c2u, mut u2c) = (0i64, 0i64);
+    match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
+        Ok((s, r)) => {
+            c2u = s as i64;
+            u2c = r as i64;
+        }
+        Err(e) => logging::warn(&format!("HTTPS forward copy error to {dest}: {e}")),
+    }
+    let _ = upstream.shutdown().await;
+    let _ = client.shutdown().await;
+    (c2u, u2c)
 }
 
 /// Write a minimal HTTP/1.1 response with a JSON body. Used for error

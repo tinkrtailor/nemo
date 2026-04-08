@@ -32,6 +32,7 @@ hyper = { version = "1.4", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = [
     "tokio",
     "server",
+    "server-graceful",
     "client-legacy",
     "http1",
 ] }

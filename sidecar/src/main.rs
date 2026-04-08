@@ -88,8 +88,15 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to bind git SSH proxy listener: {e}"))?;
 
-    // Shutdown signal distributed to each server. `false` = keep running.
+    // Shutdown signal distributed to the model proxy, egress, and git
+    // SSH proxy servers. `false` = keep running.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // Separate signal for the /healthz listener so we can delay its
+    // teardown until AFTER the other servers have drained. FR-27
+    // requires /healthz to keep serving 200 throughout the drain so
+    // readiness probes continue to see the pod as Ready.
+    let (health_shutdown_tx, health_shutdown_rx) = watch::channel(false);
 
     // Connection tracker counts in-flight SSH sessions AND CONNECT tunnels.
     // Both long-lived connection types are tracked here so FR-27 step 3
@@ -115,18 +122,20 @@ async fn run() -> Result<(), String> {
     let egress_handle = {
         let shutdown_rx = shutdown_rx.clone();
         let drain_tracker = drain_tracker.clone();
+        let tls_config = tls_config.clone();
         tokio::spawn(async move {
-            if let Err(e) = egress::serve(egress_listener, shutdown_rx, drain_tracker).await {
+            if let Err(e) =
+                egress::serve(egress_listener, shutdown_rx, drain_tracker, tls_config).await
+            {
                 logging::error(&format!("egress logger exited with error: {e}"));
             }
         })
     };
 
     let health_handle = {
-        let shutdown_rx = shutdown_rx.clone();
         let ready = Arc::clone(&ready);
         tokio::spawn(async move {
-            if let Err(e) = health::serve(health_listener, ready, shutdown_rx).await {
+            if let Err(e) = health::serve(health_listener, ready, health_shutdown_rx).await {
                 logging::error(&format!("health endpoint exited with error: {e}"));
             }
         })
@@ -180,22 +189,34 @@ async fn run() -> Result<(), String> {
 
     // FR-27 shutdown sequence:
     //
-    // 1. Signal all four servers that shutdown is starting. Each server's
-    //    accept loop will stop accepting new connections. The health
-    //    endpoint keeps serving 200 for in-flight probe requests until its
-    //    listener is closed at the end of step 4 (we only tell it to stop
-    //    AFTER the drain wait, not at the same time as the others).
+    // 1. Signal the model proxy, egress, and git SSH proxy servers to
+    //    stop accepting new connections. The /healthz endpoint keeps
+    //    serving 200 throughout the drain (no shutdown signal sent to
+    //    it yet) so k8s readiness probes still see the pod as Ready.
     let _ = shutdown_tx.send(true);
 
-    // 2. Wait up to 5s for SSH sessions + CONNECT tunnels to drain.
+    // 2. Wait up to 5s for long-lived tracked connections (SSH sessions,
+    //    CONNECT tunnels, plain HTTP forwards) to drain AND for the
+    //    model proxy, egress, and git SSH proxy tasks to exit. The
+    //    model proxy does per-connection graceful shutdown internally
+    //    via `hyper_util::server::graceful`; egress and git SSH rely on
+    //    the drain_tracker.
     let drained = drain_tracker.wait_for_drain(SHUTDOWN_DRAIN_TIMEOUT).await;
     if !drained {
-        logging::warn("SSH/CONNECT drain timed out, proceeding with shutdown");
+        logging::warn("SSH/CONNECT/HTTP drain timed out, proceeding with shutdown");
     }
 
-    // 3. Await all server tasks. They should exit once the shutdown signal
-    //    propagates and their in-flight work completes.
-    let _ = tokio::join!(model_handle, egress_handle, git_ssh_handle, health_handle);
+    // 3. Await the three server tasks. They should have exited once the
+    //    shutdown signal propagated and their in-flight work finished.
+    let _ = tokio::join!(model_handle, egress_handle, git_ssh_handle);
+
+    // 4. NOW tell the /healthz listener to stop. Any in-flight probe
+    //    still mid-request will get its response because hyper's
+    //    connection loop exits after finishing current work. This is
+    //    the last step so readiness probes never see 503 during
+    //    shutdown.
+    let _ = health_shutdown_tx.send(true);
+    let _ = health_handle.await;
 
     logging::info("shutdown complete");
     Ok(())
