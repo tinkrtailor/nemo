@@ -43,7 +43,7 @@ Issue [#66](https://github.com/tinkrtailor/nautiloop/issues/66) — Go sidecar `
 
 Per the design decision to proceed without a separate manual verification step, **this spec trusts that hyper 1.x's `BoxBody` streams frames immediately through the http1 codec**. Evidence for the trust: `sidecar/src/model_proxy.rs:266-278` uses `body.boxed()` and passes the result directly to `Response::builder().body(...)`, with an inline comment `"Each frame flows through hyper's client transport as it arrives"`. Hyper 1.x has no equivalent to Go's ResponseWriter 4 KiB buffer-then-flush-on-full behavior.
 
-**But the harness is where this trust becomes evidence.** The `divergence_sse_streaming_incremental_chunks` case below is the FIRST real proof that Rust streams correctly under wall-clock conditions. If Rust turns out to also be buffered, the harness catches it on the first full run — not in production. That's acceptable risk because:
+**But the harness is where this trust becomes evidence.** The `divergence_sse_streaming_openai` and `divergence_sse_streaming_anthropic` cases below are the FIRST real proof that Rust streams correctly under wall-clock conditions. If Rust turns out to also be buffered, the harness catches it on the first full run — not in production. That's acceptable risk because:
 
 1. The harness runs in a hermetic test environment before any production impact.
 2. If Rust is broken, we file a new P0 issue immediately and fix it — blocking the harness merge, not the cutover.
@@ -374,11 +374,19 @@ The alternative (manually verifying Rust streaming before writing the spec) was 
 
 - FR-29: The `parity-net` subnet is configurable via the `PARITY_NET_SUBNET` environment variable. Default: `100.64.0.0/24`. The docker-compose.yml uses `${PARITY_NET_SUBNET:-100.64.0.0/24}`. The harness driver has a `--subnet <cidr>` flag that sets the env var before calling `docker compose`. Override use cases: (a) developer is on an ISP that routes 100.64.0.0/10 for CGNAT and docker can't claim it, (b) another docker bridge on the host already claimed 100.64.0.0/24.
 
-  **Subnet validation reuses the sidecar's own SSRF classifier, NOT a duplicated prose list.** The harness crate depends on `nautiloop-sidecar` as a workspace path dependency (see Crate structure below) and calls `nautiloop_sidecar::ssrf::is_private_ip(addr)` on a sample address from the proposed subnet. If `is_private_ip` returns `true`, the harness rejects the subnet with a clear error and refuses to start. This guarantees the harness's accepted/rejected set matches the Rust sidecar's runtime behavior exactly — a future change to `sidecar/src/ssrf.rs` automatically propagates to the harness validator without any spec update.
+  **Subnet validation uses a WHITELIST of safe CIDR ranges, not a blacklist sample.** A blacklist approach is unsound: a straddling subnet like `9.255.0.0/15` (spanning 9.255.0.0–10.0.255.255) has public first and last addresses but includes `10.x.x.x` in the middle, and Docker can assign any address in the subnet to a container. Checking a single address, or even first-and-last, misses embedded private ranges (e.g., `168.0.0.0/7` includes link-local `169.254.0.0/16`).
 
-  **Drift between Rust and Go classifiers is a secondary concern acknowledged here:** the Go sidecar's `isPrivateIP` list at `images/sidecar/main.go:42-75` is currently a strict subset of the Rust classifier (Rust adds `0.0.0.0/8`, broadcast, and IPv4-mapped handling; Go does not). A subnet that Rust rejects but Go accepts would pass the harness validator (Rust-based) but the Go sidecar would still allow it — which is fine for the harness (the harness wants Rust to be strict, and Go's looser behavior is an existing divergence not triggered by any corpus case). The inverse — a subnet Go rejects but Rust accepts — is impossible given the current Rust-is-strict-superset relationship. If Go ever adds blocks Rust doesn't have, file a followup issue; until then, Rust-classifier-based validation is sufficient.
+  The correct approach: the harness driver accepts an override subnet ONLY IF it is entirely within one of these known-safe ranges that neither sidecar blocks:
+  - `100.64.0.0/10` (RFC6598 CGNAT — the default)
+  - `192.0.2.0/24` (RFC5737 TEST-NET-1)
+  - `198.51.100.0/24` (RFC5737 TEST-NET-2)
+  - `203.0.113.0/24` (RFC5737 TEST-NET-3)
 
-  **Requires exposing `is_private_ip` from the sidecar crate.** `sidecar/src/lib.rs` must `pub use ssrf::is_private_ip` (or equivalent) so the harness crate can import it. This is a library-surface addition to `nautiloop-sidecar` but NOT a behavior change — it's only re-exporting an existing pub function from `ssrf.rs`. No new runtime code, no new dependencies, no new attack surface. The harness crate must be added to `nautiloop-sidecar`'s public API consumers list for clippy and reverse-dependency tracking; mention this in the harness crate's `Cargo.toml` with a comment explaining why the path dep exists.
+  These are all non-globally-routable test/documentation ranges that neither Go nor Rust SSRF logic blocks. The driver validates the proposed subnet via `ipnet::Ipv4Net::contains` semantics: `is_safe(user_cidr) := any(safe_range.contains(user_cidr) for safe_range in WHITELIST)`. The `contains` check is strict subset, so `user_cidr` must be entirely inside one of the whitelisted ranges — no straddling allowed. If the check fails, the driver exits with a clear error listing the allowed ranges.
+
+  **This validator is independent of the sidecar's SSRF blocklist** — no path dependency on `nautiloop-sidecar`, no import, no drift risk. The whitelist is simpler and sound. If a future Rust sidecar change tightens SSRF to also block one of these test ranges, the harness naturally fails at `compose up` time (the sidecar will block mock traffic) and the operator updates the whitelist. That's a loud failure mode, not a silent one.
+
+  **Sidecar code change required for FR-29: NONE.** The earlier v4 proposal required exposing `is_private_ip` from `sidecar/src/lib.rs` via a `pub use` addition. That's no longer needed — the whitelist approach doesn't import anything from the sidecar crate. This keeps the spec's "no code changes to either sidecar" guarantee true.
 
 ### Non-Functional Requirements
 
@@ -446,11 +454,14 @@ parity-net (custom bridge, subnet ${PARITY_NET_SUBNET:-100.64.0.0/24})
 
 CGNAT verification: `sidecar/src/ssrf.rs:94-99` and `images/sidecar/main.go:43-48`.
 
-Host port mappings:
+Host port mappings (every port the harness driver or manual smoke needs; see FR-2 for the authoritative list):
 - sidecar-go: 19090 (model), 19091 (ssh), 19092 (egress), 19093 (health)
 - sidecar-rust: 29090-29093
-- Mock introspection: 49990-49993
-- (mock-tcp-echo has no host port — reached only via sidecar tunnels)
+- mock-openai: 50010 (:80 healthz HTTP), 50011 (:443 HTTPS smoke), 49990 (:9999 introspection)
+- mock-anthropic: 50020, 50021, 49991
+- mock-github-ssh: 50030 (:2200 health TCP), 49992 (:9999 introspection) — `:22` NOT published (sidecars reach via parity-net)
+- mock-example: 50040 (:80), 50041 (:8080), 49993 (introspection)
+- mock-tcp-echo: 50050 (:443 health TCP) — published ONLY for driver health gating; application traffic reaches it via sidecar tunnels from within parity-net
 
 ### Crate structure
 
@@ -478,14 +489,6 @@ name = "nautiloop-sidecar-parity-harness"
 path = "src/main.rs"
 
 [dependencies]
-# Path dep on the sidecar crate for FR-29 subnet validation —
-# the harness reuses nautiloop_sidecar::ssrf::is_private_ip so that
-# any change to the sidecar's SSRF blocklist automatically propagates
-# to the harness validator (no drift between prose and code).
-# Build cost: the sidecar crate is already part of the workspace and
-# already built by the rust-checks CI job, so this adds no new compile.
-nautiloop-sidecar = { path = "../../" }
-
 tokio = { version = "1.40", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
@@ -499,11 +502,12 @@ tracing = "0.1"
 tracing-subscriber = ">=0.3.20"
 rustls-pemfile = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+ipnet = "2"
 ```
 
-The harness uses `reqwest` with a `rustls::ClientConfig` that loads the test CA from `fixtures/test-ca/ca.pem` (same pattern as the sidecar). Egress raw-TCP cases use `tokio::net::TcpStream` directly. `russh` client drives git_ssh cases. FR-29 subnet validation calls `nautiloop_sidecar::ssrf::is_private_ip` directly.
+The harness uses `reqwest` with a `rustls::ClientConfig` that loads the test CA from `fixtures/test-ca/ca.pem` (same pattern as the sidecar). Egress raw-TCP cases use `tokio::net::TcpStream` directly. `russh` client drives git_ssh cases. FR-29 subnet whitelist validation uses `ipnet::Ipv4Net::contains` against hardcoded test-range constants — no path dependency on the sidecar crate.
 
-**Required exposure in `sidecar/src/lib.rs`:** add `pub use ssrf::is_private_ip;` (or equivalent) so the harness can import the classifier. This is a library-API addition, no behavior change.
+**No sidecar code changes.** The previous v4 proposal required adding `pub use ssrf::is_private_ip` to `sidecar/src/lib.rs`. That's no longer needed because FR-29 uses a whitelist, not a re-used blacklist classifier.
 
 ### Driver program structure
 
@@ -724,3 +728,17 @@ Convergence pattern: 14 → 12 → 5.
 - **P2-4 (lint allowlist too broad):** FIXED. FR-28 now uses file-level hardcoded exclusion for exactly two files: `sidecar/tests/parity/docker-compose.yml` and `.github/workflows/parity.yml`. Matches SR-5 exactly.
 
 - **P2-5 (FR-29 subnet validator drift risk):** FIXED. FR-29 now specifies that the harness reuses the sidecar's own SSRF classifier via `nautiloop_sidecar::ssrf::is_private_ip`, imported through a workspace path dependency. No prose duplication; any change to `sidecar/src/ssrf.rs` automatically propagates to the harness validator. Requires a one-line `pub use` addition to `sidecar/src/lib.rs` (noted in the Crate structure section).
+
+### v4 → v5: Codex v4 review (5 findings: 1 P1, 4 P2)
+
+Convergence pattern: 14 → 12 → 5 → 5 (severity dropping: v3 had 1 P0 V1; v4 has 0 P0, only 1 P1).
+
+- **P1-1 (FR-29 sample-address validation unsound):** FIXED. Replaced the blacklist-sample approach with a **whitelist**: the harness accepts an override subnet only if it is entirely contained within one of four known-safe ranges (`100.64.0.0/10` CGNAT, plus the three RFC5737 TEST-NET ranges). Checked via `ipnet::Ipv4Net::contains` (strict subset; no straddling). Simpler AND sound — a straddling subnet like `9.255.0.0/15` is rejected unambiguously because it isn't contained in any whitelisted range.
+
+- **P2-2 (path-dep compile-cost claim false):** FIXED BY REMOVAL. Because FR-29 no longer depends on the sidecar crate (the whitelist approach is self-contained), the path dependency is dropped entirely from the harness `Cargo.toml`. The false claim about "already built by rust-checks" is moot.
+
+- **P2-3 (contradictory "no sidecar changes" vs "add pub use"):** FIXED. The `pub use ssrf::is_private_ip` addition to `sidecar/src/lib.rs` is no longer needed — FR-29's whitelist doesn't import anything from the sidecar crate. The spec's "no sidecar code changes" guarantee is now true.
+
+- **P2-4 (Architecture section stale):** FIXED. The Architecture section's topology annotation and host-port-mapping list now match FR-2 exactly: mock-tcp-echo publishes :443 → 50050, and the complete 50010-50050 + 49990-49993 map is documented in one place.
+
+- **P2-5 (stale case name `divergence_sse_streaming_incremental_chunks`):** FIXED. Replaced the single stale reference on line 46 with the two actual case names (`divergence_sse_streaming_openai` and `divergence_sse_streaming_anthropic`).
