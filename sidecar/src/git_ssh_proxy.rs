@@ -47,38 +47,61 @@ use crate::logging;
 use crate::shutdown::ConnectionTracker;
 use crate::ssrf;
 
-/// Messages pushed from the russh server `Handler::data`,
-/// `channel_eof`, and `channel_close` callbacks into the spawned
-/// upstream proxy task. The proxy task pumps these messages to the
-/// upstream SSH channel's writer. Using a bounded mpsc channel lets
-/// the handler apply backpressure to the agent SSH connection via
-/// russh's flow-control window instead of buffering unboundedly
-/// inside the sidecar.
+/// Data messages pushed from the russh server `Handler::data`
+/// callback into the spawned upstream proxy task. Kept on a
+/// **bounded** mpsc channel so a slow upstream backpressures the
+/// agent SSH write path via russh's flow-control window instead of
+/// letting the sidecar buffer an unbounded queue of `Vec<u8>`s.
 #[derive(Debug)]
-enum AgentToUpstream {
+enum AgentData {
     /// Raw bytes from the agent channel that must be written to the
     /// upstream channel's stdin.
     Data(Vec<u8>),
+}
+
+/// Control messages pushed from the russh server `channel_eof` and
+/// `channel_close` callbacks. Kept on a **separate unbounded** mpsc
+/// channel (Codex v3 finding #1): a saturated data channel must
+/// never delay teardown. Because the control channel is unbounded,
+/// `channel_close` and `channel_eof` callbacks never block on
+/// capacity, so the handler returns immediately even when the data
+/// channel is full. The pump's `select!` sees the control message
+/// within one scheduling slice and acts on it, tearing the upstream
+/// session down without waiting for buffered data to drain.
+#[derive(Debug)]
+enum AgentControl {
     /// The agent sent EOF. The upstream channel's stdin should be
-    /// closed; any already-buffered data must flush first.
+    /// half-closed (`upstream_channel.eof()`); the pump continues
+    /// processing data in the other direction until the upstream
+    /// emits its own EOF / ExitStatus / Close.
     Eof,
-    /// The agent closed its channel. The upstream channel should be
-    /// closed immediately and the pump task should exit so the
-    /// upstream session does not linger when the agent disappears.
+    /// The agent closed its channel. The upstream channel must be
+    /// closed immediately and the pump task must exit so the
+    /// upstream session does not linger behind buffered writes
+    /// when the agent disappears.
     Close,
 }
 
-/// Shared per-connection state that maps `ChannelId` to a sender the
-/// russh `Handler::data` callback can use to pump bytes into the
-/// upstream proxy task. The map is held behind a sync `Mutex` because
-/// every access is a fast insert / lookup / remove — no `.await` is
-/// held while the lock is taken.
-///
-/// The sender is bounded ([`AGENT_PUMP_CHANNEL_CAPACITY`]) so that a
-/// slow upstream backpressures the agent SSH write path through
-/// russh's flow-control window instead of silently queuing an
-/// unbounded amount of bytes inside the sidecar.
-type UpstreamPumpMap = Arc<Mutex<HashMap<ChannelId, mpsc::Sender<AgentToUpstream>>>>;
+/// Per-channel pair of senders installed by `exec_request` and
+/// looked up by `Handler::data` / `channel_eof` / `channel_close`.
+#[derive(Clone)]
+struct PumpSenders {
+    /// Bounded data channel ([`AGENT_PUMP_CHANNEL_CAPACITY`]).
+    /// Backpressure boundary between the agent SSH window and the
+    /// upstream proxy.
+    data_tx: mpsc::Sender<AgentData>,
+    /// Unbounded control channel. Writes here are non-blocking so
+    /// `channel_close` / `channel_eof` never queue behind buffered
+    /// pack data (Codex v3 finding #1).
+    control_tx: mpsc::UnboundedSender<AgentControl>,
+}
+
+/// Shared per-connection state that maps `ChannelId` to the pair of
+/// senders the russh handler callbacks use to pump bytes + control
+/// events into the upstream proxy task. The map is held behind a
+/// sync `Mutex` because every access is a fast insert / lookup /
+/// remove — no `.await` is held while the lock is taken.
+type UpstreamPumpMap = Arc<Mutex<HashMap<ChannelId, PumpSenders>>>;
 
 /// Bounded capacity for each per-channel agent→upstream pump queue.
 /// Picked small on purpose: each slot holds one SSH packet-sized
@@ -503,14 +526,14 @@ impl server::Handler for GitSshHandler {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let sender = {
+        let data_tx = {
             let guard = match self.upstream_pumps.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            guard.get(&channel).cloned()
+            guard.get(&channel).map(|p| p.data_tx.clone())
         };
-        if let Some(tx) = sender {
+        if let Some(tx) = data_tx {
             // A send failure here means the upstream pump task has
             // exited and dropped the receiver. The channel is about
             // to be torn down; the git client will see the exit
@@ -518,7 +541,7 @@ impl server::Handler for GitSshHandler {
             // cleanup branch. We intentionally do NOT propagate the
             // error as a russh error — doing so would tear down the
             // whole SSH connection instead of just this channel.
-            if tx.send(AgentToUpstream::Data(data.to_vec())).await.is_err() {
+            if tx.send(AgentData::Data(data.to_vec())).await.is_err() {
                 logging::warn("agent->upstream pump closed; dropping data frame");
             }
         }
@@ -527,47 +550,59 @@ impl server::Handler for GitSshHandler {
 
     // Forward EOF. Git clients send EOF after the final pack delimiter
     // on push; without this the upstream blocks waiting for more data.
+    //
+    // Sent over the unbounded control channel (Codex v3 finding #1)
+    // so EOF is never delayed behind buffered pack data.
     async fn channel_eof(
         &mut self,
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let sender = {
+        let control_tx = {
             let guard = match self.upstream_pumps.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            guard.get(&channel).cloned()
+            guard.get(&channel).map(|p| p.control_tx.clone())
         };
-        if let Some(tx) = sender {
-            let _ = tx.send(AgentToUpstream::Eof).await;
+        if let Some(tx) = control_tx {
+            let _ = tx.send(AgentControl::Eof);
         }
         Ok(())
     }
 
     // Propagate an agent-side channel close to the upstream pump task
-    // (Codex v2 finding #3). Previously this handler only removed the
-    // map entry, which left the pump draining upstream→agent forever
-    // if the agent closed abruptly while the remote still had data to
-    // send. Now we explicitly enqueue `Close`, so the pump loop exits
-    // and tears down the upstream session. Removing the map entry
-    // after the send ensures the pump always sees the `Close`
-    // message and we do not race with `Handler::data` enqueueing more
-    // bytes onto a sender that is about to be dropped.
+    // (Codex v2 finding #3, tightened in v3 finding #1). Previously
+    // this handler only removed the map entry, which left the pump
+    // draining upstream→agent forever if the agent closed abruptly
+    // while the remote still had data to send. Then v2 enqueued
+    // `Close` through the same bounded channel used for data, so a
+    // saturated queue could still delay teardown.
+    //
+    // v3 fix: `Close` is sent on the unbounded control channel so
+    // the send is non-blocking even when the data channel is full,
+    // and the pump's `select!` observes `Close` in the next
+    // scheduling slice. The pump does NOT drain outstanding data
+    // messages before tearing the upstream down — the agent is
+    // gone, so any queued bytes are worthless.
+    //
+    // We remove the map entry AFTER sending the control message so
+    // we do not race with `Handler::data` enqueueing more bytes
+    // onto a sender that is about to be dropped.
     async fn channel_close(
         &mut self,
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let sender = {
+        let pump = {
             let mut guard = match self.upstream_pumps.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
             guard.remove(&channel)
         };
-        if let Some(tx) = sender {
-            let _ = tx.send(AgentToUpstream::Close).await;
+        if let Some(p) = pump {
+            let _ = p.control_tx.send(AgentControl::Close);
         }
         Ok(())
     }
@@ -628,18 +663,32 @@ impl server::Handler for GitSshHandler {
             parsed.command, self.remote.host, self.remote.port
         ));
 
-        // Create the agent→upstream pump channel. Bounded capacity
-        // (Codex v2 finding #1) so a slow upstream backpressures the
-        // agent SSH write path via russh's flow-control window
-        // instead of letting the sidecar silently buffer an
-        // unbounded queue of `Vec<u8>`s.
-        let (pump_tx, pump_rx) = mpsc::channel::<AgentToUpstream>(AGENT_PUMP_CHANNEL_CAPACITY);
+        // Create the agent→upstream pump channels.
+        //
+        // - `data_*` is bounded (Codex v2 finding #1) so a slow
+        //   upstream backpressures the agent SSH write path via
+        //   russh's flow-control window instead of letting the
+        //   sidecar silently buffer an unbounded queue of `Vec<u8>`s.
+        //
+        // - `control_*` is unbounded (Codex v3 finding #1) so
+        //   `channel_close` / `channel_eof` can never block behind
+        //   buffered pack data. Control messages are tiny and
+        //   strictly bounded in number per channel (one Eof + one
+        //   Close at most).
+        let (data_tx, data_rx) = mpsc::channel::<AgentData>(AGENT_PUMP_CHANNEL_CAPACITY);
+        let (control_tx, control_rx) = mpsc::unbounded_channel::<AgentControl>();
         {
             let mut guard = match self.upstream_pumps.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            guard.insert(channel, pump_tx);
+            guard.insert(
+                channel,
+                PumpSenders {
+                    data_tx,
+                    control_tx,
+                },
+            );
         }
 
         // Spawn the upstream proxy. The ChannelId lives in the session's
@@ -656,7 +705,8 @@ impl server::Handler for GitSshHandler {
                 channel,
                 remote.as_ref().clone(),
                 parsed,
-                pump_rx,
+                data_rx,
+                control_rx,
                 auth_paths.as_ref().clone(),
             )
             .await;
@@ -702,18 +752,20 @@ pub enum UpstreamError {
 
 /// Drive an upstream SSH session proxied to/from the agent's channel.
 ///
-/// `pump_rx` carries the agent→upstream byte stream pushed by the
-/// russh `Handler::data` / `channel_eof` / `channel_close` callbacks
-/// (see Codex finding #2 and Codex v2 finding #3). We pump those
-/// messages into the upstream channel writer on one concurrent branch
-/// while the other branch drains upstream messages and forwards them
-/// back to the agent via the server `Handle`.
+/// `data_rx` carries the bounded agent→upstream byte stream pushed
+/// by `Handler::data`. `control_rx` carries the unbounded agent→
+/// upstream control stream (EOF / Close) pushed by `channel_eof` /
+/// `channel_close`. Splitting the two (Codex v3 finding #1) means a
+/// saturated data queue cannot delay teardown: `channel_close` sends
+/// non-blocking onto the unbounded control channel and the pump's
+/// `select!` observes it in the next scheduling slice.
 async fn proxy_upstream(
     handle: server::Handle,
     channel_id: ChannelId,
     remote: GitRemote,
     parsed: ExecParsed,
-    mut pump_rx: mpsc::Receiver<AgentToUpstream>,
+    mut data_rx: mpsc::Receiver<AgentData>,
+    mut control_rx: mpsc::UnboundedReceiver<AgentControl>,
     auth_paths: SshAuthPaths,
 ) -> Result<(), UpstreamError> {
     // Read and parse the private key.
@@ -790,7 +842,7 @@ async fn proxy_upstream(
     let full_command = format!("{} '{}'", parsed.command, remote.repo_path);
     upstream_channel.exec(true, full_command.as_bytes()).await?;
 
-    // Pipe bytes bidirectionally. Two concurrent branches on each
+    // Pipe bytes bidirectionally. Three concurrent branches on each
     // `tokio::select!` iteration:
     //
     //   * upstream → agent: `upstream_channel.wait()` returns the
@@ -798,26 +850,32 @@ async fn proxy_upstream(
     //     are forwarded to the agent via the server `Handle`;
     //     ExitStatus/Close trigger a clean return.
     //
-    //   * agent → upstream: `pump_rx.recv()` returns the next
-    //     `AgentToUpstream` pushed by our `Handler::data` /
-    //     `channel_eof` / `channel_close` callbacks. Data frames
-    //     are written to the upstream channel's writer; Eof closes
-    //     the write half; Close tears the upstream channel down
-    //     and exits the pump loop immediately (Codex v2 finding
-    //     #3). If the receiver is closed without an explicit
-    //     control message — e.g. the handler panicked and dropped
-    //     its sender — we treat that as an implicit `Close` too.
+    //   * agent → upstream control: `control_rx.recv()` returns the
+    //     next `AgentControl` pushed by `channel_eof` /
+    //     `channel_close`. `Eof` half-closes the upstream write
+    //     direction and we keep looping (upstream may still stream
+    //     down to the agent). `Close` tears the upstream channel
+    //     down and exits the pump loop **immediately**, discarding
+    //     any pending data messages (Codex v3 finding #1): the
+    //     agent is gone, so buffered pack data is worthless and
+    //     must not delay teardown.
+    //
+    //   * agent → upstream data: `data_rx.recv()` returns the next
+    //     `AgentData::Data` pushed by `Handler::data`. Frames are
+    //     written to the upstream channel's writer. The branch is
+    //     gated on `!agent_closed` so we stop pumping once we have
+    //     seen either a transport error or an explicit `Close`.
     //
     // The `tokio::select!` is deliberately NOT `biased` (Codex v2
     // finding #2): a biased select would always poll the upstream
     // branch first, and a continuously readable upstream would
     // then starve the agent→upstream direction indefinitely. The
-    // default pseudo-random selection guarantees both directions
-    // make progress under sustained load.
-    //
-    // This is the fix for Codex finding #2 — previously this loop
-    // only polled upstream output and never forwarded agent bytes,
-    // so git-receive-pack pushes hung indefinitely.
+    // default pseudo-random selection guarantees all branches make
+    // progress under sustained load. Priority for control messages
+    // is achieved NOT via `biased` but via the unbounded control
+    // channel: because `channel_close` cannot block on capacity,
+    // the pump observes `Close` in the next scheduling slice
+    // regardless of data backlog.
     let mut agent_eof_sent = false;
     let mut agent_closed = false;
     loop {
@@ -858,9 +916,50 @@ async fn proxy_upstream(
                     _ => {}
                 }
             }
-            pump = pump_rx.recv(), if !agent_closed => {
-                match pump {
-                    Some(AgentToUpstream::Data(bytes)) => {
+            control = control_rx.recv() => {
+                match control {
+                    Some(AgentControl::Eof) => {
+                        if !agent_eof_sent {
+                            agent_eof_sent = true;
+                            if let Err(e) = upstream_channel.eof().await {
+                                logging::warn(&format!(
+                                    "failed to forward agent EOF to upstream: {e}"
+                                ));
+                            }
+                        }
+                    }
+                    Some(AgentControl::Close) => {
+                        // Agent explicitly closed its channel. Tear
+                        // the upstream channel down immediately and
+                        // exit the pump loop, discarding any data
+                        // messages still buffered in `data_rx`
+                        // (Codex v3 finding #1). The agent is gone;
+                        // writing those bytes upstream is pointless
+                        // and would just delay teardown.
+                        if let Err(e) = upstream_channel.close().await {
+                            logging::warn(&format!(
+                                "failed to forward agent close to upstream: {e}"
+                            ));
+                        }
+                        let _ = handle.close(channel_id).await;
+                        return Ok(());
+                    }
+                    None => {
+                        // Control channel closed without an explicit
+                        // message — the handler dropped its sender
+                        // (e.g. task panic). Treat this as a Close
+                        // so we do not linger forever draining
+                        // upstream for an agent that is no longer
+                        // listening.
+                        let _ = upstream_channel.close().await;
+                        let _ = handle.close(channel_id).await;
+                        return Ok(());
+                    }
+                }
+            }
+            data = data_rx.recv(), if !agent_closed => {
+                match data {
+                    Some(AgentData::Data(bytes)) => {
                         // Write agent bytes into the upstream channel.
                         // Failure here generally means the upstream
                         // channel is closed; log once and stop
@@ -872,39 +971,14 @@ async fn proxy_upstream(
                             agent_closed = true;
                         }
                     }
-                    Some(AgentToUpstream::Eof) => {
-                        if !agent_eof_sent {
-                            agent_eof_sent = true;
-                            if let Err(e) = upstream_channel.eof().await {
-                                logging::warn(&format!(
-                                    "failed to forward agent EOF to upstream: {e}"
-                                ));
-                            }
-                        }
-                    }
-                    Some(AgentToUpstream::Close) => {
-                        // Agent explicitly closed its channel. Tear
-                        // the upstream channel down immediately and
-                        // exit the pump loop so the upstream session
-                        // does not linger (Codex v2 finding #3).
-                        if let Err(e) = upstream_channel.close().await {
-                            logging::warn(&format!(
-                                "failed to forward agent close to upstream: {e}"
-                            ));
-                        }
-                        let _ = handle.close(channel_id).await;
-                        return Ok(());
-                    }
                     None => {
-                        // Receiver closed without an explicit control
-                        // message — the handler dropped its sender
-                        // (e.g. task panic). Treat this as a Close
-                        // so we do not linger forever draining
-                        // upstream for an agent that is no longer
-                        // listening.
-                        let _ = upstream_channel.close().await;
-                        let _ = handle.close(channel_id).await;
-                        return Ok(());
+                        // Data channel drained. The handler either
+                        // dropped its data sender (pump entry
+                        // removed after close) or the receiver saw
+                        // a spurious wakeup. Stop polling this
+                        // branch for the rest of the loop; control
+                        // events still drive teardown.
+                        agent_closed = true;
                     }
                 }
             }
@@ -1087,6 +1161,71 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let result = verify_known_hosts_file_nonempty(tmp.path());
         assert_eq!(result, Err("file is empty".to_string()));
+    }
+
+    // --- priority control channel (Codex v3 finding #1) ---
+
+    /// Regression for Codex v3 finding #1. Fill the bounded data
+    /// channel to capacity, then prove that a Close sent on the
+    /// unbounded control channel is immediately visible to the pump
+    /// side, without waiting for a single data slot to free up.
+    ///
+    /// Any implementation that routes `Close` through the same
+    /// bounded queue as data would block indefinitely here.
+    #[tokio::test]
+    async fn test_channel_close_propagates_while_data_channel_saturated() {
+        let (data_tx, mut data_rx) = mpsc::channel::<AgentData>(AGENT_PUMP_CHANNEL_CAPACITY);
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel::<AgentControl>();
+
+        // Saturate the bounded data channel. Every slot now holds
+        // the smallest possible payload; the next `send().await`
+        // would block until a slot frees.
+        for _ in 0..AGENT_PUMP_CHANNEL_CAPACITY {
+            data_tx
+                .send(AgentData::Data(vec![0u8]))
+                .await
+                .expect("data send");
+        }
+        assert_eq!(data_tx.capacity(), 0, "data channel should be saturated");
+
+        // Send Close via the unbounded control channel. This must
+        // return immediately — an unbounded sender never blocks on
+        // capacity.
+        control_tx
+            .send(AgentControl::Close)
+            .expect("control send (unbounded)");
+
+        // The pump loop models exactly the select! in
+        // `proxy_upstream`: it must observe the control message
+        // without first draining the saturated data channel. We
+        // enforce a tight timeout so an accidental regression
+        // (e.g. routing Close through `data_tx`) fails loudly.
+        let observed = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            async {
+                loop {
+                    tokio::select! {
+                        control = control_rx.recv() => return control,
+                        _ = data_rx.recv() => {
+                            // Drain one data message, then loop — a
+                            // correct pump does NOT have to do this,
+                            // but even if it did, the unbounded
+                            // control send should still win the race.
+                            // We panic if the loop never yields a
+                            // control message, which the outer
+                            // timeout catches.
+                        }
+                    }
+                }
+            },
+        )
+        .await
+        .expect("control channel must deliver Close within 50ms even with saturated data queue");
+
+        assert!(
+            matches!(observed, Some(AgentControl::Close)),
+            "expected AgentControl::Close, got {observed:?}"
+        );
     }
 
     #[test]

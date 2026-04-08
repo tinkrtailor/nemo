@@ -2215,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "nautiloop-sidecar"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "bytes",
  "chrono",
