@@ -762,3 +762,250 @@ async fn test_git_ssh_proxy_bidirectional_no_starvation() {
     let _ = shutdown_tx.send(true);
     let _ = tokio::time::timeout(Duration::from_secs(5), sidecar_handle).await;
 }
+
+// ==========================================================================
+// Codex v3 finding #3: e2e reject-path coverage.
+// ==========================================================================
+//
+// The reject paths (non-git exec, bare git-upload-pack, bare
+// git-receive-pack, mismatched repo path) were previously only covered
+// by pure parsing / path-matching unit tests. A regression that silently
+// broke wire-level `exit_status_request(channel, 1)` propagation would
+// not fail any existing test.
+//
+// The tests below spin the sidecar up against the same mock upstream
+// used by the happy-path test, send a single exec request whose command
+// triggers a specific reject branch, and assert that the agent observes
+// `ChannelMsg::ExitStatus { exit_status: 1 }` on the wire.
+//
+// Per FR-17, these share a helper (`drive_ssh_proxy_with_command`) with
+// the happy-path test. The starvation regression test above uses a
+// different mock upstream (continuous-stream emitter) and is left alone.
+
+/// Outcome of driving the SSH proxy with a single exec command.
+struct ProxyResult {
+    /// Exit status observed on the agent channel, if any.
+    exit_status: Option<u32>,
+    /// Bytes the agent received on `ChannelMsg::Data` before the
+    /// channel closed. Used by the happy-path test; the reject tests
+    /// ignore it.
+    agent_received: Vec<u8>,
+    /// Did we see `saw_reply_payload` during the drive loop? Only
+    /// meaningful when a non-empty `reply_bytes` was supplied.
+    saw_reply_payload: bool,
+}
+
+/// Drive the SSH proxy end-to-end with a single exec command.
+///
+/// Spins up the mock upstream used by the happy-path test, writes a
+/// tempfile key + known_hosts, starts the sidecar against an ephemeral
+/// loopback port, connects as the agent, opens a session channel, and
+/// sends `exec(command)`. Drives `channel.wait()` until either the exit
+/// status arrives or the channel closes, with a hard 5s deadline.
+///
+/// `reply_bytes` is what the mock upstream will push back to the agent
+/// after the exec lands. For reject-path tests, pass `Vec::new()` — the
+/// sidecar rejects the exec before dialing upstream, so the mock is
+/// never reached.
+async fn drive_ssh_proxy_with_command(command: &str, reply_bytes: Vec<u8>) -> ProxyResult {
+    // ----- Mock upstream -----
+    let (mock_addr, mock_host_key, _mock_rx) = spawn_mock_upstream(reply_bytes.clone()).await;
+
+    // ----- Key + known_hosts -----
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let key_path = tmp.path().join("id_ed25519");
+    let agent_key =
+        PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519).expect("agent key");
+    write_private_key(&key_path, &agent_key);
+    let known_hosts_path = tmp.path().join("known_hosts");
+    write_known_hosts(
+        &known_hosts_path,
+        &mock_addr.ip().to_string(),
+        mock_addr.port(),
+        &mock_host_key,
+    );
+
+    // ----- Sidecar -----
+    let sidecar_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("sidecar bind");
+    let sidecar_addr = sidecar_listener.local_addr().expect("sidecar addr");
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let drain_tracker = ConnectionTracker::new();
+    let remote = GitRemote {
+        host: mock_addr.ip().to_string(),
+        port: mock_addr.port(),
+        repo_path: ALLOWED_REPO.to_string(),
+    };
+    let auth_paths = SshAuthPaths::with_test_override_addr(
+        key_path.to_string_lossy().to_string(),
+        known_hosts_path.to_string_lossy().to_string(),
+        mock_addr,
+    );
+    let sidecar_handle = tokio::spawn({
+        let drain_tracker = drain_tracker.clone();
+        async move {
+            git_ssh_proxy::serve_with_auth(
+                sidecar_listener,
+                shutdown_rx,
+                drain_tracker,
+                remote,
+                auth_paths,
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // ----- Agent -----
+    let client_config = Arc::new(client::Config::default());
+    let mut session = client::connect(client_config, sidecar_addr, AgentClient)
+        .await
+        .expect("agent connect");
+    let auth = session
+        .authenticate_none("git")
+        .await
+        .expect("agent auth none");
+    assert!(auth.success(), "sidecar must accept auth_none");
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .expect("agent open session");
+    // NOTE: exec returns Err when the server responds with
+    // channel_failure — which is exactly what the sidecar does on a
+    // reject path (before it also sends exit_status 1 and closes).
+    // We deliberately ignore the `exec` result and rely on
+    // `channel.wait()` below to pick up the exit status off the wire.
+    let _ = channel.exec(true, command.as_bytes()).await;
+    // For the happy-path test, send EOF so the mock's `channel_eof`
+    // handler fires and emits exit_status 0. For reject paths this
+    // has no effect (the sidecar already closed the channel).
+    let _ = channel.eof().await;
+
+    // ----- Drive channel.wait() until exit status or close -----
+    let mut agent_received: Vec<u8> = Vec::new();
+    let mut observed_exit_status: Option<u32> = None;
+    let mut saw_reply_payload = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let msg = match tokio::time::timeout(remaining, channel.wait()).await {
+            Ok(Some(m)) => m,
+            Ok(None) => break,
+            Err(_) => break,
+        };
+        match msg {
+            russh::ChannelMsg::Data { data } => {
+                agent_received.extend_from_slice(&data);
+                if !reply_bytes.is_empty()
+                    && agent_received
+                        .windows(reply_bytes.len())
+                        .any(|w| w == reply_bytes)
+                {
+                    saw_reply_payload = true;
+                }
+            }
+            russh::ChannelMsg::ExitStatus { exit_status } => {
+                observed_exit_status = Some(exit_status);
+            }
+            russh::ChannelMsg::Close | russh::ChannelMsg::Eof => {
+                break;
+            }
+            _ => {}
+        }
+        if observed_exit_status.is_some() && (reply_bytes.is_empty() || saw_reply_payload) {
+            break;
+        }
+    }
+
+    // ----- Clean up -----
+    let _ = shutdown_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(5), sidecar_handle).await;
+
+    ProxyResult {
+        exit_status: observed_exit_status,
+        agent_received,
+        saw_reply_payload,
+    }
+}
+
+/// FR-14: non-git exec command must be rejected with exit status 1
+/// at the SSH wire level, not just at the `parse_exec` unit-test
+/// level.
+#[tokio::test]
+async fn test_e2e_rejects_non_git_exec_with_exit_status_1() {
+    let result = drive_ssh_proxy_with_command("ls /etc", Vec::new()).await;
+    assert_eq!(
+        result.exit_status,
+        Some(1),
+        "expected exit status 1 for non-git exec `ls /etc`, got {:?}",
+        result.exit_status,
+    );
+}
+
+/// FR-14: bare `git-upload-pack` (no repo path) must be rejected
+/// with exit status 1. This is the wire-level regression for the
+/// Go bare-exec bypass bug.
+#[tokio::test]
+async fn test_e2e_rejects_bare_git_upload_pack_with_exit_status_1() {
+    let result = drive_ssh_proxy_with_command("git-upload-pack", Vec::new()).await;
+    assert_eq!(
+        result.exit_status,
+        Some(1),
+        "expected exit status 1 for bare `git-upload-pack` (Go bypass bug fix), got {:?}",
+        result.exit_status,
+    );
+}
+
+/// FR-14: bare `git-receive-pack` (no repo path) must also be
+/// rejected with exit status 1.
+#[tokio::test]
+async fn test_e2e_rejects_bare_git_receive_pack_with_exit_status_1() {
+    let result = drive_ssh_proxy_with_command("git-receive-pack", Vec::new()).await;
+    assert_eq!(
+        result.exit_status,
+        Some(1),
+        "expected exit status 1 for bare `git-receive-pack`, got {:?}",
+        result.exit_status,
+    );
+}
+
+/// FR-14: `git-upload-pack 'wrong/repo.git'` (mismatched repo path)
+/// must be rejected with exit status 1.
+#[tokio::test]
+async fn test_e2e_rejects_mismatched_repo_path_with_exit_status_1() {
+    let result =
+        drive_ssh_proxy_with_command("git-upload-pack 'someone-else/repo.git'", Vec::new()).await;
+    assert_eq!(
+        result.exit_status,
+        Some(1),
+        "expected exit status 1 for mismatched repo path, got {:?}",
+        result.exit_status,
+    );
+}
+
+/// FR-17: happy-path regression reusing the shared helper. Equivalent
+/// to `test_git_ssh_proxy_pipes_bidirectional_bytes` but drives the
+/// proxy via `drive_ssh_proxy_with_command` so the helper keeps real
+/// exercise of the success branch alongside the reject paths.
+#[tokio::test]
+async fn test_e2e_accepts_git_upload_pack_with_exit_status_0() {
+    let reply = b"MOCK_UPSTREAM_REPLY_PAYLOAD_HELPER".to_vec();
+    let result =
+        drive_ssh_proxy_with_command(&format!("git-upload-pack '{ALLOWED_REPO}'"), reply.clone())
+            .await;
+    assert!(
+        result.saw_reply_payload,
+        "agent did not receive the mock upstream's reply payload via helper (got {} bytes)",
+        result.agent_received.len(),
+    );
+    assert_eq!(
+        result.exit_status,
+        Some(0),
+        "expected upstream exit status 0 to propagate end-to-end via helper, got {:?}",
+        result.exit_status,
+    );
+}

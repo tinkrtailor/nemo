@@ -86,24 +86,36 @@ pin-project-lite = "0.2"
 [dev-dependencies]
 tempfile = "3"
 
-# `test-utils` exposes the `SshAuthPaths::with_test_override_addr`
-# constructor and the backing `test_override_addr` field. The feature
-# is NOT part of `default` — a release build of `nautiloop-sidecar`
-# must never include it, so that no downstream library consumer can
-# bypass the FR-18 SSRF protection. The git SSH proxy integration
-# test at `tests/git_ssh_proxy_e2e.rs` declares this feature under
-# `required-features` so `cargo test` automatically enables it when
-# the integration target is selected. Invocation that exercises the
-# integration test explicitly:
+# Internal test infrastructure only. Not part of the public API.
+# Downstream crates MUST NOT enable this feature. Setting it in a
+# production build re-enables the SSH SSRF bypass path used by
+# integration tests.
 #
-#     cargo test -p nautiloop-sidecar --features test-utils
+# `__test_utils` exposes the `SshAuthPaths::with_test_override_addr`
+# constructor and the backing `test_override_addr` field. The double-
+# underscore prefix (Codex v3 finding #2) signals privacy and matches
+# the convention other crates use for test-only features that must
+# not leak into downstream release builds.
+#
+# `__test_utils` is NOT part of `default` — a release build of
+# `nautiloop-sidecar` must never include it, so that no downstream
+# library consumer can bypass the FR-18 SSRF protection. The git
+# SSH proxy integration test at `tests/git_ssh_proxy_e2e.rs`
+# declares this feature under `required-features` so `cargo test`
+# automatically enables it when the integration target is selected.
+# Invocation that exercises the integration test explicitly:
+#
+#     cargo test -p nautiloop-sidecar --features __test_utils
 #
 # `cargo test --workspace` does NOT enable this feature and will
 # therefore skip the integration test target (unit tests still run).
+# A lint script at `sidecar/scripts/lint-no-test-utils-in-prod.sh`
+# exists to fail CI if any workflow tries to enable this feature on
+# a release build step.
 [features]
-test-utils = []
+__test_utils = []
 
 [[test]]
 name = "git_ssh_proxy_e2e"
 path = "tests/git_ssh_proxy_e2e.rs"
-required-features = ["test-utils"]
+required-features = ["__test_utils"]
