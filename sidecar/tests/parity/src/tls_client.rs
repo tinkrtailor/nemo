@@ -97,6 +97,19 @@ mod tests {
     }
 
     #[test]
+    fn committed_test_ca_fixture_loads() {
+        // This test is the in-sandbox gate for the Step 2 fixtures:
+        // the harness binary needs to trust the committed test CA
+        // at runtime, so rustls must accept the PEM bytes we
+        // committed under fixtures/test-ca/ca.pem. If this test
+        // fails, either the CA was regenerated incorrectly OR the
+        // PEM got corrupted on disk.
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-ca/ca.pem");
+        build_harness_client_config(path).expect("committed test CA must load");
+    }
+
+    #[test]
     fn malformed_pem_yields_parse_or_add_error() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(

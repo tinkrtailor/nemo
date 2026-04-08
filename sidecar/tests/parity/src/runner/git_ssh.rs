@@ -322,4 +322,32 @@ mod tests {
             vec![0xde, 0xad, 0xbe, 0xef]
         );
     }
+
+    #[test]
+    fn committed_harness_client_key_parses_as_openssh() {
+        // Step 2 fixture gate: the committed Ed25519 private key
+        // under fixtures/go-secrets/ssh-key/id_ed25519 must parse
+        // via russh's `PrivateKey::from_openssh`, otherwise the
+        // `git_ssh` runner cannot authenticate to either sidecar.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/go-secrets/ssh-key/id_ed25519");
+        let pem = std::fs::read_to_string(&path).expect("committed client ssh key must exist");
+        PrivateKey::from_openssh(&pem).expect("committed client ssh key must parse");
+    }
+
+    #[test]
+    fn rust_and_go_secrets_client_keys_are_identical() {
+        // Both sidecars must authenticate as the same client. The
+        // two mounts (go-secrets/ and rust-secrets/) hold identical
+        // key material — we verify that invariant here so an
+        // accidental divergence during fixture regeneration gets
+        // caught at cargo test time.
+        let go = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/go-secrets/ssh-key/id_ed25519");
+        let rust = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/rust-secrets/ssh-key/id_ed25519");
+        let g = std::fs::read(&go).expect("go key");
+        let r = std::fs::read(&rust).expect("rust key");
+        assert_eq!(g, r, "go and rust client keys must be byte-identical");
+    }
 }
