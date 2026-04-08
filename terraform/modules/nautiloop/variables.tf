@@ -79,19 +79,19 @@ variable "acme_email" {
 variable "control_plane_image" {
   description = "Control plane container image"
   type        = string
-  default     = "ghcr.io/tinkrtailor/nautiloop-control-plane:0.2.10"
+  default     = "ghcr.io/tinkrtailor/nautiloop-control-plane:0.3.0"
 }
 
 variable "agent_base_image" {
   description = "Agent base container image"
   type        = string
-  default     = "ghcr.io/tinkrtailor/nautiloop-agent-base:0.2.10"
+  default     = "ghcr.io/tinkrtailor/nautiloop-agent-base:0.3.0"
 }
 
 variable "sidecar_image" {
   description = "Auth sidecar container image"
   type        = string
-  default     = "ghcr.io/tinkrtailor/nautiloop-sidecar:0.2.10"
+  default     = "ghcr.io/tinkrtailor/nautiloop-sidecar:0.3.0"
 }
 
 # --- Optional: tuning ---
