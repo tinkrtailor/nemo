@@ -285,7 +285,7 @@ The alternative (manually verifying Rust streaming before writing the spec) was 
   - `anthropic_client_version_passthrough` — POST with client `anthropic-version: 2022-01-01`. Assert mock observed client value (passed through).
   - `openai_credential_refresh_per_request` — request 1, mutate credentials file on disk, request 2, assert request 2 uses new credentials on BOTH sides.
 
-  **Egress parity (6 cases):**
+  **Egress parity (7 cases):**
   - `egress_connect_egress_target` — CONNECT `egress-target:443` via the egress port. Assert tunnel established (bytes echo through mock-tcp-echo). Log destination `"egress-target:443"`.
   - `egress_connect_egress_target_no_port` — CONNECT `egress-target` (no port). Log destination `"egress-target:443"` (synthesized).
   - `egress_http_get_example` — GET `http://mock-example/foo` via egress port (plain HTTP proxy, absolute-form request URI). Log destination `"mock-example"` (no port, matches Go's `URL.Host`).
@@ -376,13 +376,41 @@ The alternative (manually verifying Rust streaming before writing the spec) was 
 
   **Subnet validation uses a WHITELIST of safe CIDR ranges, not a blacklist sample.** A blacklist approach is unsound: a straddling subnet like `9.255.0.0/15` (spanning 9.255.0.0–10.0.255.255) has public first and last addresses but includes `10.x.x.x` in the middle, and Docker can assign any address in the subnet to a container. Checking a single address, or even first-and-last, misses embedded private ranges (e.g., `168.0.0.0/7` includes link-local `169.254.0.0/16`).
 
-  The correct approach: the harness driver accepts an override subnet ONLY IF it is entirely within one of these known-safe ranges that neither sidecar blocks:
-  - `100.64.0.0/10` (RFC6598 CGNAT — the default)
+  The correct approach: the harness driver accepts a subnet (from `--subnet`, from `PARITY_NET_SUBNET`, or the default) ONLY IF it is entirely contained within one of these known-safe ranges that neither sidecar blocks:
+  - `100.64.0.0/10` (RFC6598 CGNAT — contains the default `100.64.0.0/24`)
   - `192.0.2.0/24` (RFC5737 TEST-NET-1)
   - `198.51.100.0/24` (RFC5737 TEST-NET-2)
   - `203.0.113.0/24` (RFC5737 TEST-NET-3)
 
-  These are all non-globally-routable test/documentation ranges that neither Go nor Rust SSRF logic blocks. The driver validates the proposed subnet via `ipnet::Ipv4Net::contains` semantics: `is_safe(user_cidr) := any(safe_range.contains(user_cidr) for safe_range in WHITELIST)`. The `contains` check is strict subset, so `user_cidr` must be entirely inside one of the whitelisted ranges — no straddling allowed. If the check fails, the driver exits with a clear error listing the allowed ranges.
+  Cross-checked against both sidecars' SSRF logic: neither Go (`images/sidecar/main.go:43-48`) nor Rust (`sidecar/src/ssrf.rs:94-99`) blocks these ranges.
+
+  **Validator runs on ALL subnet sources, not just `--subnet`.** The driver resolves the subnet in precedence order: `--subnet` flag → `PARITY_NET_SUBNET` env var → default `100.64.0.0/24`. Whatever subnet is chosen is then validated unconditionally. This catches: (a) a user who sets the env var directly without going through the flag, (b) a forked repo that changes the default, (c) a future spec revision that changes the default incorrectly. See the Driver program structure section below for the exact code shape.
+
+  **Containment check: use `ipnet::Ipv4Net::contains`.** The canonical semantics: `outer.contains(&inner)` returns `true` when `inner` is a subset of `outer`, **including the case `outer == inner`** — see the `ipnet` docs example `assert!(net.contains(&net))`. This is regular subset containment (not strict subset), which is exactly what the harness needs: `--subnet 100.64.0.0/10` passed as the user's explicit CGNAT range must validate against `100.64.0.0/10` in the whitelist. The earlier v5 draft incorrectly called this "strict subset" — that language is removed in v6 because strict subset would reject the equality case.
+
+  Validator pseudocode:
+  ```rust
+  fn validate_subnet_whitelist(subnet_str: &str) -> anyhow::Result<()> {
+      let subnet: ipnet::Ipv4Net = subnet_str.parse()
+          .context("PARITY_NET_SUBNET must be an IPv4 CIDR")?;
+      const SAFE: &[&str] = &[
+          "100.64.0.0/10",
+          "192.0.2.0/24",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+      ];
+      for safe_cidr in SAFE {
+          let safe: ipnet::Ipv4Net = safe_cidr.parse().expect("const CIDR");
+          if safe.contains(&subnet) {
+              return Ok(());
+          }
+      }
+      anyhow::bail!(
+          "subnet {subnet_str} is not within any whitelisted range: {SAFE:?}. \
+           Neither sidecar blocks these ranges; see FR-29 for the rationale."
+      )
+  }
+  ```
 
   **This validator is independent of the sidecar's SSRF blocklist** — no path dependency on `nautiloop-sidecar`, no import, no drift risk. The whitelist is simpler and sound. If a future Rust sidecar change tightens SSRF to also block one of these test ranges, the harness naturally fails at `compose up` time (the sidecar will block mock traffic) and the operator updates the whitelist. That's a loud failure mode, not a silent one.
 
@@ -518,10 +546,18 @@ async fn main() -> anyhow::Result<()> {
     let corpus = load_corpus("corpus/")?;
     let filtered = filter_corpus(&corpus, &args);
 
-    if let Some(subnet) = &args.subnet {
-        std::env::set_var("PARITY_NET_SUBNET", subnet);
-        validate_subnet_not_ssrf_blocked(subnet)?;  // FR-29 guard
-    }
+    // FR-29 subnet resolution + validation. Resolve in this precedence:
+    //   1. --subnet CLI flag (highest)
+    //   2. PARITY_NET_SUBNET env var
+    //   3. default 100.64.0.0/24
+    // Then ALWAYS validate the resolved subnet against the whitelist,
+    // regardless of source. This catches a malformed env var, a
+    // default override in a forked repo, or anything else.
+    let subnet = args.subnet.clone()
+        .or_else(|| std::env::var("PARITY_NET_SUBNET").ok())
+        .unwrap_or_else(|| "100.64.0.0/24".to_string());
+    validate_subnet_whitelist(&subnet)?;  // FR-29 guard — always runs
+    std::env::set_var("PARITY_NET_SUBNET", &subnet);
 
     let compose = ComposeStack::new("docker-compose.yml");
     if !args.no_rebuild { compose.build().await?; }
@@ -583,7 +619,7 @@ Six commits on branch `feat/sidecar-parity-harness`:
 - model_proxy/egress/git_ssh/health driver modules
 - Normalization + diffing
 - Mock introspection client
-- First full run: all 10 model_proxy parity + 6 egress parity + 5 ssh parity + 2 health parity + 1 dns-error parity = 24 parity cases GREEN; all 5 divergence cases GREEN in divergent direction (including the two SSE streaming cases that prove Rust fixes #66)
+- First full run: all 10 model_proxy parity + 7 egress parity + 1 dns-error parity + 5 ssh parity + 2 health parity = 25 parity cases GREEN; all 5 divergence cases GREEN in divergent direction (including the two SSE streaming cases that prove Rust fixes #66)
 
 ### Commit 5 — CI workflows + lint extension
 - `.github/workflows/ci.yml` (3 jobs, no path filter)
@@ -610,7 +646,7 @@ Six commits on branch `feat/sidecar-parity-harness`:
 
 - Cold (`--stop`, full build) < 10 minutes
 - Warm (`--stop --no-rebuild`) < 5 minutes per NFR-2
-- All 24 parity cases green, all 5 divergence cases green in their divergent direction
+- All 25 parity cases green, all 5 divergence cases green in their divergent direction
 - **Streaming divergence specifically**: Rust chunks arrive ~100ms apart (±50ms); Go delivers nothing or all at once at upstream-close. Both directions are observable within a 1s window.
 - Intentional regression check: modify mock-openai to drop a header, re-run, diff points at the right case
 - Intentional regression check: flip a divergence assertion, that case fails
@@ -742,3 +778,13 @@ Convergence pattern: 14 → 12 → 5 → 5 (severity dropping: v3 had 1 P0 V1; v
 - **P2-4 (Architecture section stale):** FIXED. The Architecture section's topology annotation and host-port-mapping list now match FR-2 exactly: mock-tcp-echo publishes :443 → 50050, and the complete 50010-50050 + 49990-49993 map is documented in one place.
 
 - **P2-5 (stale case name `divergence_sse_streaming_incremental_chunks`):** FIXED. Replaced the single stale reference on line 46 with the two actual case names (`divergence_sse_streaming_openai` and `divergence_sse_streaming_anthropic`).
+
+### v5 → v6: Codex v5 review (3 findings: 1 P1, 2 P2)
+
+Convergence pattern: 14 → 12 → 5 → 5 → 3 (severity dropping: v5 has NO P0).
+
+- **P1-1 (FR-29 validator only fires on `--subnet`, skips env var and default):** FIXED. The driver pseudocode in "Driver program structure" now resolves the subnet in precedence order (`--subnet` → `PARITY_NET_SUBNET` → default `100.64.0.0/24`) and calls `validate_subnet_whitelist` unconditionally on the resolved value. Validator runs for every code path — flag, env, or default. FR-29 text updated to explicitly say "Validator runs on ALL subnet sources, not just `--subnet`."
+
+- **P2-2 (FR-29 wording "strict subset" contradicts `ipnet::Ipv4Net::contains` semantics):** FIXED. The `contains` check IS regular subset including equality (`assert!(net.contains(&net))` per ipnet docs). The earlier v5 "strict subset" language would have incorrectly rejected `--subnet 100.64.0.0/10` against itself. v6 clarifies that containment is regular subset (including equality) and removes "strict subset / no straddling" language. Pseudocode added to FR-29 showing the correct check.
+
+- **P2-3 (parity case totals stale):** FIXED. FR-22 egress header corrected from "6 cases" to "7 cases" (the actual enumerated list). Migration plan commit 4 and Test plan end-to-end run expectations updated from "24 parity cases" to "25 parity cases" (10 model_proxy + 7 egress + 1 dns-error + 5 ssh + 2 health = 25). Divergence case count unchanged at 5.
