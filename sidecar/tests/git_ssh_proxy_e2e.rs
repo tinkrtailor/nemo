@@ -25,7 +25,11 @@
 //! 2. Upstream -> agent data flows: bytes the mock upstream writes
 //!    via `session.data(...)` reach the agent's `ChannelMsg::Data`
 //!    receiver.
-//! 3. Upstream exit status propagates back to the agent.
+//! 3. Upstream exit status propagates back to the agent end-to-end:
+//!    the mock upstream explicitly emits exit status 0, and the
+//!    agent must observe `ChannelMsg::ExitStatus { exit_status: 0 }`
+//!    before the channel closes (Codex v2 finding #5 — previously
+//!    this test only asserted that reply bytes arrived).
 //!
 //! The test uses ephemeral ports, tempfile-mounted key + known_hosts,
 //! and the `SshAuthPaths::test_override_addr` escape hatch to bypass
@@ -267,11 +271,11 @@ async fn test_git_ssh_proxy_pipes_bidirectional_bytes() {
         port: mock_addr.port(),
         repo_path: ALLOWED_REPO.to_string(),
     };
-    let auth_paths = SshAuthPaths {
-        key_path: key_path.to_string_lossy().to_string(),
-        known_hosts_path: known_hosts_path.to_string_lossy().to_string(),
-        test_override_addr: Some(mock_addr),
-    };
+    let auth_paths = SshAuthPaths::with_test_override_addr(
+        key_path.to_string_lossy().to_string(),
+        known_hosts_path.to_string_lossy().to_string(),
+        mock_addr,
+    );
     let sidecar_handle = tokio::spawn({
         let drain_tracker = drain_tracker.clone();
         async move {
@@ -353,15 +357,28 @@ async fn test_git_ssh_proxy_pipes_bidirectional_bytes() {
         std::str::from_utf8(upstream_payload).unwrap_or("<non-utf8>"),
     );
 
-    // ----- 7. Assert the agent got the reply bytes -----
+    // ----- 7. Assert the agent got the reply bytes and exit status -----
+    //
+    // Codex v2 finding #5: we must NOT stop reading the moment the
+    // reply payload is observed — the mock upstream explicitly emits
+    // exit status 0, and asserting end-to-end propagation of that
+    // status is the whole point of the test. Drive the loop until
+    // EITHER we see `ExitStatus` OR we see `Close`/`Eof`, so that a
+    // regression that drops the exit status is caught instead of
+    // silently ignored.
     let mut agent_received: Vec<u8> = Vec::new();
+    let mut observed_exit_status: Option<u32> = None;
+    let mut saw_reply_payload = false;
     let agent_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let remaining = agent_deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             panic!(
-                "timed out waiting for upstream reply bytes on agent channel (got {} bytes)",
-                agent_received.len()
+                "timed out waiting for upstream reply + exit status on agent channel \
+                 (got {} bytes, saw_reply_payload={}, exit_status={:?})",
+                agent_received.len(),
+                saw_reply_payload,
+                observed_exit_status,
             );
         }
         let msg = tokio::time::timeout(remaining, channel.wait()).await;
@@ -369,8 +386,9 @@ async fn test_git_ssh_proxy_pipes_bidirectional_bytes() {
             Ok(Some(m)) => m,
             Ok(None) => break,
             Err(_) => panic!(
-                "timed out waiting on channel.wait() (got {} bytes)",
-                agent_received.len()
+                "timed out waiting on channel.wait() (got {} bytes, exit_status={:?})",
+                agent_received.len(),
+                observed_exit_status,
             ),
         };
         match msg {
@@ -380,29 +398,367 @@ async fn test_git_ssh_proxy_pipes_bidirectional_bytes() {
                     .windows(reply_payload.len())
                     .any(|w| w == reply_payload)
                 {
-                    break;
+                    saw_reply_payload = true;
                 }
             }
-            russh::ChannelMsg::ExitStatus { exit_status: _ } => {
-                // Exit status arrived before we saw the reply. That
-                // would mean the payload was dropped; fall through and
-                // let the outer assertion fail.
+            russh::ChannelMsg::ExitStatus { exit_status } => {
+                observed_exit_status = Some(exit_status);
+                // Keep reading briefly to collect any trailing close/eof
+                // and any data that arrives ordered after the exit
+                // status frame on the wire.
+            }
+            russh::ChannelMsg::Close | russh::ChannelMsg::Eof => {
+                // Channel is tearing down — stop polling. We fall
+                // through to the assertions below which will fail
+                // loudly if the exit status never arrived.
                 break;
             }
-            russh::ChannelMsg::Close | russh::ChannelMsg::Eof => break,
             _ => {}
+        }
+        // Exit the loop once BOTH requirements are satisfied so the
+        // test doesn't hang if the sidecar closes cleanly.
+        if saw_reply_payload && observed_exit_status.is_some() {
+            break;
         }
     }
     assert!(
-        agent_received
-            .windows(reply_payload.len())
-            .any(|w| w == reply_payload),
+        saw_reply_payload,
         "agent did not receive the mock upstream's reply payload (got {} bytes)",
         agent_received.len()
+    );
+    assert_eq!(
+        observed_exit_status,
+        Some(0),
+        "expected upstream exit status 0 to propagate end-to-end \
+         through the sidecar; instead observed {observed_exit_status:?}"
     );
 
     // ----- 8. Clean up -----
     let _ = shutdown_tx.send(true);
     // The sidecar may take a moment to observe the shutdown.
+    let _ = tokio::time::timeout(Duration::from_secs(5), sidecar_handle).await;
+}
+
+// ------------------------------------------------------------------
+// Regression test for Codex v2 finding #2.
+// ------------------------------------------------------------------
+//
+// A biased `tokio::select!` with the upstream→agent branch listed
+// first will, in the presence of a continuously readable upstream,
+// starve the agent→upstream direction indefinitely: the select
+// keeps yielding the upstream branch because it has data available
+// and never gets around to polling `pump_rx`.
+//
+// This test reproduces that pathology by running a mock upstream
+// that emits a steady stream of small frames from a background
+// task the moment `exec_request` lands. If the sidecar's proxy
+// loop is `biased`, agent bytes never reach the mock and the
+// assertion below times out. Without `biased`, both directions
+// make progress and the assertion passes within the deadline.
+
+#[derive(Clone)]
+struct StarvationUpstream {
+    received_tx: mpsc::UnboundedSender<Vec<u8>>,
+}
+
+#[derive(Clone)]
+struct StarvationUpstreamHandler {
+    received_tx: mpsc::UnboundedSender<Vec<u8>>,
+}
+
+impl rserver::Server for StarvationUpstream {
+    type Handler = StarvationUpstreamHandler;
+
+    fn new_client(&mut self, _peer: Option<SocketAddr>) -> Self::Handler {
+        StarvationUpstreamHandler {
+            received_tx: self.received_tx.clone(),
+        }
+    }
+}
+
+impl rserver::Handler for StarvationUpstreamHandler {
+    type Error = russh::Error;
+
+    async fn auth_publickey(
+        &mut self,
+        _user: &str,
+        _key: &russh::keys::ssh_key::PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        Ok(Auth::Accept)
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        _channel: Channel<Msg>,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        _data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        // Spawn a background task that keeps the upstream branch
+        // of the sidecar's `tokio::select!` continuously ready. A
+        // biased select would keep yielding this branch forever
+        // and starve `pump_rx`, so the assertion below would
+        // timeout. The mock pushes frames as fast as russh lets
+        // us — the intent is "always something queued in the
+        // upstream direction".
+        let handle = session.handle();
+        tokio::spawn(async move {
+            for i in 0..2000u32 {
+                let frame = format!("UP_FRAME_{i:04}\n");
+                if handle
+                    .data(channel, bytes::Bytes::from(frame.into_bytes()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        _channel: ChannelId,
+        data: &[u8],
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let _ = self.received_tx.send(data.to_vec());
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let _ = session.exit_status_request(channel, 0);
+        let _ = session.eof(channel);
+        let _ = session.close(channel);
+        Ok(())
+    }
+}
+
+async fn spawn_starvation_upstream() -> (SocketAddr, PrivateKey, mpsc::UnboundedReceiver<Vec<u8>>) {
+    let host_key =
+        PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519).expect("host key");
+    let host_key_public = host_key.clone();
+
+    let methods_pk = {
+        let mut m = MethodSet::empty();
+        m.push(MethodKind::PublicKey);
+        m
+    };
+    let config = Arc::new(rserver::Config {
+        server_id: russh::SshId::Standard(std::borrow::Cow::Borrowed(
+            "SSH-2.0-nautiloop-starvation-upstream",
+        )),
+        methods: methods_pk,
+        auth_rejection_time: Duration::from_secs(1),
+        auth_rejection_time_initial: Some(Duration::from_millis(10)),
+        keys: vec![host_key],
+        inactivity_timeout: Some(Duration::from_secs(10)),
+        nodelay: true,
+        ..Default::default()
+    });
+
+    let (rx_tx, rx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let mut server = StarvationUpstream { received_tx: rx_tx };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let addr = listener.local_addr().expect("mock local addr");
+    tokio::spawn(async move {
+        let _ = server.run_on_socket(config, &listener).await;
+    });
+
+    (addr, host_key_public, rx_rx)
+}
+
+/// Interleaved bidirectional flow with tight deadlines.
+///
+/// Codex v2 finding #2: the proxy_upstream loop used a biased
+/// `tokio::select!` with the upstream→agent branch listed first,
+/// which under load can starve the agent→upstream direction.
+///
+/// This test runs a mock upstream that emits a sustained stream of
+/// small frames the moment the exec lands, while the agent also
+/// writes a short sequence of small frames with an interleave
+/// sleep. A healthy (unbiased) proxy delivers both directions
+/// within a 2s deadline; a regression that (a) drops the pump
+/// entirely or (b) wires agent→upstream behind an unfair scheduler
+/// will fail here.
+#[tokio::test]
+async fn test_git_ssh_proxy_bidirectional_no_starvation() {
+    // ----- 1. Mock upstream that emits a continuous stream -----
+    let (mock_addr, mock_host_key, mut mock_rx) = spawn_starvation_upstream().await;
+
+    // ----- 2. Key + known_hosts for sidecar -> mock auth -----
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let key_path = tmp.path().join("id_ed25519");
+    let agent_key =
+        PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519).expect("agent key");
+    write_private_key(&key_path, &agent_key);
+    let known_hosts_path = tmp.path().join("known_hosts");
+    write_known_hosts(
+        &known_hosts_path,
+        &mock_addr.ip().to_string(),
+        mock_addr.port(),
+        &mock_host_key,
+    );
+
+    // ----- 3. Sidecar git SSH proxy -----
+    let sidecar_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("sidecar bind");
+    let sidecar_addr = sidecar_listener.local_addr().expect("sidecar addr");
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let drain_tracker = ConnectionTracker::new();
+    let remote = GitRemote {
+        host: mock_addr.ip().to_string(),
+        port: mock_addr.port(),
+        repo_path: ALLOWED_REPO.to_string(),
+    };
+    let auth_paths = SshAuthPaths::with_test_override_addr(
+        key_path.to_string_lossy().to_string(),
+        known_hosts_path.to_string_lossy().to_string(),
+        mock_addr,
+    );
+    let sidecar_handle = tokio::spawn({
+        let drain_tracker = drain_tracker.clone();
+        async move {
+            git_ssh_proxy::serve_with_auth(
+                sidecar_listener,
+                shutdown_rx,
+                drain_tracker,
+                remote,
+                auth_paths,
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // ----- 4. Agent connect + exec -----
+    let client_config = Arc::new(client::Config::default());
+    let mut session = client::connect(client_config, sidecar_addr, AgentClient)
+        .await
+        .expect("agent connect");
+    let auth = session
+        .authenticate_none("git")
+        .await
+        .expect("agent auth none");
+    assert!(auth.success());
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .expect("agent open session");
+    let exec_bytes = format!("git-upload-pack '{ALLOWED_REPO}'");
+    channel
+        .exec(true, exec_bytes.as_bytes())
+        .await
+        .expect("agent exec");
+
+    // ----- 5. Interleaved traffic -----
+    //
+    // Push a few small agent frames. Each `channel.data(...).await`
+    // runs concurrently with the mock's background stream; on a
+    // healthy proxy both directions make progress and the mock's
+    // `Handler::data` observes the agent bytes within the deadline.
+    // On a biased proxy the agent frames pile up in the pump
+    // channel and never reach the mock — the assertion below times
+    // out.
+    let agent_frames: &[&[u8]] = &[
+        b"DOWN_FRAME_0001_AAAAAAAAAAAAA",
+        b"DOWN_FRAME_0002_BBBBBBBBBBBBB",
+        b"DOWN_FRAME_0003_CCCCCCCCCCCCC",
+        b"DOWN_FRAME_0004_DDDDDDDDDDDDD",
+        b"DOWN_FRAME_0005_EEEEEEEEEEEEE",
+    ];
+    for frame in agent_frames {
+        channel.data(*frame).await.expect("agent send data frame");
+        // Small sleep so the upstream branch definitely has a bunch
+        // of frames queued between each agent write. A biased select
+        // would spin on upstream during this gap.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // ----- 6. Assert all agent frames arrive at the mock -----
+    //
+    // Short deadline (2s) — a healthy proxy delivers them in tens of
+    // milliseconds; a biased proxy never delivers them.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut mock_received: Vec<u8> = Vec::new();
+    let mut matched_frames = 0usize;
+    while matched_frames < agent_frames.len() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            panic!(
+                "agent->upstream starvation: only {}/{} agent frames reached mock upstream \
+                 within 2s deadline (biased select regression? got {} bytes total)",
+                matched_frames,
+                agent_frames.len(),
+                mock_received.len(),
+            );
+        }
+        let frame = tokio::time::timeout(remaining, mock_rx.recv())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "agent->upstream starvation: mock upstream did not receive any agent frame \
+                 within remaining deadline (matched {}/{}, got {} bytes)",
+                    matched_frames,
+                    agent_frames.len(),
+                    mock_received.len(),
+                )
+            });
+        let Some(bytes) = frame else { break };
+        mock_received.extend_from_slice(&bytes);
+        matched_frames = agent_frames
+            .iter()
+            .filter(|needle| mock_received.windows(needle.len()).any(|w| w == **needle))
+            .count();
+    }
+    assert_eq!(
+        matched_frames,
+        agent_frames.len(),
+        "mock upstream saw only {matched_frames}/{} agent frames; rest were starved by biased select",
+        agent_frames.len(),
+    );
+
+    // Also verify the other direction landed something — the mock
+    // emits 200 frames; we only need to see a couple so the check
+    // is quick and non-flaky.
+    let agent_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut agent_down_bytes: Vec<u8> = Vec::new();
+    while tokio::time::Instant::now() < agent_deadline {
+        let remaining = agent_deadline.saturating_duration_since(tokio::time::Instant::now());
+        let msg = match tokio::time::timeout(remaining, channel.wait()).await {
+            Ok(Some(m)) => m,
+            Ok(None) => break,
+            Err(_) => break,
+        };
+        if let russh::ChannelMsg::Data { data } = msg {
+            agent_down_bytes.extend_from_slice(&data);
+            if agent_down_bytes.windows(9).any(|w| w == b"UP_FRAME_") {
+                break;
+            }
+        }
+    }
+    assert!(
+        agent_down_bytes.windows(9).any(|w| w == b"UP_FRAME_"),
+        "upstream->agent direction produced no frames in 2s; expected continuous stream"
+    );
+
+    // ----- 7. Clean up -----
+    let _ = channel.eof().await;
+    let _ = shutdown_tx.send(true);
     let _ = tokio::time::timeout(Duration::from_secs(5), sidecar_handle).await;
 }

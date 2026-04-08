@@ -47,11 +47,13 @@ use crate::logging;
 use crate::shutdown::ConnectionTracker;
 use crate::ssrf;
 
-/// Messages pushed from the russh server `Handler::data` / `channel_eof`
-/// callbacks into the spawned upstream proxy task. The proxy task pumps
-/// these messages to the upstream SSH channel's writer. Using an mpsc
-/// channel lets the handler stay synchronous while the upstream flow is
-/// driven by its own async task.
+/// Messages pushed from the russh server `Handler::data`,
+/// `channel_eof`, and `channel_close` callbacks into the spawned
+/// upstream proxy task. The proxy task pumps these messages to the
+/// upstream SSH channel's writer. Using a bounded mpsc channel lets
+/// the handler apply backpressure to the agent SSH connection via
+/// russh's flow-control window instead of buffering unboundedly
+/// inside the sidecar.
 #[derive(Debug)]
 enum AgentToUpstream {
     /// Raw bytes from the agent channel that must be written to the
@@ -60,6 +62,10 @@ enum AgentToUpstream {
     /// The agent sent EOF. The upstream channel's stdin should be
     /// closed; any already-buffered data must flush first.
     Eof,
+    /// The agent closed its channel. The upstream channel should be
+    /// closed immediately and the pump task should exit so the
+    /// upstream session does not linger when the agent disappears.
+    Close,
 }
 
 /// Shared per-connection state that maps `ChannelId` to a sender the
@@ -67,7 +73,21 @@ enum AgentToUpstream {
 /// upstream proxy task. The map is held behind a sync `Mutex` because
 /// every access is a fast insert / lookup / remove — no `.await` is
 /// held while the lock is taken.
-type UpstreamPumpMap = Arc<Mutex<HashMap<ChannelId, mpsc::UnboundedSender<AgentToUpstream>>>>;
+///
+/// The sender is bounded ([`AGENT_PUMP_CHANNEL_CAPACITY`]) so that a
+/// slow upstream backpressures the agent SSH write path through
+/// russh's flow-control window instead of silently queuing an
+/// unbounded amount of bytes inside the sidecar.
+type UpstreamPumpMap = Arc<Mutex<HashMap<ChannelId, mpsc::Sender<AgentToUpstream>>>>;
+
+/// Bounded capacity for each per-channel agent→upstream pump queue.
+/// Picked small on purpose: each slot holds one SSH packet-sized
+/// `Vec<u8>` (≤ 32 KiB per russh defaults), so 64 slots cap the
+/// worst-case per-channel buffering around 2 MiB. The bound exists
+/// so `Handler::data` applies backpressure to the agent connection
+/// via russh's flow-control window instead of the sidecar silently
+/// accepting an unbounded push and OOMing.
+const AGENT_PUMP_CHANNEL_CAPACITY: usize = 64;
 
 /// Path to the agent-facing SSH private key used to authenticate to the
 /// upstream git server. Fixed mount per spec.
@@ -79,27 +99,58 @@ pub const KNOWN_HOSTS_PATH: &str = "/secrets/ssh-known-hosts/known_hosts";
 /// [`SSH_KEY_PATH`] / [`KNOWN_HOSTS_PATH`] defaults; tests pass
 /// temporary files so an end-to-end piping test can be wired up
 /// without touching `/secrets`.
+///
+/// The test-only `test_override_addr` escape hatch is gated behind
+/// the `test-utils` cargo feature. Release builds of
+/// `nautiloop-sidecar` (and any downstream crate that depends on the
+/// library without opting into `test-utils`) literally do not see
+/// the field, cannot construct a value with it populated, and
+/// therefore cannot bypass the FR-18 SSRF protection in
+/// [`ssrf::resolve_safe`]. See `Cargo.toml`'s `[features]` section.
 #[derive(Debug, Clone)]
 pub struct SshAuthPaths {
     pub key_path: String,
     pub known_hosts_path: String,
     /// Test-only escape hatch: if set, the upstream proxy dials this
     /// `SocketAddr` directly instead of running
-    /// [`ssrf::resolve_safe`]. Production **must** leave this `None`
-    /// so FR-18 SSRF protection remains intact. Only the
-    /// `git_ssh_proxy` module's `#[cfg(test)]` code and the
-    /// integration tests in this file construct a value with this
-    /// field populated.
-    pub test_override_addr: Option<std::net::SocketAddr>,
+    /// [`ssrf::resolve_safe`]. Production builds MUST NOT enable the
+    /// `test-utils` feature, so this field is absent and there is
+    /// no way for a library consumer to set it.
+    #[cfg(feature = "test-utils")]
+    pub(crate) test_override_addr: Option<std::net::SocketAddr>,
+}
+
+impl SshAuthPaths {
+    /// Build paths that point at the production `/secrets` mounts.
+    pub fn new(key_path: impl Into<String>, known_hosts_path: impl Into<String>) -> Self {
+        Self {
+            key_path: key_path.into(),
+            known_hosts_path: known_hosts_path.into(),
+            #[cfg(feature = "test-utils")]
+            test_override_addr: None,
+        }
+    }
+
+    /// Test-only constructor that populates the SSRF override.
+    /// Available only when the `test-utils` cargo feature is enabled,
+    /// so release builds cannot call it at all.
+    #[cfg(feature = "test-utils")]
+    pub fn with_test_override_addr(
+        key_path: impl Into<String>,
+        known_hosts_path: impl Into<String>,
+        override_addr: std::net::SocketAddr,
+    ) -> Self {
+        Self {
+            key_path: key_path.into(),
+            known_hosts_path: known_hosts_path.into(),
+            test_override_addr: Some(override_addr),
+        }
+    }
 }
 
 impl Default for SshAuthPaths {
     fn default() -> Self {
-        Self {
-            key_path: SSH_KEY_PATH.to_string(),
-            known_hosts_path: KNOWN_HOSTS_PATH.to_string(),
-            test_override_addr: None,
-        }
+        Self::new(SSH_KEY_PATH, KNOWN_HOSTS_PATH)
     }
 }
 /// FR-28 upstream SSH dial timeout.
@@ -439,6 +490,13 @@ impl server::Handler for GitSshHandler {
     // and the upstream never receives the pack-protocol bytes the git
     // client is streaming (git-receive-pack push phase, smart-HTTP
     // refs advertisement reply, etc.). Bugfix for Codex finding #2.
+    //
+    // Backpressure (Codex v2 finding #1): the pump is a bounded
+    // channel, so `send().await` blocks while the pump queue is full.
+    // Because russh awaits `Handler::data` before issuing the next
+    // `WINDOW_ADJUST`, blocking here throttles the agent SSH write
+    // path via the SSH flow-control window instead of letting the
+    // sidecar buffer an unbounded `Vec<u8>` per slow upstream.
     async fn data(
         &mut self,
         channel: ChannelId,
@@ -453,11 +511,16 @@ impl server::Handler for GitSshHandler {
             guard.get(&channel).cloned()
         };
         if let Some(tx) = sender {
-            // Ignore send errors — the upstream task has already
-            // exited and closed the receiver, so the channel is
-            // about to be torn down anyway. The git client will see
-            // the exit status.
-            let _ = tx.send(AgentToUpstream::Data(data.to_vec()));
+            // A send failure here means the upstream pump task has
+            // exited and dropped the receiver. The channel is about
+            // to be torn down; the git client will see the exit
+            // status once `exec_request`'s spawned task runs its
+            // cleanup branch. We intentionally do NOT propagate the
+            // error as a russh error — doing so would tear down the
+            // whole SSH connection instead of just this channel.
+            if tx.send(AgentToUpstream::Data(data.to_vec())).await.is_err() {
+                logging::warn("agent->upstream pump closed; dropping data frame");
+            }
         }
         Ok(())
     }
@@ -477,22 +540,34 @@ impl server::Handler for GitSshHandler {
             guard.get(&channel).cloned()
         };
         if let Some(tx) = sender {
-            let _ = tx.send(AgentToUpstream::Eof);
+            let _ = tx.send(AgentToUpstream::Eof).await;
         }
         Ok(())
     }
 
-    // Drop the pump entry when the agent-side channel closes. This is
-    // best-effort cleanup — the upstream proxy task also removes the
-    // entry itself when it finishes so the map is already empty in
-    // the happy path.
+    // Propagate an agent-side channel close to the upstream pump task
+    // (Codex v2 finding #3). Previously this handler only removed the
+    // map entry, which left the pump draining upstream→agent forever
+    // if the agent closed abruptly while the remote still had data to
+    // send. Now we explicitly enqueue `Close`, so the pump loop exits
+    // and tears down the upstream session. Removing the map entry
+    // after the send ensures the pump always sees the `Close`
+    // message and we do not race with `Handler::data` enqueueing more
+    // bytes onto a sender that is about to be dropped.
     async fn channel_close(
         &mut self,
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Ok(mut guard) = self.upstream_pumps.lock() {
-            guard.remove(&channel);
+        let sender = {
+            let mut guard = match self.upstream_pumps.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.remove(&channel)
+        };
+        if let Some(tx) = sender {
+            let _ = tx.send(AgentToUpstream::Close).await;
         }
         Ok(())
     }
@@ -553,10 +628,12 @@ impl server::Handler for GitSshHandler {
             parsed.command, self.remote.host, self.remote.port
         ));
 
-        // Create the agent→upstream pump channel. The Handler::data /
-        // channel_eof callbacks will push bytes/EOF into the sender;
-        // the upstream proxy task below drains the receiver.
-        let (pump_tx, pump_rx) = mpsc::unbounded_channel::<AgentToUpstream>();
+        // Create the agent→upstream pump channel. Bounded capacity
+        // (Codex v2 finding #1) so a slow upstream backpressures the
+        // agent SSH write path via russh's flow-control window
+        // instead of letting the sidecar silently buffer an
+        // unbounded queue of `Vec<u8>`s.
+        let (pump_tx, pump_rx) = mpsc::channel::<AgentToUpstream>(AGENT_PUMP_CHANNEL_CAPACITY);
         {
             let mut guard = match self.upstream_pumps.lock() {
                 Ok(g) => g,
@@ -626,16 +703,17 @@ pub enum UpstreamError {
 /// Drive an upstream SSH session proxied to/from the agent's channel.
 ///
 /// `pump_rx` carries the agent→upstream byte stream pushed by the
-/// russh `Handler::data` / `channel_eof` callbacks (see Codex finding
-/// #2). We pump those bytes into the upstream channel writer on one
-/// concurrent branch while the other branch drains upstream messages
-/// and forwards them back to the agent via the server `Handle`.
+/// russh `Handler::data` / `channel_eof` / `channel_close` callbacks
+/// (see Codex finding #2 and Codex v2 finding #3). We pump those
+/// messages into the upstream channel writer on one concurrent branch
+/// while the other branch drains upstream messages and forwards them
+/// back to the agent via the server `Handle`.
 async fn proxy_upstream(
     handle: server::Handle,
     channel_id: ChannelId,
     remote: GitRemote,
     parsed: ExecParsed,
-    mut pump_rx: mpsc::UnboundedReceiver<AgentToUpstream>,
+    mut pump_rx: mpsc::Receiver<AgentToUpstream>,
     auth_paths: SshAuthPaths,
 ) -> Result<(), UpstreamError> {
     // Read and parse the private key.
@@ -658,13 +736,19 @@ async fn proxy_upstream(
         }
     })?;
 
-    // SSRF-safe upstream resolution. The `test_override_addr` escape
-    // hatch bypasses resolve_safe so integration tests can point at a
-    // loopback mock upstream; production config leaves this None.
+    // SSRF-safe upstream resolution. When the `test-utils` feature
+    // is enabled (integration tests only), a populated
+    // `test_override_addr` bypasses `ssrf::resolve_safe` so tests
+    // can point at a loopback mock upstream. Release builds do NOT
+    // compile the field, so this always goes through the SSRF
+    // resolver and the FR-18 loopback block fires as intended.
+    #[cfg(feature = "test-utils")]
     let socket_addr = match auth_paths.test_override_addr {
         Some(addr) => addr,
         None => ssrf::resolve_safe(&remote.host, remote.port).await?,
     };
+    #[cfg(not(feature = "test-utils"))]
+    let socket_addr = ssrf::resolve_safe(&remote.host, remote.port).await?;
 
     // FR-28 10s connect timeout. We dial plain TCP first, then pass
     // the stream to russh::client::connect_stream so we retain control
@@ -715,10 +799,21 @@ async fn proxy_upstream(
     //     ExitStatus/Close trigger a clean return.
     //
     //   * agent → upstream: `pump_rx.recv()` returns the next
-    //     `AgentToUpstream` pushed by our `Handler::data` callback.
-    //     Data frames are written to the upstream channel's writer;
-    //     Eof closes the write half. If the receiver is closed we
-    //     simply drop that branch and keep draining upstream.
+    //     `AgentToUpstream` pushed by our `Handler::data` /
+    //     `channel_eof` / `channel_close` callbacks. Data frames
+    //     are written to the upstream channel's writer; Eof closes
+    //     the write half; Close tears the upstream channel down
+    //     and exits the pump loop immediately (Codex v2 finding
+    //     #3). If the receiver is closed without an explicit
+    //     control message — e.g. the handler panicked and dropped
+    //     its sender — we treat that as an implicit `Close` too.
+    //
+    // The `tokio::select!` is deliberately NOT `biased` (Codex v2
+    // finding #2): a biased select would always poll the upstream
+    // branch first, and a continuously readable upstream would
+    // then starve the agent→upstream direction indefinitely. The
+    // default pseudo-random selection guarantees both directions
+    // make progress under sustained load.
     //
     // This is the fix for Codex finding #2 — previously this loop
     // only polled upstream output and never forwarded agent bytes,
@@ -727,7 +822,6 @@ async fn proxy_upstream(
     let mut agent_closed = false;
     loop {
         tokio::select! {
-            biased;
             maybe_msg = upstream_channel.wait() => {
                 let Some(msg) = maybe_msg else { break };
                 match msg {
@@ -788,14 +882,29 @@ async fn proxy_upstream(
                             }
                         }
                     }
-                    None => {
-                        // Receiver closed — handler dropped its sender.
-                        // Flush an implicit EOF so upstream finishes.
-                        if !agent_eof_sent {
-                            agent_eof_sent = true;
-                            let _ = upstream_channel.eof().await;
+                    Some(AgentToUpstream::Close) => {
+                        // Agent explicitly closed its channel. Tear
+                        // the upstream channel down immediately and
+                        // exit the pump loop so the upstream session
+                        // does not linger (Codex v2 finding #3).
+                        if let Err(e) = upstream_channel.close().await {
+                            logging::warn(&format!(
+                                "failed to forward agent close to upstream: {e}"
+                            ));
                         }
-                        agent_closed = true;
+                        let _ = handle.close(channel_id).await;
+                        return Ok(());
+                    }
+                    None => {
+                        // Receiver closed without an explicit control
+                        // message — the handler dropped its sender
+                        // (e.g. task panic). Treat this as a Close
+                        // so we do not linger forever draining
+                        // upstream for an agent that is no longer
+                        // listening.
+                        let _ = upstream_channel.close().await;
+                        let _ = handle.close(channel_id).await;
+                        return Ok(());
                     }
                 }
             }

@@ -85,3 +85,25 @@ pin-project-lite = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+
+# `test-utils` exposes the `SshAuthPaths::with_test_override_addr`
+# constructor and the backing `test_override_addr` field. The feature
+# is NOT part of `default` — a release build of `nautiloop-sidecar`
+# must never include it, so that no downstream library consumer can
+# bypass the FR-18 SSRF protection. The git SSH proxy integration
+# test at `tests/git_ssh_proxy_e2e.rs` declares this feature under
+# `required-features` so `cargo test` automatically enables it when
+# the integration target is selected. Invocation that exercises the
+# integration test explicitly:
+#
+#     cargo test -p nautiloop-sidecar --features test-utils
+#
+# `cargo test --workspace` does NOT enable this feature and will
+# therefore skip the integration test target (unit tests still run).
+[features]
+test-utils = []
+
+[[test]]
+name = "git_ssh_proxy_e2e"
+path = "tests/git_ssh_proxy_e2e.rs"
+required-features = ["test-utils"]
