@@ -248,7 +248,7 @@ impl ConvergentLoopDriver {
                         "Implement stage completed without result output, treating as failure"
                     );
                     return self
-                        .handle_job_failed(
+                        .handle_job_failed_non_resumable(
                             &updated,
                             "Implement stage exited successfully but produced no NAUTILOOP_RESULT",
                         )
@@ -681,8 +681,12 @@ impl ConvergentLoopDriver {
                     .await
             }
             None => {
-                // No output: treat as failure, retry
-                self.handle_job_failed(record, "Test stage produced no output")
+                // No output: treat as failure, retry.
+                // Non-resumable — ingest_job_output already stamped
+                // completed_at on this round, so a resumed run's output
+                // would be ignored and the evaluator would re-read the
+                // same empty output. See #96 round-4 codex review.
+                self.handle_job_failed_non_resumable(record, "Test stage produced no output")
                     .await
             }
         }
@@ -985,15 +989,27 @@ impl ConvergentLoopDriver {
                 // objects from the prior exhausted attempts. Their TTL
                 // window can be up to an hour, so without this cleanup
                 // the resumed dispatch hits AlreadyExists on names like
-                // `...-r{round}-t1` and spins. A failure here is fatal
-                // to the resume — see the long comment on the helper —
-                // so we propagate it and leave the loop Failed for retry.
+                // `...-r{round}-t1` and spins. A failure here aborts
+                // the resume — see the long comment on the helper.
+                //
+                // On abort we clear resume_requested so the branch
+                // ownership query (which treats FAILED+resume as
+                // active) stops counting this row. The loop goes back
+                // to plain FAILED: the operator can either re-run
+                // `nemo resume` after fixing the k8s condition, or
+                // abandon it with a fresh `nemo harden` on the same
+                // spec (which is now unblocked from the branch). See
+                // codex round-4 review of #96.
                 if let Err(e) = self.delete_stale_failed_attempts(record, failed_from).await {
                     tracing::error!(
                         loop_id = %record.id,
                         error = %e,
-                        "Failed to clean up stale k8s Jobs; leaving loop Failed so resume can be retried"
+                        "Failed to clean up stale k8s Jobs; releasing branch ownership so operator can retry or abandon"
                     );
+                    let _ = self
+                        .store
+                        .set_loop_flag(record.id, crate::state::LoopFlag::Resume, false)
+                        .await;
                     return Err(e);
                 }
 
@@ -1122,6 +1138,30 @@ impl ConvergentLoopDriver {
 
     /// Handle a failed job: detect auth errors, retry, or fail the loop.
     async fn handle_job_failed(&self, record: &LoopRecord, reason: &str) -> Result<LoopState> {
+        self.handle_job_failed_inner(record, reason, true).await
+    }
+
+    /// Like `handle_job_failed` but does NOT mark the exhausted Failed state
+    /// as resumable via #96. Use this for failures where ingest_job_output
+    /// has already stamped completed_at on the current round (e.g. a job
+    /// that succeeded but produced no NAUTILOOP_RESULT line). Redispatching
+    /// those would emit a new round output that ingest_job_output ignores
+    /// because it only writes rows with completed_at IS NULL, so the
+    /// evaluator would just re-read the stale empty output and fail again.
+    async fn handle_job_failed_non_resumable(
+        &self,
+        record: &LoopRecord,
+        reason: &str,
+    ) -> Result<LoopState> {
+        self.handle_job_failed_inner(record, reason, false).await
+    }
+
+    async fn handle_job_failed_inner(
+        &self,
+        record: &LoopRecord,
+        reason: &str,
+        resumable_on_exhaustion: bool,
+    ) -> Result<LoopState> {
         let mut updated = record.clone();
 
         // Detect credential expiry (FR-10): transition to AWAITING_REAUTH
@@ -1159,10 +1199,15 @@ impl ConvergentLoopDriver {
             );
             self.redispatch_current_stage(&updated).await
         } else {
-            // Exhausted retries: fail the loop
-            // Capture which stage we were in so `nemo resume` can
-            // redispatch it against the same worktree (#96).
-            updated.failed_from_state = Some(updated.state);
+            // Exhausted retries: fail the loop.
+            // Only mark the Failed state resumable (#96) when the
+            // caller vouches that redispatch would actually produce
+            // new round output. Logical failures (empty test output,
+            // implement completed without result) leave failed_from_state
+            // None so /resume rejects them cleanly.
+            if resumable_on_exhaustion {
+                updated.failed_from_state = Some(updated.state);
+            }
             updated.state = LoopState::Failed;
             updated.sub_state = None;
             updated.failure_reason =
