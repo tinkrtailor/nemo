@@ -41,11 +41,37 @@ struct ClaudeOauth {
     expires_at: Option<u64>,
 }
 
-pub fn credentials_path() -> PathBuf {
+/// Return the Claude credential file paths `nemo auth --claude` knows
+/// about, in priority order. Kept in sync with `cli/src/commands/auth.rs`.
+pub fn credential_candidate_paths() -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".claude")
-        .join(".credentials.json")
+    let config_dir = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{home}/.config"));
+    vec![
+        PathBuf::from(&home)
+            .join(".claude")
+            .join(".credentials.json"),
+        PathBuf::from(&config_dir)
+            .join("claude-code")
+            .join("credentials.json"),
+        PathBuf::from(&home)
+            .join(".claude")
+            .join("credentials.json"),
+    ]
+}
+
+/// The canonical path we write refreshed credentials to. Matches the
+/// `claude-worktree` convention used as the first candidate in
+/// `commands/auth.rs`.
+pub fn credentials_path() -> PathBuf {
+    credential_candidate_paths().into_iter().next().unwrap()
+}
+
+/// Return the first credential file that exists on disk, or None if
+/// none of the known locations are populated.
+fn find_existing_credentials() -> Option<PathBuf> {
+    credential_candidate_paths()
+        .into_iter()
+        .find(|p| p.is_file())
 }
 
 /// Decide whether the on-disk credential bundle is stale. Returns
@@ -55,7 +81,14 @@ pub fn is_stale(path: &Path, now_ms: u64) -> bool {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return true;
     };
-    let Ok(parsed) = serde_json::from_str::<ClaudeCredentialsShape>(&contents) else {
+    is_bundle_stale(&contents, now_ms)
+}
+
+/// Decide whether a raw Claude credential JSON string represents a
+/// stale bundle. Shared between disk and keychain checks so both
+/// sources apply the same freshness rule.
+fn is_bundle_stale(contents: &str, now_ms: u64) -> bool {
+    let Ok(parsed) = serde_json::from_str::<ClaudeCredentialsShape>(contents) else {
         return true;
     };
     let Some(expires_at) = parsed.claude_ai_oauth.expires_at else {
@@ -151,8 +184,17 @@ pub async fn ensure_fresh(
         return Ok(());
     }
 
-    let path = credentials_path();
-    if !is_stale(&path, now_ms()) {
+    // Check every known credential path (same list as `nemo auth --claude`),
+    // not just the macOS default. A Linux/XDG user whose Claude Code
+    // writes to ~/.config/claude-code/credentials.json would otherwise
+    // look permanently stale here and the preflight would never run.
+    let now = now_ms();
+    let existing_path = find_existing_credentials();
+    let is_fresh = existing_path
+        .as_ref()
+        .map(|p| !is_stale(p, now))
+        .unwrap_or(false);
+    if is_fresh {
         return Ok(());
     }
 
@@ -161,23 +203,32 @@ pub async fn ensure_fresh(
         // On Linux the file on disk IS the source of truth so we trust
         // whatever Claude Code wrote there. On macOS without a
         // keychain entry, the user needs to run `claude login` first.
-        tracing::debug!(
-            path = %path.display(),
-            "Claude creds stale but no keychain refresh available; continuing"
-        );
+        tracing::debug!("Claude creds stale but no keychain refresh available; continuing");
         return Ok(());
     };
 
+    // Reject the keychain bundle if IT is also stale — no point
+    // overwriting the last known-working server copy with a bundle
+    // that will 401 on the first dispatch. Happens when the user
+    // hasn't reopened Claude Code since their token expired.
+    if is_bundle_stale(&fresh, now) {
+        tracing::warn!(
+            "Keychain Claude credentials are also expired; not pushing stale bundle. \
+             Open Claude Code to refresh, then re-run."
+        );
+        return Ok(());
+    }
+
     // Only write if the extracted bundle differs from what's on disk.
-    // Avoids bumping mtime on every start when the keychain itself is
-    // also stale (rare but possible if the user hasn't opened Claude
-    // Code in a while).
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    // Avoids bumping mtime on every start when the keychain itself
+    // happens to match the disk copy exactly.
+    let write_path = existing_path.unwrap_or_else(credentials_path);
+    let existing = std::fs::read_to_string(&write_path).unwrap_or_default();
     if existing.trim() != fresh.trim() {
-        write_atomic(&path, &fresh).with_context(|| {
+        write_atomic(&write_path, &fresh).with_context(|| {
             format!(
                 "failed to write refreshed credentials to {}",
-                path.display()
+                write_path.display()
             )
         })?;
     }
@@ -219,12 +270,19 @@ mod tests {
         path
     }
 
+    static TMPDIR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn tmpdir() -> PathBuf {
+        // Monotonic counter + nanos + pid so parallel tests never
+        // collide. A pure timestamp isn't enough on fast machines —
+        // two tests can land in the same nanosecond bucket.
+        let seq = TMPDIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let p = std::env::temp_dir().join(format!("nemo-creds-{}-{}", nanos, std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("nemo-creds-{}-{}-{seq}", nanos, std::process::id()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -284,5 +342,30 @@ mod tests {
         // expires in 6 minutes — outside the 5-minute buffer
         let path = write_bundle(&dir, Some(now + 6 * 60 * 1000));
         assert!(!is_stale(&path, now));
+    }
+
+    #[test]
+    fn is_bundle_stale_treats_expired_string_as_stale() {
+        let now = 1_000_000_000u64;
+        let expired = format!(r#"{{"claudeAiOauth":{{"expiresAt":{}}}}}"#, now - 1000);
+        assert!(is_bundle_stale(&expired, now));
+        let fresh = format!(
+            r#"{{"claudeAiOauth":{{"expiresAt":{}}}}}"#,
+            now + 60 * 60 * 1000
+        );
+        assert!(!is_bundle_stale(&fresh, now));
+    }
+
+    #[test]
+    fn candidate_paths_match_auth_command() {
+        // Regression guard: if cli/src/commands/auth.rs ever gains a
+        // new Claude path, add it here too or the preflight will
+        // silently skip it. Kept as a structural assertion rather
+        // than a string match so path separators don't make it fragile.
+        let paths = credential_candidate_paths();
+        assert_eq!(paths.len(), 3, "three known Claude credential locations");
+        assert!(paths[0].ends_with(".claude/.credentials.json"));
+        assert!(paths[1].ends_with("claude-code/credentials.json"));
+        assert!(paths[2].ends_with(".claude/credentials.json"));
     }
 }
