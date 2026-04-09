@@ -25,11 +25,9 @@ COPY control-plane/ control-plane/
 COPY cli/ cli/
 COPY sidecar/ sidecar/
 
-RUN rustup target add x86_64-unknown-linux-musl
 RUN cargo build \
     -p nautiloop-sidecar \
     --release \
-    --target x86_64-unknown-linux-musl \
     --locked
 
 FROM scratch
@@ -37,6 +35,6 @@ FROM scratch
 # Historical CA bundle copy — see header for rationale. Delete in
 # spec phase 6.
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/nautiloop-sidecar /auth-sidecar
+COPY --from=builder /build/target/release/nautiloop-sidecar /auth-sidecar
 
 ENTRYPOINT ["/auth-sidecar"]
