@@ -367,6 +367,28 @@ pub async fn resume(
         });
     }
 
+    // #96: For FAILED loops, verify no replacement loop has taken over
+    // the same deterministic branch. A branch is a globally unique active
+    // identifier in nautiloop — if `nemo harden` was re-run on the same
+    // spec after the failure, the new loop owns the worktree and
+    // resurrecting this one would either deadlock on the branch uniqueness
+    // constraint (Postgres) or corrupt the live loop's worktree (in-memory).
+    // Reject with a clear message so the user can decide: attach to the
+    // replacement or abandon it first.
+    if record.state == LoopState::Failed
+        && let Some(active) = state.store.get_loop_by_branch(&record.branch).await?
+        && active.id != record.id
+    {
+        return Err(NautiloopError::InvalidStateTransition {
+            action: "resume".to_string(),
+            state: record.state.to_string(),
+            expected: format!(
+                "branch {} is owned by active loop {} — cancel it before resuming this one",
+                record.branch, active.id
+            ),
+        });
+    }
+
     state
         .store
         .set_loop_flag(id, LoopFlag::Resume, true)
