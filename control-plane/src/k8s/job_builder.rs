@@ -315,7 +315,21 @@ fn build_agent_env_vars(ctx: &LoopContext, stage: &StageConfig, is_test: bool) -
         // Bearer token in every opencode request to :9090, and the
         // sidecar replaces it with the real key before forwarding to
         // api.openai.com. The agent never sees the real key.
-        env_var("OPENAI_BASE_URL", "http://localhost:9090/openai"),
+        //
+        // The base URL MUST include `/v1` because opencode's SDK
+        // (AI SDK / @ai-sdk/openai) appends the endpoint path directly
+        // to OPENAI_BASE_URL without inserting a version prefix. With
+        // the old `http://localhost:9090/openai`, opencode sends requests
+        // to `http://localhost:9090/openai/responses` and
+        // `http://localhost:9090/openai/chat/completions`, which the
+        // sidecar forwards to `https://api.openai.com/responses` and
+        // `https://api.openai.com/chat/completions` — both 404 because
+        // the real endpoints are under `/v1/`. Symptom: opencode hangs
+        // in `ep_poll` for the full stage deadline while its internal
+        // log silently records `statusCode: 404` responses for every
+        // model call, the stage produces zero bytes of output, and the
+        // loop fails as BackoffLimitExceeded.
+        env_var("OPENAI_BASE_URL", "http://localhost:9090/openai/v1"),
         env_var("OPENAI_API_KEY", "sk-replaced-by-sidecar"),
         // Note: ANTHROPIC_BASE_URL is NOT set. Claude Code authenticates via the
         // mounted ~/.claude/ session directory (FR-25b), not via the sidecar proxy.
@@ -814,7 +828,7 @@ mod tests {
         // FR-9: OpenAI base URL points at the sidecar model proxy.
         assert_eq!(
             find_env("OPENAI_BASE_URL").unwrap(),
-            "http://localhost:9090/openai"
+            "http://localhost:9090/openai/v1"
         );
         // FR-9/issue #62: OPENAI_API_KEY placeholder is required so opencode
         // enables its OpenAI provider. The sidecar overwrites the real auth
