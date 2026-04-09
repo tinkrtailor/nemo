@@ -1347,23 +1347,22 @@ impl ConvergentLoopDriver {
         record.sub_state = Some(SubState::Dispatched);
         record.retry_count = 0;
 
-        // #98: Claude credential preflight. Before running it, write
-        // a sentinel round record with stage="revise" so that if we
-        // do transition to AWAITING_REAUTH, a later `nemo resume`
-        // landing in redispatch_current_stage picks `revise` (not
-        // `audit`) when it disambiguates the Hardening sub-stage.
-        // Without this, the last completed round is `audit` and the
-        // resume reruns audit, blowing a harden round on the wrong
-        // stage. See codex round 2 on #98. The sentinel has no
-        // job_name / completed_at; persist_then_dispatch on resume
-        // creates a second round record with the real job, which is
-        // harmless because rfind takes the last entry.
-        self.create_round_record(record, "revise", "preflight-pending")
-            .await?;
+        // #98: Claude credential preflight. If it blocks, write a
+        // sentinel `revise` round record ONLY in that case so that
+        // a later `nemo resume` landing in redispatch_current_stage
+        // picks `revise` (not `audit`) when it disambiguates the
+        // Hardening sub-stage. The sentinel is NOT created on the
+        // fresh-creds path — persist_then_dispatch writes the real
+        // revise round there, and creating a second synthetic row
+        // makes ingest_job_output / rfind-by-round ambiguous when
+        // both rows land on the same Postgres timestamp (codex
+        // round 4 on #98).
         if let Some(reauth_state) = self
             .preflight_claude_creds(record, LoopState::Hardening)
             .await?
         {
+            self.create_round_record(record, "revise", "preflight-pending")
+                .await?;
             return Ok(reauth_state);
         }
 
