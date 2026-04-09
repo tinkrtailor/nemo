@@ -1781,6 +1781,13 @@ impl ConvergentLoopDriver {
         updated.reauth_from_state = Some(reauth_from);
         updated.active_job_name = None;
         updated.failure_reason = Some(format!("Credential preflight: {reason}"));
+        // Don't charge a failed preflight against the stage retry
+        // budget. No pod was ever created, so an engineer who hits
+        // `nemo resume` repeatedly before fixing the creds shouldn't
+        // burn through retry slots on phantom failures — that would
+        // cause the first real dispatch failure after fix-up to
+        // skip normal retries and go straight to FAILED.
+        updated.retry_count = 0;
         self.store.update_loop(&updated).await?;
         Ok(Some(LoopState::AwaitingReauth))
     }
@@ -1836,7 +1843,16 @@ impl ConvergentLoopDriver {
             .and_then(|o| o.get("expiresAt"))
             .and_then(|v| v.as_u64());
         let Some(expires_at) = expires_at else {
-            return Some("credential bundle has no expiresAt".to_string());
+            // Legacy / Linux session bundles may omit expiresAt. We
+            // can't prove they're stale, so don't block dispatch.
+            // The worst case is a 401 from the agent itself, which
+            // the existing is_auth_error detection handles via the
+            // regular AWAITING_REAUTH path.
+            tracing::debug!(
+                engineer = %engineer,
+                "Claude credential bundle has no expiresAt; trusting it and continuing"
+            );
+            return None;
         };
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
