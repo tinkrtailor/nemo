@@ -56,6 +56,7 @@ fn build_routes(_state: AppState) -> Router<AppState> {
         .route("/start", post(handlers::start))
         .route("/status", get(handlers::status))
         .route("/logs/{id}", get(handlers::logs))
+        .route("/pod-logs/{id}", get(handlers::pod_logs))
         .route("/cancel/{id}", delete(handlers::cancel))
         .route("/approve/{id}", post(handlers::approve))
         .route("/resume/{id}", post(handlers::resume))

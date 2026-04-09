@@ -267,6 +267,93 @@ pub async fn logs(
     )
 }
 
+/// GET /pod-logs/:id?tail=N&container=agent - Live pod logs for a running loop (#99).
+///
+/// Unlike `/logs/{id}`, this bypasses the Postgres logs table and reads the
+/// active pod's container logs directly from the kubernetes API. It's the
+/// fastest path to "what is the agent actually printing right now" without
+/// requiring kubectl access. Returns 200 with a plain-text body or 404 if
+/// the loop has no active pod (terminated, cancelled, between-stage).
+///
+/// Query params:
+/// - `tail`: max lines to return (default 500, max 10000)
+/// - `container`: container name to read from (default "agent"; "auth-sidecar"
+///   is the other interesting one for egress debugging)
+pub async fn pod_logs(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Result<axum::response::Response, NautiloopError> {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+
+    let record = state
+        .store
+        .get_loop(id)
+        .await?
+        .ok_or(NautiloopError::LoopNotFound { id })?;
+
+    let Some(job_name) = record.active_job_name.clone() else {
+        return Err(NautiloopError::BadRequest(format!(
+            "loop {id} has no active pod (state={})",
+            record.state
+        )));
+    };
+
+    let tail_lines: i64 = query
+        .get("tail")
+        .and_then(|s| s.parse().ok())
+        .map(|n: i64| n.clamp(1, 10_000))
+        .unwrap_or(500);
+    let container = query
+        .get("container")
+        .cloned()
+        .unwrap_or_else(|| "agent".to_string());
+    if container != "agent" && container != "auth-sidecar" {
+        return Err(NautiloopError::BadRequest(format!(
+            "container must be 'agent' or 'auth-sidecar', got {container}"
+        )));
+    }
+
+    let kube_client = state.kube_client.as_ref().ok_or_else(|| {
+        NautiloopError::Internal("K8s client not available — pod logs disabled".to_string())
+    })?;
+    let namespace = &state.config.cluster.jobs_namespace;
+    let pods_api: kube::Api<k8s_openapi::api::core::v1::Pod> =
+        kube::Api::namespaced(kube_client.clone(), namespace);
+    let lp = kube::api::ListParams::default().labels(&format!("job-name={job_name}"));
+    let pod_list = pods_api.list(&lp).await.map_err(|e| {
+        NautiloopError::Internal(format!("Failed to list pods for {job_name}: {e}"))
+    })?;
+
+    let Some(pod) = pod_list.items.first() else {
+        return Err(NautiloopError::BadRequest(format!(
+            "no pod found for active job {job_name} (TTL cleanup or pre-creation race?)"
+        )));
+    };
+    let Some(pod_name) = pod.metadata.name.as_ref() else {
+        return Err(NautiloopError::Internal(
+            "pod matched by label selector has no name".to_string(),
+        ));
+    };
+
+    let log_params = kube::api::LogParams {
+        container: Some(container),
+        tail_lines: Some(tail_lines),
+        ..Default::default()
+    };
+    let logs = pods_api.logs(pod_name, &log_params).await.map_err(|e| {
+        NautiloopError::Internal(format!("Failed to read pod logs for {pod_name}: {e}"))
+    })?;
+
+    Ok((
+        axum::http::StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        logs,
+    )
+        .into_response())
+}
+
 /// DELETE /cancel/:id - Cancel a running loop.
 pub async fn cancel(
     State(state): State<AppState>,

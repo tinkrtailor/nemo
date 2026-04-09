@@ -3,6 +3,32 @@ use futures::StreamExt;
 
 use crate::client::NemoClient;
 
+/// One-shot dump of the active pod's container logs (#99).
+///
+/// Hits the /pod-logs/{id} endpoint which reads kubernetes pod logs
+/// directly, bypassing the Postgres log stream. Works mid-run and
+/// gives an operator the same information `kubectl logs -c agent`
+/// would, without requiring kubectl access.
+pub async fn run_tail(
+    client: &NemoClient,
+    loop_id: &str,
+    tail_lines: u32,
+    container: &str,
+) -> Result<()> {
+    let path = format!("/pod-logs/{loop_id}?tail={tail_lines}&container={container}");
+    let resp = client.get_stream(&path).await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("pod-logs returned {status}: {text}");
+    }
+    print!("{text}");
+    if !text.ends_with('\n') {
+        println!();
+    }
+    Ok(())
+}
+
 pub async fn run(
     client: &NemoClient,
     loop_id: &str,
