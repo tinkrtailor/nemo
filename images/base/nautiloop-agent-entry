@@ -339,18 +339,6 @@ case "$STAGE" in
         # FR-6, FR-7: OpenCode for review/audit (read-only)
         export OPENCODE_PERMISSIONS='{"edit":"deny","bash":"deny","read":"allow"}'
 
-        # #67: If the engineer registered opencode subscription auth via
-        # `nemo auth --opencode-auth`, the control plane mounts it at
-        # /secrets/opencode-auth/auth.json (optional secret projection;
-        # directory may be empty if the key isn't set). Copy it into the
-        # opencode data dir so opencode picks it up natively. The copy is
-        # mode 0600 because opencode refuses world-readable auth bundles.
-        if [ -f /secrets/opencode-auth/auth.json ]; then
-            mkdir -p "$HOME/.local/share/opencode"
-            cp /secrets/opencode-auth/auth.json "$HOME/.local/share/opencode/auth.json"
-            chmod 0600 "$HOME/.local/share/opencode/auth.json"
-        fi
-
         # Pin the provider to `openai` so opencode routes through the sidecar
         # model proxy (OPENAI_BASE_URL=http://localhost:9090/openai) instead
         # of falling back to its built-in `opencode/*` models that go to the
