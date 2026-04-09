@@ -58,6 +58,15 @@ pub fn load_project_models(start: &Path) -> Result<ModelsSection> {
 /// Resolve the effective (implementor, reviewer) model pair using the
 /// documented precedence chain. Any layer may contribute only one of the
 /// two fields; a missing field falls through to the next layer.
+/// Treat empty / whitespace-only strings as absent. An empty env var or
+/// `implementor = ""` in a config file is a common way to "unset" a layer,
+/// and the control plane also filters empty strings when merging its own
+/// config — without this, an empty override would bypass every fallback
+/// and ship a blank model name to the loop stages.
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|s| !s.trim().is_empty())
+}
+
 pub fn resolve_models(
     flag_impl: Option<String>,
     flag_review: Option<String>,
@@ -69,15 +78,15 @@ pub fn resolve_models(
     let env_impl = std::env::var("NEMO_MODEL_IMPLEMENTOR").ok();
     let env_review = std::env::var("NEMO_MODEL_REVIEWER").ok();
 
-    let implementor = flag_impl
-        .or(env_impl)
-        .or_else(|| project.implementor.clone())
-        .or_else(|| user_models.implementor.clone());
+    let implementor = non_empty(flag_impl)
+        .or_else(|| non_empty(env_impl))
+        .or_else(|| non_empty(project.implementor.clone()))
+        .or_else(|| non_empty(user_models.implementor.clone()));
 
-    let reviewer = flag_review
-        .or(env_review)
-        .or_else(|| project.reviewer.clone())
-        .or_else(|| user_models.reviewer.clone());
+    let reviewer = non_empty(flag_review)
+        .or_else(|| non_empty(env_review))
+        .or_else(|| non_empty(project.reviewer.clone()))
+        .or_else(|| non_empty(user_models.reviewer.clone()));
 
     Ok((implementor, reviewer))
 }
@@ -215,6 +224,32 @@ mod tests {
         let (i, r) = resolve_models(None, None, &empty).unwrap();
         assert!(i.is_none());
         assert!(r.is_none());
+
+        // Regression for the codex review finding: empty strings at any
+        // layer must be treated as absent so they fall through instead
+        // of shipping a blank model name to the loop.
+        fs::write(
+            project_dir.join("nemo.toml"),
+            "[models]\nimplementor = \"\"\nreviewer = \"proj-review\"\n",
+        )
+        .unwrap();
+        let (i, r) = resolve_models(None, None, &user).unwrap();
+        assert_eq!(i.as_deref(), Some("user-impl")); // "" project -> user
+        assert_eq!(r.as_deref(), Some("proj-review"));
+
+        // Empty env var also falls through.
+        unsafe {
+            std::env::set_var("NEMO_MODEL_IMPLEMENTOR", "");
+        }
+        let (i, _) = resolve_models(None, None, &user).unwrap();
+        assert_eq!(i.as_deref(), Some("user-impl"));
+        unsafe {
+            std::env::remove_var("NEMO_MODEL_IMPLEMENTOR");
+        }
+
+        // Empty CLI flag also falls through.
+        let (i, _) = resolve_models(Some(String::new()), None, &user).unwrap();
+        assert_eq!(i.as_deref(), Some("user-impl"));
 
         // Restore.
         std::env::set_current_dir(&prev_cwd).unwrap();
