@@ -1186,8 +1186,15 @@ impl ConvergentLoopDriver {
             );
             self.redispatch_current_stage(record).await
         } else {
-            // #96: capture which stage to redispatch on resume.
-            record.failed_from_state = Some(record.state);
+            // NOT resumable via #96: by the time we get here, the round
+            // record has already been marked completed by ingest_job_output
+            // with the malformed verdict. Redispatching would produce a
+            // new run whose output gets dropped (ingest_job_output only
+            // writes to rounds where completed_at IS NULL), so the
+            // evaluator would just re-read the same malformed output and
+            // fail again. Leave failed_from_state None so api::resume
+            // rejects it with a clear message until we add per-resume
+            // round-reset logic. See codex round-3 review.
             record.state = LoopState::Failed;
             record.sub_state = None;
             record.failure_reason = Some(format!(
