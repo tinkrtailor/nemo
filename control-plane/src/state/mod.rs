@@ -195,7 +195,11 @@ pub mod memory {
             let loops = self.loops.read().await;
             Ok(loops
                 .values()
-                .find(|l| l.branch == branch && !l.state.is_terminal())
+                .find(|l| {
+                    l.branch == branch
+                        && (!l.state.is_terminal()
+                            || (l.state == LoopState::Failed && l.resume_requested))
+                })
                 .cloned())
         }
 
@@ -302,9 +306,11 @@ pub mod memory {
 
         async fn has_active_loop_for_branch(&self, branch: &str) -> Result<bool> {
             let loops = self.loops.read().await;
-            Ok(loops
-                .values()
-                .any(|l| l.branch == branch && !l.state.is_terminal()))
+            Ok(loops.values().any(|l| {
+                l.branch == branch
+                    && (!l.state.is_terminal()
+                        || (l.state == LoopState::Failed && l.resume_requested))
+            }))
         }
 
         async fn create_round(&self, record: &RoundRecord) -> Result<()> {

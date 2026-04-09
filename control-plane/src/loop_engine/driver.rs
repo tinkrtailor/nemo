@@ -919,33 +919,35 @@ impl ConvergentLoopDriver {
     /// Delete stale k8s Job objects from a failed loop's previous
     /// exhausted retry attempts so the resumed dispatch (which resets
     /// retry_count back to 0) can reuse the lower `-t{N}` name slots
-    /// without hitting AlreadyExists. Best-effort: delete errors are
-    /// logged and ignored because they're usually NotFound after TTL
-    /// cleanup has already run. See #96 codex review.
+    /// without hitting AlreadyExists.
+    ///
+    /// This is NOT best-effort. The kube dispatcher treats 404 NotFound
+    /// as Ok(()) internally (see k8s/client.rs), so any Err returned
+    /// here is a real API/RBAC/network failure. If we swallowed it and
+    /// let redispatch proceed, create_job would hit AlreadyExists on the
+    /// still-present stale attempt, the loop would transition out of
+    /// Failed with failed_from_state=None, and the resume would be
+    /// silently wedged until manual cleanup. Propagate the error so
+    /// handle_failed bails out cleanly with the loop still in Failed
+    /// state and the operator can retry the resume after fixing the
+    /// underlying k8s condition. See codex round-2 review of #96.
     async fn delete_stale_failed_attempts(
         &self,
         record: &LoopRecord,
         failed_from: LoopState,
-    ) -> () {
+    ) -> Result<()> {
         // Map the failed-from state to the stage name used in job names.
         // For Hardening we inspect the last round record to tell audit
         // apart from revise, same logic as redispatch_current_stage.
         let stage_name: Option<String> = match failed_from {
-            LoopState::Hardening => match self.store.get_rounds(record.id).await {
-                Ok(rounds) => rounds
+            LoopState::Hardening => {
+                let rounds = self.store.get_rounds(record.id).await?;
+                rounds
                     .iter()
                     .rfind(|r| r.round == record.round)
                     .map(|r| r.stage.clone())
-                    .or_else(|| Some("audit".to_string())),
-                Err(e) => {
-                    tracing::warn!(
-                        loop_id = %record.id,
-                        error = %e,
-                        "Could not load rounds for stale-attempt cleanup; skipping"
-                    );
-                    None
-                }
-            },
+                    .or_else(|| Some("audit".to_string()))
+            }
             LoopState::Implementing => Some("implement".to_string()),
             LoopState::Testing => Some("test".to_string()),
             LoopState::Reviewing => Some("review".to_string()),
@@ -953,7 +955,7 @@ impl ConvergentLoopDriver {
         };
 
         let Some(stage) = stage_name else {
-            return;
+            return Ok(());
         };
 
         let short_id = &record.id.to_string()[..8];
@@ -963,15 +965,9 @@ impl ConvergentLoopDriver {
         let max_attempt = record.retry_count + 1;
         for attempt in 1..=max_attempt {
             let job_name = format!("nautiloop-{short_id}-{stage}-r{}-t{attempt}", record.round);
-            if let Err(e) = self.dispatcher.delete_job(&job_name, namespace).await {
-                tracing::debug!(
-                    loop_id = %record.id,
-                    job = %job_name,
-                    error = %e,
-                    "Stale-attempt delete returned error (NotFound is expected after TTL)"
-                );
-            }
+            self.dispatcher.delete_job(&job_name, namespace).await?;
         }
+        Ok(())
     }
 
     /// Handle FAILED: check for resume flag (#96).
@@ -989,8 +985,17 @@ impl ConvergentLoopDriver {
                 // objects from the prior exhausted attempts. Their TTL
                 // window can be up to an hour, so without this cleanup
                 // the resumed dispatch hits AlreadyExists on names like
-                // `...-r{round}-t1` and spins. See codex review of #96.
-                self.delete_stale_failed_attempts(record, failed_from).await;
+                // `...-r{round}-t1` and spins. A failure here is fatal
+                // to the resume — see the long comment on the helper —
+                // so we propagate it and leave the loop Failed for retry.
+                if let Err(e) = self.delete_stale_failed_attempts(record, failed_from).await {
+                    tracing::error!(
+                        loop_id = %record.id,
+                        error = %e,
+                        "Failed to clean up stale k8s Jobs; leaving loop Failed so resume can be retried"
+                    );
+                    return Err(e);
+                }
 
                 let mut updated = record.clone();
                 updated.state = failed_from;
