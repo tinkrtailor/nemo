@@ -41,6 +41,18 @@ pub trait JobDispatcher: Send + Sync + 'static {
     /// Get logs from the agent container of a job's pod.
     /// Used to extract NAUTILOOP_RESULT: lines from completed jobs.
     async fn get_job_logs(&self, name: &str, namespace: &str) -> Result<String>;
+
+    /// Read a single key from a K8s Secret. Used by the dispatch
+    /// preflight (#98) to check whether an engineer's Claude token
+    /// has expired before spinning up a pod that would dispatch a
+    /// claude CLI call with known-bad credentials. Returns Ok(None)
+    /// if the secret or the key does not exist.
+    async fn get_secret_key(
+        &self,
+        name: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>>;
 }
 
 /// In-memory mock job dispatcher for testing.
@@ -54,6 +66,9 @@ pub mod mock {
     pub struct MockJobDispatcher {
         jobs: Arc<RwLock<HashMap<String, (Job, JobStatus)>>>,
         logs: Arc<RwLock<HashMap<String, String>>>,
+        /// Map of `secret_name/key` -> bytes. Set by tests that
+        /// exercise the #98 credential-freshness preflight.
+        secrets: Arc<RwLock<HashMap<String, Vec<u8>>>>,
     }
 
     impl MockJobDispatcher {
@@ -61,7 +76,14 @@ pub mod mock {
             Self {
                 jobs: Arc::new(RwLock::new(HashMap::new())),
                 logs: Arc::new(RwLock::new(HashMap::new())),
+                secrets: Arc::new(RwLock::new(HashMap::new())),
             }
+        }
+
+        /// Populate a secret key for tests.
+        pub async fn set_secret_key(&self, name: &str, key: &str, value: &[u8]) {
+            let mut secrets = self.secrets.write().await;
+            secrets.insert(format!("{name}/{key}"), value.to_vec());
         }
 
         /// Set mock logs for a job (for testing NAUTILOOP_RESULT extraction).
@@ -126,6 +148,16 @@ pub mod mock {
         async fn get_job_logs(&self, name: &str, _namespace: &str) -> Result<String> {
             let logs = self.logs.read().await;
             Ok(logs.get(name).cloned().unwrap_or_default())
+        }
+
+        async fn get_secret_key(
+            &self,
+            name: &str,
+            _namespace: &str,
+            key: &str,
+        ) -> Result<Option<Vec<u8>>> {
+            let secrets = self.secrets.read().await;
+            Ok(secrets.get(&format!("{name}/{key}")).cloned())
         }
     }
 }

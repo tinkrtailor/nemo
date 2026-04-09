@@ -1309,6 +1309,15 @@ impl ConvergentLoopDriver {
         }
         updated.retry_count = 0;
 
+        // #98: Claude credential preflight — see
+        // `preflight_claude_creds` for the full rationale.
+        if let Some(reauth_state) = self
+            .preflight_claude_creds(&updated, LoopState::Implementing)
+            .await?
+        {
+            return Ok(reauth_state);
+        }
+
         let stage_config = self.implement_stage_config(record);
         let ctx = self.build_context(&updated).await?;
         let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
@@ -1337,6 +1346,14 @@ impl ConvergentLoopDriver {
     async fn dispatch_revise(&self, record: &mut LoopRecord) -> Result<LoopState> {
         record.sub_state = Some(SubState::Dispatched);
         record.retry_count = 0;
+
+        // #98: Claude credential preflight.
+        if let Some(reauth_state) = self
+            .preflight_claude_creds(record, LoopState::Hardening)
+            .await?
+        {
+            return Ok(reauth_state);
+        }
 
         let stage_config = self.revise_stage_config(record);
         let ctx = self.build_context(record).await?;
@@ -1385,6 +1402,14 @@ impl ConvergentLoopDriver {
         record.state = LoopState::Implementing;
         record.sub_state = Some(SubState::Dispatched);
         record.retry_count = 0;
+
+        // #98: Claude credential preflight.
+        if let Some(reauth_state) = self
+            .preflight_claude_creds(record, LoopState::Implementing)
+            .await?
+        {
+            return Ok(reauth_state);
+        }
 
         let stage_config = self.implement_stage_config(record);
         let mut ctx = self.build_context(record).await?;
@@ -1683,6 +1708,94 @@ impl ConvergentLoopDriver {
         }
     }
 
+    /// #98: Check whether the engineer's Claude credentials are
+    /// fresh before building a pod that invokes the `claude` CLI.
+    /// When stale, transition the loop to AWAITING_REAUTH in place
+    /// and return `Ok(Some(AwaitingReauth))` so the caller can
+    /// short-circuit its dispatch. When fresh (or no bundle is
+    /// present), return `Ok(None)` and let dispatch proceed.
+    ///
+    /// `reauth_from` is the stage we should resume to once the user
+    /// re-runs `nemo auth`. For implement/revise that's the stage
+    /// itself; for Hardening-wrapped revise that's Hardening.
+    async fn preflight_claude_creds(
+        &self,
+        record: &LoopRecord,
+        reauth_from: LoopState,
+    ) -> Result<Option<LoopState>> {
+        let Some(reason) = self.claude_creds_stale_reason(&record.engineer).await else {
+            return Ok(None);
+        };
+        tracing::warn!(
+            loop_id = %record.id,
+            reason = %reason,
+            "Claude credentials failed pre-dispatch freshness check; transitioning to AWAITING_REAUTH"
+        );
+        let mut updated = record.clone();
+        updated.state = LoopState::AwaitingReauth;
+        updated.sub_state = None;
+        updated.reauth_from_state = Some(reauth_from);
+        updated.active_job_name = None;
+        updated.failure_reason = Some(format!("Credential preflight: {reason}"));
+        self.store.update_loop(&updated).await?;
+        Ok(Some(LoopState::AwaitingReauth))
+    }
+
+    /// Read the engineer's Claude credential bundle straight from the
+    /// K8s API server (not from any cached or pod-mounted view) and
+    /// return a human-readable reason if it's stale, or None if it's
+    /// fresh / no bundle is present at all. "No bundle" returns None
+    /// because that's the Linux/XDG case where the sidecar reads a
+    /// different source, and #98 shouldn't block dispatch there.
+    /// See issue #98 for the motivating incident.
+    async fn claude_creds_stale_reason(&self, engineer: &str) -> Option<String> {
+        const BUFFER_MS: u64 = 5 * 60 * 1000;
+        let safe_engineer: String = engineer.to_lowercase().replace('_', "-");
+        let secret_name = format!("nautiloop-creds-{safe_engineer}");
+        let namespace = &self.config.cluster.jobs_namespace;
+
+        let bytes = match self
+            .dispatcher
+            .get_secret_key(&secret_name, namespace, "claude")
+            .await
+        {
+            Ok(Some(b)) => b,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(
+                    engineer = %engineer,
+                    error = %e,
+                    "Could not read Claude credentials secret; skipping preflight"
+                );
+                return None;
+            }
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            return Some("credential bundle is not UTF-8".to_string());
+        };
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return Some("credential bundle is not JSON".to_string());
+        };
+        let expires_at = parsed
+            .get("claudeAiOauth")
+            .and_then(|o| o.get("expiresAt"))
+            .and_then(|v| v.as_u64());
+        let Some(expires_at) = expires_at else {
+            return Some("credential bundle has no expiresAt".to_string());
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if expires_at.saturating_sub(BUFFER_MS) <= now_ms {
+            Some(format!(
+                "Claude token expired or within 5-minute buffer (expiresAt={expires_at}, now={now_ms})"
+            ))
+        } else {
+            None
+        }
+    }
+
     async fn create_round_record(
         &self,
         record: &LoopRecord,
@@ -1954,6 +2067,109 @@ mod tests {
 
         let new_state = driver.tick(record.id).await.unwrap();
         assert_eq!(new_state, LoopState::Converged);
+    }
+
+    /// Helper: build an expired Claude credential bundle for #98
+    /// preflight tests. `expires_at_ms` is the absolute epoch-ms.
+    fn make_claude_bundle(expires_at_ms: u64) -> Vec<u8> {
+        format!(r#"{{"claudeAiOauth":{{"expiresAt":{expires_at_ms}}}}}"#).into_bytes()
+    }
+
+    #[tokio::test]
+    async fn test_stale_claude_creds_block_dispatch() {
+        // #98: A loop whose engineer's Claude token has expired
+        // should transition to AWAITING_REAUTH at dispatch time
+        // instead of spinning up a pod that will die on 401.
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let driver = make_driver(store.clone(), dispatcher.clone());
+
+        let mut record = make_pending_loop(false); // implement loop
+        record.state = LoopState::AwaitingApproval;
+        record.approve_requested = true;
+        store.create_loop(&record).await.unwrap();
+
+        // Stash a bundle that's already expired in the mock k8s
+        // secret store, matching the name scheme the driver uses.
+        dispatcher
+            .set_secret_key(
+                "nautiloop-creds-alice",
+                "claude",
+                &make_claude_bundle(1_000), // epoch 1s — ancient
+            )
+            .await;
+
+        let new_state = driver.tick(record.id).await.unwrap();
+        assert_eq!(new_state, LoopState::AwaitingReauth);
+
+        let updated = store.get_loop(record.id).await.unwrap().unwrap();
+        assert!(
+            updated
+                .failure_reason
+                .as_ref()
+                .unwrap()
+                .contains("preflight"),
+            "failure_reason should mention the preflight: got {:?}",
+            updated.failure_reason
+        );
+        // No job should have been created.
+        assert!(
+            dispatcher.created_jobs().await.is_empty(),
+            "preflight must short-circuit before any job is created"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fresh_claude_creds_pass_preflight() {
+        // #98: With a fresh bundle, dispatch proceeds normally.
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let driver = make_driver(store.clone(), dispatcher.clone());
+
+        let mut record = make_pending_loop(false);
+        record.state = LoopState::AwaitingApproval;
+        record.approve_requested = true;
+        store.create_loop(&record).await.unwrap();
+
+        // One hour in the future — comfortably outside the 5-minute buffer.
+        let future_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 60 * 60 * 1000;
+        dispatcher
+            .set_secret_key(
+                "nautiloop-creds-alice",
+                "claude",
+                &make_claude_bundle(future_ms),
+            )
+            .await;
+
+        let new_state = driver.tick(record.id).await.unwrap();
+        assert_eq!(new_state, LoopState::Implementing);
+        assert!(
+            !dispatcher.created_jobs().await.is_empty(),
+            "fresh creds should let dispatch create a job"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_missing_claude_secret_does_not_block() {
+        // #98: No Claude secret at all (Linux user who uses opencode
+        // exclusively, or a test env) should not block dispatch —
+        // the preflight is a guard, not a requirement.
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let driver = make_driver(store.clone(), dispatcher.clone());
+
+        let mut record = make_pending_loop(false);
+        record.state = LoopState::AwaitingApproval;
+        record.approve_requested = true;
+        store.create_loop(&record).await.unwrap();
+        // NO set_secret_key — secret is absent.
+
+        let new_state = driver.tick(record.id).await.unwrap();
+        assert_eq!(new_state, LoopState::Implementing);
     }
 
     #[tokio::test]

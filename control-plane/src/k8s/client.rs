@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Pod, Secret};
 use kube::Client;
 use kube::api::{Api, DeleteParams, ListParams, PostParams};
 
@@ -144,6 +144,36 @@ impl JobDispatcher for KubeJobDispatcher {
             Err(crate::error::NautiloopError::Internal(format!(
                 "Failed to retrieve logs from any pod for job {name}"
             )))
+        }
+    }
+
+    async fn get_secret_key(
+        &self,
+        name: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let ns = if namespace.is_empty() {
+            &self.namespace
+        } else {
+            namespace
+        };
+        let secrets_api: Api<Secret> = Api::namespaced(self.client.clone(), ns);
+        // Force a fresh read from the API server (not the kubelet-
+        // style informer cache). The preflight only works if we see
+        // the same bytes `nemo auth` just wrote, even if that write
+        // happened a few seconds ago. See issue #98.
+        match secrets_api.get(name).await {
+            Ok(secret) => {
+                let bytes = secret
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get(key))
+                    .map(|bs| bs.0.clone());
+                Ok(bytes)
+            }
+            Err(kube::Error::Api(err)) if err.code == 404 => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
 }
