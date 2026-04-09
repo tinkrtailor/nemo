@@ -119,7 +119,7 @@ enum Commands {
         path: String,
     },
 
-    /// Resume a PAUSED or AWAITING_REAUTH loop
+    /// Resume a PAUSED, AWAITING_REAUTH, or transient-FAILED loop
     Resume {
         /// Loop ID
         loop_id: String,

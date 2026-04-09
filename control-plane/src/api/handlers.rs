@@ -116,6 +116,7 @@ pub async fn start(
         resume_requested: false,
         paused_from_state: None,
         reauth_from_state: None,
+        failed_from_state: None,
         failure_reason: None,
         current_sha: None, // Set after git branch creation below
         session_id: None,
@@ -330,7 +331,12 @@ pub async fn approve(
     }))
 }
 
-/// POST /resume/:id - Resume a PAUSED or AWAITING_REAUTH loop.
+/// POST /resume/:id - Resume a PAUSED, AWAITING_REAUTH, or FAILED loop (#96).
+///
+/// FAILED loops can only be resumed if `failed_from_state` is set, which
+/// happens for transient failures (job retry exhaustion, malformed verdict).
+/// Max-rounds-exhausted and other logical failures leave `failed_from_state`
+/// NULL and are rejected — resuming them would just rerun the same condition.
 pub async fn resume(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -341,11 +347,45 @@ pub async fn resume(
         .await?
         .ok_or(NautiloopError::LoopNotFound { id })?;
 
-    if record.state != LoopState::Paused && record.state != LoopState::AwaitingReauth {
+    let resumable = match record.state {
+        LoopState::Paused | LoopState::AwaitingReauth => true,
+        LoopState::Failed => record.failed_from_state.is_some(),
+        _ => false,
+    };
+
+    if !resumable {
+        let expected = if record.state == LoopState::Failed {
+            "FAILED loop has no resumable stage (max rounds exhausted or logical failure)"
+                .to_string()
+        } else {
+            "PAUSED, AWAITING_REAUTH, or transient-FAILED".to_string()
+        };
         return Err(NautiloopError::InvalidStateTransition {
             action: "resume".to_string(),
             state: record.state.to_string(),
-            expected: "PAUSED or AWAITING_REAUTH".to_string(),
+            expected,
+        });
+    }
+
+    // #96: For FAILED loops, verify no replacement loop has taken
+    // over the same deterministic branch. Checking any loop (not just
+    // active) with a newer updated_at: a replacement that has since
+    // converged, shipped, or itself failed still mutated the worktree
+    // after this loop's failure, so resuming the older row would run
+    // against a worktree the older loop no longer understands. The
+    // operator has to abandon this row and cut a fresh loop instead.
+    if record.state == LoopState::Failed
+        && let Some(other) = state.store.get_loop_by_branch_any(&record.branch).await?
+        && other.id != record.id
+        && other.updated_at > record.updated_at
+    {
+        return Err(NautiloopError::InvalidStateTransition {
+            action: "resume".to_string(),
+            state: record.state.to_string(),
+            expected: format!(
+                "branch {} was taken over by a newer loop {} (state {}) — the worktree no longer matches this row; start a fresh loop instead",
+                record.branch, other.id, other.state
+            ),
         });
     }
 
@@ -697,6 +737,7 @@ mod tests {
             resume_requested: false,
             paused_from_state: None,
             reauth_from_state: None,
+            failed_from_state: None,
             failure_reason: None,
             current_sha: None,
             session_id: None,
@@ -757,6 +798,7 @@ mod tests {
             resume_requested: false,
             paused_from_state: None,
             reauth_from_state: None,
+            failed_from_state: None,
             failure_reason: None,
             current_sha: None,
             session_id: None,
@@ -811,6 +853,7 @@ mod tests {
             resume_requested: false,
             paused_from_state: None,
             reauth_from_state: None,
+            failed_from_state: None,
             failure_reason: None,
             current_sha: None,
             session_id: None,

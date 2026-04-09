@@ -62,13 +62,18 @@ impl ConvergentLoopDriver {
             .await?
             .ok_or(NautiloopError::LoopNotFound { id: loop_id })?;
 
-        // Terminal states: clear stale flags and return (never transition out)
+        // Terminal states: clear stale flags and return, EXCEPT for
+        // FAILED with a pending resume_requested flag — issue #96 lets
+        // `nemo resume` bring a transient-failed loop back into the loop.
         if record.state.is_terminal() {
             if record.cancel_requested {
                 let _ = self
                     .store
                     .set_loop_flag(record.id, crate::state::LoopFlag::Cancel, false)
                     .await;
+            }
+            if record.state == LoopState::Failed && record.resume_requested {
+                return self.handle_failed(&record).await;
             }
             return Ok(record.state);
         }
@@ -243,7 +248,7 @@ impl ConvergentLoopDriver {
                         "Implement stage completed without result output, treating as failure"
                     );
                     return self
-                        .handle_job_failed(
+                        .handle_job_failed_non_resumable(
                             &updated,
                             "Implement stage exited successfully but produced no NAUTILOOP_RESULT",
                         )
@@ -676,8 +681,12 @@ impl ConvergentLoopDriver {
                     .await
             }
             None => {
-                // No output: treat as failure, retry
-                self.handle_job_failed(record, "Test stage produced no output")
+                // No output: treat as failure, retry.
+                // Non-resumable — ingest_job_output already stamped
+                // completed_at on this round, so a resumed run's output
+                // would be ignored and the evaluator would re-read the
+                // same empty output. See #96 round-4 codex review.
+                self.handle_job_failed_non_resumable(record, "Test stage produced no output")
                     .await
             }
         }
@@ -911,6 +920,187 @@ impl ConvergentLoopDriver {
         }
     }
 
+    /// Delete stale k8s Job objects from a failed loop's previous
+    /// exhausted retry attempts so the resumed dispatch (which resets
+    /// retry_count back to 0) can reuse the lower `-t{N}` name slots
+    /// without hitting AlreadyExists.
+    ///
+    /// This is NOT best-effort. The kube dispatcher treats 404 NotFound
+    /// as Ok(()) internally (see k8s/client.rs), so any Err returned
+    /// here is a real API/RBAC/network failure. If we swallowed it and
+    /// let redispatch proceed, create_job would hit AlreadyExists on the
+    /// still-present stale attempt, the loop would transition out of
+    /// Failed with failed_from_state=None, and the resume would be
+    /// silently wedged until manual cleanup. Propagate the error so
+    /// handle_failed bails out cleanly with the loop still in Failed
+    /// state and the operator can retry the resume after fixing the
+    /// underlying k8s condition. See codex round-2 review of #96.
+    async fn delete_stale_failed_attempts(
+        &self,
+        record: &LoopRecord,
+        failed_from: LoopState,
+    ) -> Result<()> {
+        // Map the failed-from state to the stage name used in job names.
+        // For Hardening we inspect the last round record to tell audit
+        // apart from revise, same logic as redispatch_current_stage.
+        let stage_name: Option<String> = match failed_from {
+            LoopState::Hardening => {
+                let rounds = self.store.get_rounds(record.id).await?;
+                rounds
+                    .iter()
+                    .rfind(|r| r.round == record.round)
+                    .map(|r| r.stage.clone())
+                    .or_else(|| Some("audit".to_string()))
+            }
+            LoopState::Implementing => Some("implement".to_string()),
+            LoopState::Testing => Some("test".to_string()),
+            LoopState::Reviewing => Some("review".to_string()),
+            _ => None,
+        };
+
+        let Some(stage) = stage_name else {
+            return Ok(());
+        };
+
+        let short_id = &record.id.to_string()[..8];
+        let namespace = &self.config.cluster.jobs_namespace;
+        // Delete attempts 1..=retry_count+1 — the full range that the
+        // failed loop had consumed before transitioning to Failed.
+        let max_attempt = record.retry_count + 1;
+        for attempt in 1..=max_attempt {
+            let job_name = format!("nautiloop-{short_id}-{stage}-r{}-t{attempt}", record.round);
+            self.dispatcher.delete_job(&job_name, namespace).await?;
+        }
+        Ok(())
+    }
+
+    /// Handle FAILED: check for resume flag (#96).
+    ///
+    /// When an engineer runs `nemo resume <loop-id>` on a FAILED loop, the
+    /// API handler sets resume_requested=true. The next reconciler tick
+    /// lands here, flips state back to failed_from_state, and calls
+    /// redispatch_current_stage. The existing worktree is preserved
+    /// because redispatch_current_stage does not touch the PVC layout —
+    /// it only issues a fresh K8s Job against the same branch/sha pair.
+    async fn handle_failed(&self, record: &LoopRecord) -> Result<LoopState> {
+        if record.resume_requested {
+            if let Some(failed_from) = record.failed_from_state {
+                // Before resetting retry_count, delete the stale k8s Job
+                // objects from the prior exhausted attempts. Their TTL
+                // window can be up to an hour, so without this cleanup
+                // the resumed dispatch hits AlreadyExists on names like
+                // `...-r{round}-t1` and spins. A failure here aborts
+                // the resume — see the long comment on the helper.
+                //
+                // On abort we clear resume_requested so the branch
+                // ownership query (which treats FAILED+resume as
+                // active) stops counting this row. The loop goes back
+                // to plain FAILED: the operator can either re-run
+                // `nemo resume` after fixing the k8s condition, or
+                // abandon it with a fresh `nemo harden` on the same
+                // spec (which is now unblocked from the branch). See
+                // codex round-4 review of #96.
+                if let Err(e) = self.delete_stale_failed_attempts(record, failed_from).await {
+                    tracing::error!(
+                        loop_id = %record.id,
+                        error = %e,
+                        "Failed to clean up stale k8s Jobs; releasing branch ownership so operator can retry or abandon"
+                    );
+                    let _ = self
+                        .store
+                        .set_loop_flag(record.id, crate::state::LoopFlag::Resume, false)
+                        .await;
+                    return Err(e);
+                }
+
+                let mut updated = record.clone();
+                updated.state = failed_from;
+                updated.failed_from_state = None;
+                updated.retry_count = 0; // Fresh budget for the resumed stage
+                updated.failure_reason = None;
+                updated.active_job_name = None;
+                // Refresh current_sha so the divergence check doesn't
+                // immediately re-pause after resume (same reasoning as
+                // handle_paused / handle_awaiting_reauth).
+                if let Ok(Some(sha)) = self.git.get_branch_sha(&record.branch).await {
+                    updated.current_sha = Some(sha);
+                }
+                // Redispatch can still fail after stale cleanup (e.g.
+                // the worktree/branch can no longer be resolved, build_job
+                // fails, k8s create rejects). Clear the resume flag on
+                // error so this terminal row doesn't keep getting picked
+                // up by the reconciler holding the branch hostage. The
+                // loop stays Failed; operator can retry after fixing the
+                // underlying cause.
+                match self.redispatch_current_stage(&updated).await {
+                    Ok(result) => {
+                        self.store
+                            .set_loop_flag(record.id, crate::state::LoopFlag::Resume, false)
+                            .await?;
+                        tracing::info!(
+                            loop_id = %record.id,
+                            round = updated.round,
+                            target_state = ?failed_from,
+                            "Resumed FAILED loop"
+                        );
+                        Ok(result)
+                    }
+                    Err(e) => {
+                        // redispatch_current_stage persists the cloned
+                        // record at the target active state BEFORE
+                        // calling create_job, so a failure here leaves
+                        // the row in e.g. Hardening with no job and no
+                        // failure metadata. Roll it back to FAILED with
+                        // the original failed_from_state restored so
+                        // the operator sees the same row they had
+                        // before the failed resume attempt, and the
+                        // reconciler doesn't auto-redispatch.
+                        tracing::error!(
+                            loop_id = %record.id,
+                            error = %e,
+                            "Redispatch during resume failed; rolling row back to FAILED and releasing branch"
+                        );
+                        if let Ok(Some(mut current)) = self.store.get_loop(record.id).await {
+                            current.state = LoopState::Failed;
+                            current.sub_state = None;
+                            current.failed_from_state = Some(failed_from);
+                            current.failure_reason = Some(format!("Resume redispatch failed: {e}"));
+                            current.active_job_name = None;
+                            if let Err(update_err) = self.store.update_loop(&current).await {
+                                tracing::error!(
+                                    loop_id = %record.id,
+                                    error = %update_err,
+                                    "Failed to roll row back to FAILED after resume error"
+                                );
+                            }
+                        }
+                        let _ = self
+                            .store
+                            .set_loop_flag(record.id, crate::state::LoopFlag::Resume, false)
+                            .await;
+                        Err(e)
+                    }
+                }
+            } else {
+                // No failed_from_state: either the loop failed via a
+                // non-transient path (max rounds, logical failure) or it
+                // predates #96. Either way, there's nothing to resume to —
+                // clear the flag and stay Failed so nemo resume doesn't
+                // spin forever.
+                self.store
+                    .set_loop_flag(record.id, crate::state::LoopFlag::Resume, false)
+                    .await?;
+                tracing::warn!(
+                    loop_id = %record.id,
+                    "Resume requested on FAILED loop with no failed_from_state; ignoring"
+                );
+                Ok(LoopState::Failed)
+            }
+        } else {
+            Ok(LoopState::Failed)
+        }
+    }
+
     /// Handle AWAITING_REAUTH: check for resume flag (after creds re-pushed).
     async fn handle_awaiting_reauth(&self, record: &LoopRecord) -> Result<LoopState> {
         if record.resume_requested {
@@ -993,6 +1183,30 @@ impl ConvergentLoopDriver {
 
     /// Handle a failed job: detect auth errors, retry, or fail the loop.
     async fn handle_job_failed(&self, record: &LoopRecord, reason: &str) -> Result<LoopState> {
+        self.handle_job_failed_inner(record, reason, true).await
+    }
+
+    /// Like `handle_job_failed` but does NOT mark the exhausted Failed state
+    /// as resumable via #96. Use this for failures where ingest_job_output
+    /// has already stamped completed_at on the current round (e.g. a job
+    /// that succeeded but produced no NAUTILOOP_RESULT line). Redispatching
+    /// those would emit a new round output that ingest_job_output ignores
+    /// because it only writes rows with completed_at IS NULL, so the
+    /// evaluator would just re-read the stale empty output and fail again.
+    async fn handle_job_failed_non_resumable(
+        &self,
+        record: &LoopRecord,
+        reason: &str,
+    ) -> Result<LoopState> {
+        self.handle_job_failed_inner(record, reason, false).await
+    }
+
+    async fn handle_job_failed_inner(
+        &self,
+        record: &LoopRecord,
+        reason: &str,
+        resumable_on_exhaustion: bool,
+    ) -> Result<LoopState> {
         let mut updated = record.clone();
 
         // Detect credential expiry (FR-10): transition to AWAITING_REAUTH
@@ -1030,7 +1244,15 @@ impl ConvergentLoopDriver {
             );
             self.redispatch_current_stage(&updated).await
         } else {
-            // Exhausted retries: fail the loop
+            // Exhausted retries: fail the loop.
+            // Only mark the Failed state resumable (#96) when the
+            // caller vouches that redispatch would actually produce
+            // new round output. Logical failures (empty test output,
+            // implement completed without result) leave failed_from_state
+            // None so /resume rejects them cleanly.
+            if resumable_on_exhaustion {
+                updated.failed_from_state = Some(updated.state);
+            }
             updated.state = LoopState::Failed;
             updated.sub_state = None;
             updated.failure_reason =
@@ -1054,6 +1276,15 @@ impl ConvergentLoopDriver {
             );
             self.redispatch_current_stage(record).await
         } else {
+            // NOT resumable via #96: by the time we get here, the round
+            // record has already been marked completed by ingest_job_output
+            // with the malformed verdict. Redispatching would produce a
+            // new run whose output gets dropped (ingest_job_output only
+            // writes to rounds where completed_at IS NULL), so the
+            // evaluator would just re-read the same malformed output and
+            // fail again. Leave failed_from_state None so api::resume
+            // rejects it with a clear message until we add per-resume
+            // round-reset logic. See codex round-3 review.
             record.state = LoopState::Failed;
             record.sub_state = None;
             record.failure_reason = Some(format!(
@@ -1526,6 +1757,7 @@ mod tests {
             resume_requested: false,
             paused_from_state: None,
             reauth_from_state: None,
+            failed_from_state: None,
             failure_reason: None,
             // Matches the real /start handler, which always calls
             // set_current_sha after create_branch before returning 201.
@@ -1816,7 +2048,74 @@ mod tests {
         assert_eq!(new_state, LoopState::Failed);
 
         let updated = store.get_loop(record.id).await.unwrap().unwrap();
-        assert!(updated.failure_reason.unwrap().contains("OOM"));
+        assert!(updated.failure_reason.as_ref().unwrap().contains("OOM"));
+        // #96: failed_from_state is captured so `nemo resume` can
+        // redispatch the same stage later without guessing.
+        assert_eq!(updated.failed_from_state, Some(LoopState::Implementing));
+    }
+
+    #[tokio::test]
+    async fn test_failed_resume_redispatches_same_stage() {
+        // #96: A transient-FAILED loop with resume_requested=true
+        // should flip back to failed_from_state and redispatch on tick.
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let driver = make_driver(store.clone(), dispatcher.clone());
+
+        let mut record = make_pending_loop(true);
+        record.state = LoopState::Failed;
+        record.failed_from_state = Some(LoopState::Hardening);
+        record.failure_reason = Some("insufficient_quota (after 2 retries)".to_string());
+        record.active_job_name = Some("stale-job".to_string());
+        record.retry_count = 2;
+        record.round = 4;
+        store.create_loop(&record).await.unwrap();
+        store
+            .set_loop_flag(record.id, crate::state::LoopFlag::Resume, true)
+            .await
+            .unwrap();
+
+        let new_state = driver.tick(record.id).await.unwrap();
+        assert_eq!(new_state, LoopState::Hardening);
+
+        let updated = store.get_loop(record.id).await.unwrap().unwrap();
+        assert_eq!(updated.state, LoopState::Hardening);
+        assert_eq!(updated.failed_from_state, None);
+        assert_eq!(updated.failure_reason, None);
+        assert_eq!(updated.retry_count, 0);
+        assert!(
+            !updated.resume_requested,
+            "resume flag should be cleared after successful redispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_resume_without_failed_from_state_noops() {
+        // #96: A FAILED loop with NO failed_from_state (e.g. max-rounds
+        // exhaustion) should stay Failed and just clear the flag — no
+        // infinite reconciler loop, no guessing a stage.
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let driver = make_driver(store.clone(), dispatcher.clone());
+
+        let mut record = make_pending_loop(true);
+        record.state = LoopState::Failed;
+        record.failed_from_state = None;
+        record.failure_reason = Some("Max harden rounds (10) exceeded".to_string());
+        store.create_loop(&record).await.unwrap();
+        store
+            .set_loop_flag(record.id, crate::state::LoopFlag::Resume, true)
+            .await
+            .unwrap();
+
+        let new_state = driver.tick(record.id).await.unwrap();
+        assert_eq!(new_state, LoopState::Failed);
+
+        let updated = store.get_loop(record.id).await.unwrap().unwrap();
+        assert!(
+            !updated.resume_requested,
+            "resume flag should be cleared even when no target stage exists"
+        );
     }
 
     #[tokio::test]

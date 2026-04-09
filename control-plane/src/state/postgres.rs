@@ -98,6 +98,10 @@ fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
         resume_requested: row.get("resume_requested"),
         paused_from_state: row.get::<Option<LoopState>, _>("paused_from_state"),
         reauth_from_state: row.get::<Option<LoopState>, _>("reauth_from_state"),
+        failed_from_state: row
+            .try_get::<Option<LoopState>, _>("failed_from_state")
+            .ok()
+            .flatten(),
         failure_reason: row.get("failure_reason"),
         current_sha: row.get("current_sha"),
         session_id: row.get("session_id"),
@@ -229,8 +233,16 @@ impl StateStore for PgStateStore {
     }
 
     async fn get_loop_by_branch(&self, branch: &str) -> Result<Option<LoopRecord>> {
+        // #96: A FAILED loop with resume_requested=true is effectively
+        // active — it will flip back to its previous stage on the next
+        // reconciler tick — so it MUST count as branch-owning here.
+        // Otherwise between `nemo resume` and the tick, a second
+        // `/start` could acquire the same branch and corrupt the worktree.
         let row = sqlx::query(
-            "SELECT * FROM loops WHERE branch = $1 AND state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED')",
+            "SELECT * FROM loops \
+             WHERE branch = $1 \
+               AND (state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED') \
+                    OR (state = 'FAILED' AND resume_requested = TRUE))",
         )
         .bind(branch)
         .fetch_optional(&self.pool)
@@ -250,8 +262,14 @@ impl StateStore for PgStateStore {
     }
 
     async fn get_active_loops(&self) -> Result<Vec<LoopRecord>> {
+        // Terminal states are excluded EXCEPT FAILED loops with a pending
+        // resume_requested flag (#96) — those need one reconciler tick to
+        // land in handle_failed and transition back to their original stage.
         let rows = sqlx::query(
-            "SELECT * FROM loops WHERE state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED') ORDER BY created_at ASC",
+            "SELECT * FROM loops \
+             WHERE state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED') \
+                OR (state = 'FAILED' AND resume_requested = TRUE) \
+             ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -315,6 +333,7 @@ impl StateStore for PgStateStore {
             UPDATE loops SET
                 spec_path = $2, state = $3::loop_state, sub_state = $4::sub_state, round = $5,
                 paused_from_state = $6::loop_state, reauth_from_state = $7::loop_state,
+                failed_from_state = $17::loop_state,
                 failure_reason = $8, current_sha = $9, session_id = $10,
                 active_job_name = $11, retry_count = $12,
                 merge_sha = $13, merged_at = $14,
@@ -339,6 +358,7 @@ impl StateStore for PgStateStore {
         .bind(record.merged_at)
         .bind(&record.hardened_spec_path)
         .bind(&record.spec_pr_url)
+        .bind(record.failed_from_state.map(loop_state_str))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -369,8 +389,15 @@ impl StateStore for PgStateStore {
     }
 
     async fn has_active_loop_for_branch(&self, branch: &str) -> Result<bool> {
+        // #96: FAILED + resume_requested counts as active — see the
+        // matching comment on get_loop_by_branch.
         let row: (bool,) = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM loops WHERE branch = $1 AND state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED'))",
+            "SELECT EXISTS(\
+                 SELECT 1 FROM loops \
+                 WHERE branch = $1 \
+                   AND (state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED') \
+                        OR (state = 'FAILED' AND resume_requested = TRUE))\
+             )",
         )
         .bind(branch)
         .fetch_one(&self.pool)

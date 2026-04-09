@@ -263,6 +263,10 @@ pub struct LoopRecord {
     pub resume_requested: bool,
     pub paused_from_state: Option<LoopState>,
     pub reauth_from_state: Option<LoopState>,
+    /// Stage the loop was running when it transitioned to Failed. Used by
+    /// `nemo resume <loop-id>` on FAILED loops to redispatch the correct
+    /// stage against the existing worktree (issue #96).
+    pub failed_from_state: Option<LoopState>,
     pub failure_reason: Option<String>,
     pub current_sha: Option<String>,
     pub session_id: Option<String>,

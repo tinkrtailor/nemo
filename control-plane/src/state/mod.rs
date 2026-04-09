@@ -173,10 +173,15 @@ pub mod memory {
     impl StateStore for MemoryStateStore {
         async fn create_loop(&self, record: &LoopRecord) -> Result<LoopRecord> {
             let mut loops = self.loops.write().await;
-            // Enforce unique active branch constraint (mirrors Postgres partial unique index)
-            let has_active = loops
-                .values()
-                .any(|l| l.branch == record.branch && !l.state.is_terminal());
+            // Enforce unique active branch constraint (mirrors Postgres
+            // partial unique index, including the #96 FAILED+resume
+            // exception: a failed loop with a pending resume still owns
+            // the branch and must block new loops on it).
+            let has_active = loops.values().any(|l| {
+                l.branch == record.branch
+                    && (!l.state.is_terminal()
+                        || (l.state == LoopState::Failed && l.resume_requested))
+            });
             if has_active {
                 return Err(crate::error::NautiloopError::Database(
                     sqlx::Error::Database(Box::new(MemoryUniqueViolation)),
@@ -195,7 +200,11 @@ pub mod memory {
             let loops = self.loops.read().await;
             Ok(loops
                 .values()
-                .find(|l| l.branch == branch && !l.state.is_terminal())
+                .find(|l| {
+                    l.branch == branch
+                        && (!l.state.is_terminal()
+                            || (l.state == LoopState::Failed && l.resume_requested))
+                })
                 .cloned())
         }
 
@@ -213,7 +222,11 @@ pub mod memory {
             let loops = self.loops.read().await;
             Ok(loops
                 .values()
-                .filter(|l| !l.state.is_terminal())
+                .filter(|l| {
+                    // #96: include FAILED loops with a pending resume so
+                    // handle_failed gets a chance to redispatch them.
+                    !l.state.is_terminal() || (l.state == LoopState::Failed && l.resume_requested)
+                })
                 .cloned()
                 .collect())
         }
@@ -298,9 +311,11 @@ pub mod memory {
 
         async fn has_active_loop_for_branch(&self, branch: &str) -> Result<bool> {
             let loops = self.loops.read().await;
-            Ok(loops
-                .values()
-                .any(|l| l.branch == branch && !l.state.is_terminal()))
+            Ok(loops.values().any(|l| {
+                l.branch == branch
+                    && (!l.state.is_terminal()
+                        || (l.state == LoopState::Failed && l.resume_requested))
+            }))
         }
 
         async fn create_round(&self, record: &RoundRecord) -> Result<()> {

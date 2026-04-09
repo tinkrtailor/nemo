@@ -206,6 +206,7 @@ mod tests {
             resume_requested: false,
             paused_from_state: None,
             reauth_from_state: None,
+            failed_from_state: None,
             failure_reason: None,
             current_sha: None,
             session_id: None,
