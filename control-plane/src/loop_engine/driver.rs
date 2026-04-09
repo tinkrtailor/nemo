@@ -1805,10 +1805,24 @@ impl ConvergentLoopDriver {
     /// Read the engineer's Claude credential bundle straight from the
     /// K8s API server (not from any cached or pod-mounted view) and
     /// return a human-readable reason if it's stale, or None if it's
-    /// fresh / no bundle is present at all. "No bundle" returns None
-    /// because that's the Linux/XDG case where the sidecar reads a
-    /// different source, and #98 shouldn't block dispatch there.
-    /// See issue #98 for the motivating incident.
+    /// fresh. "Stale" includes three cases:
+    ///
+    /// - The `claude` key is missing. This is the only source of
+    ///   claude credentials in the mounted pod (job_builder.rs:82-99
+    ///   mounts the secret's `claude` key at ~/.claude/.credentials.json
+    ///   for implement/revise stages), so missing means the pod
+    ///   will 401 on its first claude call — fatal for the stages
+    ///   that call this helper.
+    /// - The bundle has an expiresAt within 5 minutes of now.
+    /// - The bundle is unparseable.
+    ///
+    /// Bundles without an `expiresAt` field (legacy / Linux session
+    /// files) pass through as fresh since we can't prove they're
+    /// stale; the existing runtime 401 detection handles them.
+    ///
+    /// Returns None if the underlying secret GET itself fails
+    /// (RBAC/network) so the preflight never hard-blocks dispatch
+    /// on control-plane infrastructure flakes. See issue #98.
     async fn claude_creds_stale_reason(&self, engineer: &str) -> Option<String> {
         const BUFFER_MS: u64 = 5 * 60 * 1000;
         let safe_engineer: String = engineer.to_lowercase().replace('_', "-");
