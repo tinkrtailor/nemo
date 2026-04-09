@@ -1,3 +1,4 @@
+mod claude_creds;
 mod client;
 mod commands;
 mod config;
@@ -220,6 +221,13 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &eng_config.models)?;
+            claude_creds::ensure_fresh(
+                &http_client,
+                &eng_config.engineer,
+                &eng_config.name,
+                &eng_config.email,
+            )
+            .await?;
             // nemo harden: harden=true, harden_only=true, ship_mode=false
             commands::start::run(
                 &http_client,
@@ -245,6 +253,13 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &eng_config.models)?;
+            claude_creds::ensure_fresh(
+                &http_client,
+                &eng_config.engineer,
+                &eng_config.name,
+                &eng_config.email,
+            )
+            .await?;
             // nemo start: ship_mode=false
             commands::start::run(
                 &http_client,
@@ -269,6 +284,13 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &eng_config.models)?;
+            claude_creds::ensure_fresh(
+                &http_client,
+                &eng_config.engineer,
+                &eng_config.name,
+                &eng_config.email,
+            )
+            .await?;
             // nemo ship: ship_mode=true, auto_approve implied
             commands::start::run(
                 &http_client,
