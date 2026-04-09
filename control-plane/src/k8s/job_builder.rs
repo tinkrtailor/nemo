@@ -554,14 +554,17 @@ fn build_agent_mounts(
     }
 
     // #67: Mount opencode subscription auth bundle for REVIEW/AUDIT stages.
-    // subPath lands only auth.json at the target; the rest of
-    // ~/.local/share/opencode/ stays writable via the agent home volume
-    // so opencode can still write session state, logs, etc. at runtime.
+    // This is a directory mount, NOT subPath — the secret is optional and
+    // may have no `opencode-auth` key for engineers on the Platform-key
+    // path (#64). A subPath mount would fail the pod at bind time when
+    // the source file is missing; a directory mount just projects an
+    // empty dir, which the agent-entry script then skips. When the file
+    // IS present, agent-entry copies it into ~/.local/share/opencode/
+    // before invoking opencode so the rest of the data dir stays writable.
     if is_review_or_audit {
         mounts.push(VolumeMount {
             name: "opencode-auth".to_string(),
-            mount_path: "/home/agent/.local/share/opencode/auth.json".to_string(),
-            sub_path: Some("auth.json".to_string()),
+            mount_path: "/secrets/opencode-auth".to_string(),
             read_only: Some(true),
             ..Default::default()
         });
@@ -1134,18 +1137,22 @@ mod tests {
             assert_eq!(items[0].key, "opencode-auth");
             assert_eq!(items[0].path, "auth.json");
 
-            // Mount is a subPath file mount at the expected opencode path.
+            // Mount is a directory (NOT subPath) so an empty optional
+            // projection doesn't fail the pod at bind time when the
+            // engineer hasn't registered opencode-auth. agent-entry
+            // copies auth.json into the opencode data dir if present.
             let agent = &pod_spec.containers[0];
             let mounts = agent.volume_mounts.as_ref().unwrap();
             let mount = mounts
                 .iter()
                 .find(|m| m.name == "opencode-auth")
                 .unwrap_or_else(|| panic!("opencode-auth mount missing for {stage_name}"));
-            assert_eq!(
-                mount.mount_path,
-                "/home/agent/.local/share/opencode/auth.json"
+            assert_eq!(mount.mount_path, "/secrets/opencode-auth");
+            assert!(
+                mount.sub_path.is_none(),
+                "opencode-auth must be a directory mount, not subPath — \
+                 subPath + optional secret fails the pod when the key is absent"
             );
-            assert_eq!(mount.sub_path.as_deref(), Some("auth.json"));
             assert_eq!(mount.read_only, Some(true));
         }
     }
