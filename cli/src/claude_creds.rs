@@ -232,21 +232,32 @@ pub async fn ensure_fresh(
         return Ok(());
     }
 
-    // Only write if the extracted bundle differs from what's on disk.
-    // Avoids bumping mtime on every start when the keychain itself
-    // happens to match the disk copy exactly.
+    // Push the refreshed bundle to the control plane FIRST. That's
+    // the part that actually fixes the 401 — the local cache write
+    // is only useful for the next invocation. If we swapped the
+    // order, a read-only/misowned ~/.claude directory or a disk-full
+    // tmp write would abort `nemo harden` even though the refreshed
+    // secret could have been uploaded successfully.
+    push_to_control_plane(client, engineer, name, email, &fresh).await;
+
+    // Then try to update the local cache too. Best-effort: log and
+    // continue on any failure so the preflight stays non-fatal, same
+    // contract as the other error paths in this module.
     let write_path = existing_path.unwrap_or_else(credentials_path);
     let existing = std::fs::read_to_string(&write_path).unwrap_or_default();
-    if existing.trim() != fresh.trim() {
-        write_atomic(&write_path, &fresh).with_context(|| {
+    if existing.trim() != fresh.trim()
+        && let Err(e) = write_atomic(&write_path, &fresh).with_context(|| {
             format!(
                 "failed to write refreshed credentials to {}",
                 write_path.display()
             )
-        })?;
+        })
+    {
+        tracing::warn!(
+            error = %e,
+            "Could not update local Claude credential cache; control plane refresh still succeeded"
+        );
     }
-
-    push_to_control_plane(client, engineer, name, email, &fresh).await;
 
     Ok(())
 }
