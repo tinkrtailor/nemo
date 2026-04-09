@@ -1046,11 +1046,34 @@ impl ConvergentLoopDriver {
                         Ok(result)
                     }
                     Err(e) => {
+                        // redispatch_current_stage persists the cloned
+                        // record at the target active state BEFORE
+                        // calling create_job, so a failure here leaves
+                        // the row in e.g. Hardening with no job and no
+                        // failure metadata. Roll it back to FAILED with
+                        // the original failed_from_state restored so
+                        // the operator sees the same row they had
+                        // before the failed resume attempt, and the
+                        // reconciler doesn't auto-redispatch.
                         tracing::error!(
                             loop_id = %record.id,
                             error = %e,
-                            "Redispatch during resume failed; releasing branch ownership so operator can retry or abandon"
+                            "Redispatch during resume failed; rolling row back to FAILED and releasing branch"
                         );
+                        if let Ok(Some(mut current)) = self.store.get_loop(record.id).await {
+                            current.state = LoopState::Failed;
+                            current.sub_state = None;
+                            current.failed_from_state = Some(failed_from);
+                            current.failure_reason = Some(format!("Resume redispatch failed: {e}"));
+                            current.active_job_name = None;
+                            if let Err(update_err) = self.store.update_loop(&current).await {
+                                tracing::error!(
+                                    loop_id = %record.id,
+                                    error = %update_err,
+                                    "Failed to roll row back to FAILED after resume error"
+                                );
+                            }
+                        }
                         let _ = self
                             .store
                             .set_loop_flag(record.id, crate::state::LoopFlag::Resume, false)
