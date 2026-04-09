@@ -1309,12 +1309,19 @@ impl ConvergentLoopDriver {
         }
         updated.retry_count = 0;
 
-        // #98: Claude credential preflight — see
-        // `preflight_claude_creds` for the full rationale.
+        // #98: Claude credential preflight. See the comment on the
+        // matching block in dispatch_revise for why we insert a
+        // sentinel implement round only on the reauth path, not
+        // the fresh-creds path — without a round record, a later
+        // redispatch_current_stage creates a pod but ingest_job_output
+        // has nowhere to attach the result and the resumed run is
+        // dropped as "produced no NAUTILOOP_RESULT" (codex round 5).
         if let Some(reauth_state) = self
             .preflight_claude_creds(&updated, LoopState::Implementing)
             .await?
         {
+            self.create_round_record(&updated, "implement", "preflight-pending")
+                .await?;
             return Ok(reauth_state);
         }
 
@@ -1414,11 +1421,15 @@ impl ConvergentLoopDriver {
         record.sub_state = Some(SubState::Dispatched);
         record.retry_count = 0;
 
-        // #98: Claude credential preflight.
+        // #98: Claude credential preflight. See start_implementing
+        // for the sentinel rationale — without a round record, a
+        // resumed dispatch has nowhere to attach its output.
         if let Some(reauth_state) = self
             .preflight_claude_creds(record, LoopState::Implementing)
             .await?
         {
+            self.create_round_record(record, "implement", "preflight-pending")
+                .await?;
             return Ok(reauth_state);
         }
 
