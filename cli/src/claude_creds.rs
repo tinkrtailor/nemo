@@ -195,6 +195,19 @@ pub async fn ensure_fresh(
         .map(|p| !is_stale(p, now))
         .unwrap_or(false);
     if is_fresh {
+        // The local file is fresh but the control plane might still
+        // have a stale copy — either because the token rotated on
+        // disk (Linux/XDG case where Claude Code writes directly) or
+        // because an earlier dispatch pushed an older version. Push
+        // the current local contents unconditionally so the next job
+        // mount picks them up. One extra HTTP POST per dispatch is
+        // cheap compared to a loop that dies on 401.
+        if let Some(path) = existing_path
+            && let Ok(contents) = std::fs::read_to_string(&path)
+            && !contents.trim().is_empty()
+        {
+            push_to_control_plane(client, engineer, name, email, contents.trim()).await;
+        }
         return Ok(());
     }
 
@@ -233,27 +246,35 @@ pub async fn ensure_fresh(
         })?;
     }
 
-    // Push to the control plane so the next job mount picks it up.
-    // Name/email are optional — if blank they'll be ignored by the
-    // handler and not overwritten server-side.
+    push_to_control_plane(client, engineer, name, email, &fresh).await;
+
+    Ok(())
+}
+
+/// Push a Claude credential bundle to the control plane. Non-fatal
+/// on every error path — a failure to push still lets the dispatch
+/// proceed against whatever's already in the server-side secret,
+/// and a real auth error will surface later with a clearer message.
+async fn push_to_control_plane(
+    client: &NemoClient,
+    engineer: &str,
+    name: &str,
+    email: &str,
+    bundle: &str,
+) {
     let name_opt = if name.is_empty() { None } else { Some(name) };
     let email_opt = if email.is_empty() { None } else { Some(email) };
     if let Err(e) = client
-        .register_credentials(engineer, "claude", &fresh, name_opt, email_opt)
+        .register_credentials(engineer, "claude", bundle, name_opt, email_opt)
         .await
     {
-        // Non-fatal: the loop will either work with the existing
-        // server-side credentials or fail with a clearer message
-        // from the agent side. Log and move on.
         tracing::warn!(
             error = %e,
-            "Could not push refreshed Claude credentials to control plane; continuing with server-side copy"
+            "Could not push Claude credentials to control plane; continuing with server-side copy"
         );
     } else {
-        tracing::info!("Refreshed Claude credentials before dispatch");
+        tracing::debug!("Pushed Claude credentials to control plane before dispatch");
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
