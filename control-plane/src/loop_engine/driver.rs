@@ -1347,7 +1347,19 @@ impl ConvergentLoopDriver {
         record.sub_state = Some(SubState::Dispatched);
         record.retry_count = 0;
 
-        // #98: Claude credential preflight.
+        // #98: Claude credential preflight. Before running it, write
+        // a sentinel round record with stage="revise" so that if we
+        // do transition to AWAITING_REAUTH, a later `nemo resume`
+        // landing in redispatch_current_stage picks `revise` (not
+        // `audit`) when it disambiguates the Hardening sub-stage.
+        // Without this, the last completed round is `audit` and the
+        // resume reruns audit, blowing a harden round on the wrong
+        // stage. See codex round 2 on #98. The sentinel has no
+        // job_name / completed_at; persist_then_dispatch on resume
+        // creates a second round record with the real job, which is
+        // harmless because rfind takes the last entry.
+        self.create_round_record(record, "revise", "preflight-pending")
+            .await?;
         if let Some(reauth_state) = self
             .preflight_claude_creds(record, LoopState::Hardening)
             .await?
@@ -1431,6 +1443,20 @@ impl ConvergentLoopDriver {
     /// Re-dispatch the current stage (after retry or resume).
     /// Deletes the old K8s Job first to avoid AlreadyExists on deterministic names.
     async fn redispatch_current_stage(&self, record: &LoopRecord) -> Result<LoopState> {
+        // Clean up the old job before anything else — even if the
+        // preflight (below) is about to send us to AWAITING_REAUTH,
+        // we still need to delete the stale pod. Otherwise the
+        // preflight clears active_job_name on the record, the delete
+        // gets skipped, and the orphaned pod (e.g. a PAUSED job that
+        // was still running) keeps owning the worktree until k8s TTL
+        // cleanup. A later resume would then create a second job
+        // against the same branch. See codex round 2 on #98.
+        if let Some(ref old_job) = record.active_job_name {
+            self.dispatcher
+                .delete_job(old_job, &self.config.cluster.jobs_namespace)
+                .await?;
+        }
+
         // #98: Redispatch paths (paused resume, reauth resume, failed
         // resume, retry) also create pods and must not bypass the
         // Claude credential preflight. Run it here for
@@ -1455,14 +1481,6 @@ impl ConvergentLoopDriver {
             && let Some(reauth_state) = self.preflight_claude_creds(record, record.state).await?
         {
             return Ok(reauth_state);
-        }
-
-        // Clean up the old job before creating a new one — fail if delete fails
-        // to prevent two concurrent jobs for one loop
-        if let Some(ref old_job) = record.active_job_name {
-            self.dispatcher
-                .delete_job(old_job, &self.config.cluster.jobs_namespace)
-                .await?;
         }
 
         let mut updated = record.clone();
