@@ -360,18 +360,40 @@ pub async fn pod_logs(
         )));
     }
 
-    // Iterate matching pods and return the first successful logs result.
-    // A Job can have multiple pods after eviction or node loss, and
-    // list order is not guaranteed by k8s, so trying only the first
-    // pod would be racy. Mirrors control-plane/src/k8s/client.rs
-    // `get_job_logs` which already does this loop.
+    // Sort matching pods: Running > Pending > rest, newest first within
+    // each phase. After eviction/node loss a Job can have multiple pods
+    // and list order is not guaranteed, so without this sort we'd risk
+    // returning stale output from an older terminated pod. The sort key
+    // is (phase_rank, negated creation timestamp) so `first()` after
+    // sort is the best candidate.
+    let mut sorted_pods = pod_list.items.clone();
+    sorted_pods.sort_by(|a, b| {
+        let phase_rank = |p: &k8s_openapi::api::core::v1::Pod| -> u8 {
+            match p.status.as_ref().and_then(|s| s.phase.as_deref()) {
+                Some("Running") => 0,
+                Some("Pending") => 1,
+                _ => 2,
+            }
+        };
+        let ts = |p: &k8s_openapi::api::core::v1::Pod| -> i64 {
+            p.metadata
+                .creation_timestamp
+                .as_ref()
+                .map(|t| t.0.timestamp())
+                .unwrap_or(0)
+        };
+        phase_rank(a)
+            .cmp(&phase_rank(b))
+            .then_with(|| ts(b).cmp(&ts(a)))
+    });
+
     let log_params = kube::api::LogParams {
         container: Some(container),
         tail_lines: Some(tail_lines),
         ..Default::default()
     };
     let mut logs: Option<String> = None;
-    for pod in &pod_list.items {
+    for pod in &sorted_pods {
         if let Some(pod_name) = &pod.metadata.name {
             match pods_api.logs(pod_name, &log_params).await {
                 Ok(l) => {

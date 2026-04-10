@@ -341,14 +341,22 @@ async fn main() -> anyhow::Result<()> {
                          run without --tail for filtered historical logs"
                     );
                 }
-                // If --tail fails (e.g. loop is terminal), fall back
-                // to the historical /logs/{id} stream so the user
-                // doesn't have to retype without --tail.
-                if let Err(e) =
-                    commands::logs::run_tail(&http_client, &loop_id, tail_lines, &container).await
+                // If --tail fails because the loop is terminal or has
+                // no active pod, fall back to historical logs. Other
+                // errors (bad container name, control plane down, etc.)
+                // should surface directly to the operator.
+                match commands::logs::run_tail(&http_client, &loop_id, tail_lines, &container).await
                 {
-                    eprintln!("--tail: {e}; falling back to historical logs");
-                    commands::logs::run(&http_client, &loop_id, None, None).await?;
+                    Ok(()) => {}
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("use `nemo logs") || msg.contains("no active pod") {
+                            eprintln!("--tail: {msg}; falling back to historical logs");
+                            commands::logs::run(&http_client, &loop_id, None, None).await?;
+                        } else {
+                            return Err(e);
+                        }
+                    }
                 }
             } else {
                 commands::logs::run(&http_client, &loop_id, round, stage).await?;
