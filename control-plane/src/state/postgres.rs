@@ -104,7 +104,8 @@ fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
             .flatten(),
         failure_reason: row.get("failure_reason"),
         current_sha: row.get("current_sha"),
-        session_id: row.get("session_id"),
+        opencode_session_id: row.try_get("opencode_session_id").ok().flatten(),
+        claude_session_id: row.try_get("claude_session_id").ok().flatten(),
         active_job_name: row.get("active_job_name"),
         retry_count: row.get("retry_count"),
         ship_mode: row.get("ship_mode"),
@@ -167,7 +168,7 @@ impl StateStore for PgStateStore {
                 state, sub_state, round, max_rounds, harden, harden_only,
                 auto_approve, ship_mode, cancel_requested, approve_requested, resume_requested,
                 paused_from_state, reauth_from_state, failure_reason, current_sha,
-                session_id, active_job_name, retry_count, model_implementor,
+                opencode_session_id, claude_session_id, active_job_name, retry_count, model_implementor,
                 model_reviewer, merge_sha, merged_at, hardened_spec_path, spec_pr_url,
                 resolved_default_branch,
                 created_at, updated_at
@@ -176,10 +177,10 @@ impl StateStore for PgStateStore {
                 $7::loop_state, $8::sub_state, $9, $10, $11, $12,
                 $13, $14, $15, $16, $17,
                 $18::loop_state, $19::loop_state, $20, $21,
-                $22, $23, $24, $25,
-                $26, $27, $28, $29, $30,
-                $31,
-                $32, $33
+                $22, $23, $24, $25, $26,
+                $27, $28, $29, $30, $31,
+                $32,
+                $33, $34
             )
             RETURNING *
             "#,
@@ -205,7 +206,8 @@ impl StateStore for PgStateStore {
         .bind(record.reauth_from_state.map(loop_state_str))
         .bind(&record.failure_reason)
         .bind(&record.current_sha)
-        .bind(&record.session_id)
+        .bind(&record.opencode_session_id)
+        .bind(&record.claude_session_id)
         .bind(&record.active_job_name)
         .bind(record.retry_count)
         .bind(&record.model_implementor)
@@ -333,11 +335,12 @@ impl StateStore for PgStateStore {
             UPDATE loops SET
                 spec_path = $2, state = $3::loop_state, sub_state = $4::sub_state, round = $5,
                 paused_from_state = $6::loop_state, reauth_from_state = $7::loop_state,
-                failed_from_state = $17::loop_state,
-                failure_reason = $8, current_sha = $9, session_id = $10,
-                active_job_name = $11, retry_count = $12,
-                merge_sha = $13, merged_at = $14,
-                hardened_spec_path = $15, spec_pr_url = $16,
+                failed_from_state = $18::loop_state,
+                failure_reason = $8, current_sha = $9,
+                opencode_session_id = $10, claude_session_id = $11,
+                active_job_name = $12, retry_count = $13,
+                merge_sha = $14, merged_at = $15,
+                hardened_spec_path = $16, spec_pr_url = $17,
                 updated_at = NOW()
             WHERE id = $1
             "#,
@@ -351,7 +354,8 @@ impl StateStore for PgStateStore {
         .bind(record.reauth_from_state.map(loop_state_str))
         .bind(&record.failure_reason)
         .bind(&record.current_sha)
-        .bind(&record.session_id)
+        .bind(&record.opencode_session_id)
+        .bind(&record.claude_session_id)
         .bind(&record.active_job_name)
         .bind(record.retry_count)
         .bind(&record.merge_sha)

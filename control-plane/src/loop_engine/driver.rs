@@ -112,7 +112,8 @@ impl ConvergentLoopDriver {
             updated.kind = LoopKind::Harden;
 
             let stage_config = self.audit_stage_config(record);
-            let ctx = self.build_context(&updated).await?;
+            let mut ctx = self.build_context(&updated).await?;
+            ctx.session_id = Self::session_id_for_stage(record, "audit");
             let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
             self.persist_then_dispatch(&mut updated, "audit", &job)
                 .await?;
@@ -325,11 +326,23 @@ impl ConvergentLoopDriver {
             );
         }
 
-        // Persist session_id from the output so later rounds can resume the session.
+        // Persist session_id from the output into the right per-tool
+        // column so later rounds can resume the correct tool's session.
+        // Dispatch by format: ses_<chars> → opencode, UUID → claude.
         if let Some(ref data) = verdict_json
             && let Some(sid) = data.get("session_id").and_then(|v| v.as_str())
         {
-            record.session_id = Some(sid.to_string());
+            if sid.starts_with("ses_") {
+                record.opencode_session_id = Some(sid.to_string());
+            } else if uuid::Uuid::try_parse(sid).is_ok() {
+                record.claude_session_id = Some(sid.to_string());
+            } else {
+                tracing::warn!(
+                    loop_id = %record.id,
+                    session_id = sid,
+                    "Session ID doesn't match opencode (ses_*) or claude (UUID) format; not persisting"
+                );
+            }
         }
 
         // Update the round record with output + completion time
@@ -1326,7 +1339,8 @@ impl ConvergentLoopDriver {
         }
 
         let stage_config = self.implement_stage_config(record);
-        let ctx = self.build_context(&updated).await?;
+        let mut ctx = self.build_context(&updated).await?;
+        ctx.session_id = Self::session_id_for_stage(&updated, "implement");
         let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(&mut updated, "implement", &job)
             .await?;
@@ -1342,7 +1356,8 @@ impl ConvergentLoopDriver {
         record.retry_count = 0;
 
         let stage_config = self.audit_stage_config(record);
-        let ctx = self.build_context(record).await?;
+        let mut ctx = self.build_context(record).await?;
+        ctx.session_id = Self::session_id_for_stage(record, "audit");
         let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "audit", &job).await?;
 
@@ -1374,7 +1389,8 @@ impl ConvergentLoopDriver {
         }
 
         let stage_config = self.revise_stage_config(record);
-        let ctx = self.build_context(record).await?;
+        let mut ctx = self.build_context(record).await?;
+        ctx.session_id = Self::session_id_for_stage(record, "revise");
         let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "revise", &job).await?;
 
@@ -1388,7 +1404,8 @@ impl ConvergentLoopDriver {
         record.retry_count = 0;
 
         let stage_config = self.review_stage_config(record);
-        let ctx = self.build_context(record).await?;
+        let mut ctx = self.build_context(record).await?;
+        ctx.session_id = Self::session_id_for_stage(record, "review");
         let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "review", &job).await?;
 
@@ -1435,6 +1452,7 @@ impl ConvergentLoopDriver {
 
         let stage_config = self.implement_stage_config(record);
         let mut ctx = self.build_context(record).await?;
+        ctx.session_id = Self::session_id_for_stage(record, "implement");
         ctx.feedback_path = Some(feedback_path.to_string());
 
         let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
@@ -1496,7 +1514,7 @@ impl ConvergentLoopDriver {
         let mut updated = record.clone();
         updated.sub_state = Some(SubState::Dispatched);
 
-        let stage_config = match record.state {
+        let (stage_config, stage_name) = match record.state {
             LoopState::Hardening => {
                 // Determine which harden sub-stage to redispatch by checking the latest round
                 let rounds = self.store.get_rounds(record.id).await?;
@@ -1505,17 +1523,18 @@ impl ConvergentLoopDriver {
                     .rfind(|r| r.round == record.round)
                     .map(|r| r.stage.as_str());
                 match last_stage {
-                    Some("revise") => self.revise_stage_config(record),
-                    _ => self.audit_stage_config(record),
+                    Some("revise") => (self.revise_stage_config(record), "revise"),
+                    _ => (self.audit_stage_config(record), "audit"),
                 }
             }
-            LoopState::Implementing => self.implement_stage_config(record),
-            LoopState::Testing => self.test_stage_config(),
-            LoopState::Reviewing => self.review_stage_config(record),
+            LoopState::Implementing => (self.implement_stage_config(record), "implement"),
+            LoopState::Testing => (self.test_stage_config(), "test"),
+            LoopState::Reviewing => (self.review_stage_config(record), "review"),
             _ => return Ok(record.state),
         };
 
         let mut ctx = self.build_context(&updated).await?;
+        ctx.session_id = Self::session_id_for_stage(record, stage_name);
 
         // Restore feedback_path for implementing redispatch (N30):
         // look at the prior round's stage to determine review vs test feedback
@@ -1638,6 +1657,18 @@ impl ConvergentLoopDriver {
     }
 
     /// Build context with credentials loaded from the store.
+    /// Resolve the session ID for a given stage's tool. opencode stages
+    /// (audit, review) get the opencode session; claude stages (implement,
+    /// revise) get the claude session. Callers set ctx.session_id after
+    /// build_context using this helper.
+    fn session_id_for_stage(record: &LoopRecord, stage: &str) -> Option<String> {
+        match stage {
+            "audit" | "review" => record.opencode_session_id.clone(),
+            "implement" | "revise" => record.claude_session_id.clone(),
+            _ => None,
+        }
+    }
+
     async fn build_context(&self, record: &LoopRecord) -> Result<LoopContext> {
         // feedback_path is set explicitly by dispatch_implement_with_feedback;
         // for redispatch/resume, it's restored by redispatch_current_stage.
@@ -1722,7 +1753,11 @@ impl ConvergentLoopDriver {
             round: record.round as u32,
             max_rounds: record.max_rounds as u32,
             retry_count: record.retry_count as u32,
-            session_id: record.session_id.clone(),
+            // Stage-aware session ID resolution (#100): dispatch
+            // function callers override this with the right per-tool
+            // session ID after build_context returns. Default to None
+            // because build_context doesn't know the stage.
+            session_id: None,
             feedback_path,
             worktree_path,
             credentials,
@@ -1997,7 +2032,8 @@ mod tests {
             // reconciler) is covered by its own dedicated test below:
             // test_build_context_falls_back_to_git_sha_when_record_missing_it
             current_sha: Some("0000000000000000000000000000000000000000".to_string()),
-            session_id: None,
+            opencode_session_id: None,
+            claude_session_id: None,
             active_job_name: None,
             retry_count: 0,
             model_implementor: None,

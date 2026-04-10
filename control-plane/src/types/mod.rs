@@ -205,6 +205,9 @@ pub struct LoopContext {
     pub round: u32,
     pub max_rounds: u32,
     pub retry_count: u32,
+    /// Stage-aware session ID: the resolved session ID for the current
+    /// stage's tool. Set by build_context based on the stage and the
+    /// typed per-tool session ID columns on the LoopRecord.
     pub session_id: Option<String>,
     pub feedback_path: Option<String>,
     /// Worktree sub-path relative to the bare-repo PVC root.
@@ -269,7 +272,12 @@ pub struct LoopRecord {
     pub failed_from_state: Option<LoopState>,
     pub failure_reason: Option<String>,
     pub current_sha: Option<String>,
-    pub session_id: Option<String>,
+    /// opencode session ID (`ses_<alphanum>`) from the last audit/review stage.
+    /// Only forwarded to opencode-using stages; implement/revise stages ignore it.
+    pub opencode_session_id: Option<String>,
+    /// Claude Code session ID (UUID) from the last implement/revise stage.
+    /// Only forwarded to claude-using stages; audit/review stages ignore it.
+    pub claude_session_id: Option<String>,
     pub active_job_name: Option<String>,
     pub retry_count: i32,
     pub ship_mode: bool,
