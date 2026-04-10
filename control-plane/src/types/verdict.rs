@@ -316,7 +316,7 @@ mod tests {
                 output: 2000,
             },
             exit_code: 0,
-            session_id: "sess-001".to_string(),
+            session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
         };
         let result = NautiloopResult {
             stage: "implement".to_string(),
@@ -368,7 +368,7 @@ mod tests {
                 output: 1000,
             },
             exit_code: 0,
-            session_id: "sess-review-1".to_string(),
+            session_id: "ses_abc123XYZ".to_string(),
         };
         let result = NautiloopResult {
             stage: "review".to_string(),
@@ -390,7 +390,7 @@ mod tests {
                 output: 1500,
             },
             exit_code: 0,
-            session_id: "sess-revise-1".to_string(),
+            session_id: "550e8400-e29b-41d4-a716-446655440001".to_string(),
         };
         let result = NautiloopResult {
             stage: "revise".to_string(),

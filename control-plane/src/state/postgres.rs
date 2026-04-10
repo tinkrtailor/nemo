@@ -75,6 +75,35 @@ fn loop_kind_str(k: LoopKind) -> &'static str {
 }
 
 fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
+    let state = row.get::<LoopState, _>("state");
+    let paused_from_state = row.get::<Option<LoopState>, _>("paused_from_state");
+    let reauth_from_state = row.get::<Option<LoopState>, _>("reauth_from_state");
+    let failed_from_state = row
+        .try_get::<Option<LoopState>, _>("failed_from_state")
+        .ok()
+        .flatten();
+    let typed_opencode_session_id = row
+        .try_get::<Option<String>, _>("opencode_session_id")
+        .ok()
+        .flatten();
+    let typed_claude_session_id = row
+        .try_get::<Option<String>, _>("claude_session_id")
+        .ok()
+        .flatten();
+    let legacy_session_id = row
+        .try_get::<Option<String>, _>("session_id")
+        .ok()
+        .flatten();
+    let (opencode_session_id, claude_session_id) = resolve_session_columns_for_record(
+        state,
+        paused_from_state,
+        reauth_from_state,
+        failed_from_state,
+        typed_opencode_session_id,
+        typed_claude_session_id,
+        legacy_session_id,
+    );
+
     Ok(LoopRecord {
         id: row.get("id"),
         engineer: row.get("engineer"),
@@ -86,7 +115,7 @@ fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
         // crate::types. Decoding them as `String` panics with
         // "mismatched types ... is not compatible with SQL type `loop_kind`".
         kind: row.get::<LoopKind, _>("kind"),
-        state: row.get::<LoopState, _>("state"),
+        state,
         sub_state: row.get::<Option<SubState>, _>("sub_state"),
         round: row.get("round"),
         max_rounds: row.get("max_rounds"),
@@ -96,15 +125,17 @@ fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
         cancel_requested: row.get("cancel_requested"),
         approve_requested: row.get("approve_requested"),
         resume_requested: row.get("resume_requested"),
-        paused_from_state: row.get::<Option<LoopState>, _>("paused_from_state"),
-        reauth_from_state: row.get::<Option<LoopState>, _>("reauth_from_state"),
-        failed_from_state: row
-            .try_get::<Option<LoopState>, _>("failed_from_state")
-            .ok()
-            .flatten(),
+        paused_from_state,
+        reauth_from_state,
+        failed_from_state,
         failure_reason: row.get("failure_reason"),
         current_sha: row.get("current_sha"),
-        session_id: row.get("session_id"),
+        // Dual-read: during a rolling deploy old pods still write only the
+        // legacy session_id column. For active/resumable states, prefer a
+        // stage-compatible legacy value over stale typed columns so a new pod
+        // can continue from the freshest session written by an old pod.
+        opencode_session_id,
+        claude_session_id,
         active_job_name: row.get("active_job_name"),
         retry_count: row.get("retry_count"),
         ship_mode: row.get("ship_mode"),
@@ -157,6 +188,126 @@ fn row_to_credential(row: &PgRow) -> EngineerCredential {
     }
 }
 
+fn effective_session_state(
+    state: LoopState,
+    paused_from_state: Option<LoopState>,
+    reauth_from_state: Option<LoopState>,
+    failed_from_state: Option<LoopState>,
+) -> LoopState {
+    match state {
+        LoopState::Paused => paused_from_state.unwrap_or(state),
+        LoopState::AwaitingReauth => reauth_from_state.unwrap_or(state),
+        LoopState::Failed => failed_from_state.unwrap_or(state),
+        _ => state,
+    }
+}
+
+fn split_legacy_session_id(legacy_session_id: Option<String>) -> (Option<String>, Option<String>) {
+    match legacy_session_id {
+        Some(session_id) if session_id.starts_with("ses_") => (Some(session_id), None),
+        Some(session_id) if uuid::Uuid::try_parse(&session_id).is_ok() => (None, Some(session_id)),
+        _ => (None, None),
+    }
+}
+
+fn resolve_session_columns_for_record(
+    state: LoopState,
+    paused_from_state: Option<LoopState>,
+    reauth_from_state: Option<LoopState>,
+    failed_from_state: Option<LoopState>,
+    typed_opencode_session_id: Option<String>,
+    typed_claude_session_id: Option<String>,
+    legacy_session_id: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let effective_state = effective_session_state(
+        state,
+        paused_from_state,
+        reauth_from_state,
+        failed_from_state,
+    );
+    let (legacy_opencode_session_id, legacy_claude_session_id) =
+        split_legacy_session_id(legacy_session_id);
+
+    match effective_state {
+        LoopState::Hardening => (
+            legacy_opencode_session_id.or(typed_opencode_session_id),
+            legacy_claude_session_id.or(typed_claude_session_id),
+        ),
+        LoopState::Implementing | LoopState::Testing => (
+            typed_opencode_session_id,
+            legacy_claude_session_id.or(typed_claude_session_id),
+        ),
+        LoopState::Reviewing => (
+            legacy_opencode_session_id.or(typed_opencode_session_id),
+            typed_claude_session_id,
+        ),
+        _ => (
+            typed_opencode_session_id.or(legacy_opencode_session_id),
+            typed_claude_session_id.or(legacy_claude_session_id),
+        ),
+    }
+}
+
+fn compat_session_id_for_active_state(
+    state: LoopState,
+    last_stage: Option<&str>,
+    opencode_session_id: Option<&str>,
+    claude_session_id: Option<&str>,
+) -> Option<String> {
+    match state {
+        LoopState::Hardening => match last_stage {
+            Some("revise") => claude_session_id.map(str::to_string),
+            Some("audit") | None => opencode_session_id.map(str::to_string),
+            _ => None,
+        },
+        LoopState::Implementing => claude_session_id.map(str::to_string),
+        LoopState::Reviewing => opencode_session_id.map(str::to_string),
+        // TESTING itself is non-resumable, but a failed test round feeds
+        // directly back into IMPLEMENTING. Keep mirroring the Claude session in
+        // the legacy column so an old pod can take over the next implement round.
+        LoopState::Testing => claude_session_id.map(str::to_string),
+        _ => None,
+    }
+}
+
+fn compat_session_id_for_record(record: &LoopRecord, last_stage: Option<&str>) -> Option<String> {
+    let opencode_session_id = record.opencode_session_id.as_deref();
+    let claude_session_id = record.claude_session_id.as_deref();
+
+    match record.state {
+        LoopState::Paused => record.paused_from_state.and_then(|paused_from| {
+            compat_session_id_for_active_state(
+                paused_from,
+                last_stage,
+                opencode_session_id,
+                claude_session_id,
+            )
+        }),
+        LoopState::AwaitingReauth => record.reauth_from_state.and_then(|reauth_from| {
+            compat_session_id_for_active_state(
+                reauth_from,
+                last_stage,
+                opencode_session_id,
+                claude_session_id,
+            )
+        }),
+        LoopState::Failed => record.failed_from_state.and_then(|failed_from| {
+            compat_session_id_for_active_state(
+                failed_from,
+                last_stage,
+                opencode_session_id,
+                claude_session_id,
+            )
+        }),
+        state => compat_session_id_for_active_state(
+            state,
+            last_stage,
+            opencode_session_id,
+            claude_session_id,
+        ),
+    }
+}
+
 #[async_trait]
 impl StateStore for PgStateStore {
     async fn create_loop(&self, record: &LoopRecord) -> Result<LoopRecord> {
@@ -167,7 +318,7 @@ impl StateStore for PgStateStore {
                 state, sub_state, round, max_rounds, harden, harden_only,
                 auto_approve, ship_mode, cancel_requested, approve_requested, resume_requested,
                 paused_from_state, reauth_from_state, failure_reason, current_sha,
-                session_id, active_job_name, retry_count, model_implementor,
+                opencode_session_id, claude_session_id, active_job_name, retry_count, model_implementor,
                 model_reviewer, merge_sha, merged_at, hardened_spec_path, spec_pr_url,
                 resolved_default_branch,
                 created_at, updated_at
@@ -176,10 +327,10 @@ impl StateStore for PgStateStore {
                 $7::loop_state, $8::sub_state, $9, $10, $11, $12,
                 $13, $14, $15, $16, $17,
                 $18::loop_state, $19::loop_state, $20, $21,
-                $22, $23, $24, $25,
-                $26, $27, $28, $29, $30,
-                $31,
-                $32, $33
+                $22, $23, $24, $25, $26,
+                $27, $28, $29, $30, $31,
+                $32,
+                $33, $34
             )
             RETURNING *
             "#,
@@ -205,7 +356,8 @@ impl StateStore for PgStateStore {
         .bind(record.reauth_from_state.map(loop_state_str))
         .bind(&record.failure_reason)
         .bind(&record.current_sha)
-        .bind(&record.session_id)
+        .bind(&record.opencode_session_id)
+        .bind(&record.claude_session_id)
         .bind(&record.active_job_name)
         .bind(record.retry_count)
         .bind(&record.model_implementor)
@@ -328,16 +480,32 @@ impl StateStore for PgStateStore {
     /// approve_requested, resume_requested) to avoid read-modify-write race with
     /// set_loop_flag. Use set_loop_flag for flag changes.
     async fn update_loop(&self, record: &LoopRecord) -> Result<()> {
+        let last_stage = match record.state {
+            LoopState::Hardening
+            | LoopState::Paused
+            | LoopState::AwaitingReauth
+            | LoopState::Failed => self
+                .get_rounds(record.id)
+                .await?
+                .iter()
+                .rfind(|round| round.round == record.round)
+                .map(|round| round.stage.clone()),
+            _ => None,
+        };
+        let legacy_session_id = compat_session_id_for_record(record, last_stage.as_deref());
+
         sqlx::query(
             r#"
             UPDATE loops SET
                 spec_path = $2, state = $3::loop_state, sub_state = $4::sub_state, round = $5,
                 paused_from_state = $6::loop_state, reauth_from_state = $7::loop_state,
-                failed_from_state = $17::loop_state,
-                failure_reason = $8, current_sha = $9, session_id = $10,
-                active_job_name = $11, retry_count = $12,
-                merge_sha = $13, merged_at = $14,
-                hardened_spec_path = $15, spec_pr_url = $16,
+                failure_reason = $8, current_sha = $9,
+                opencode_session_id = $10, claude_session_id = $11,
+                session_id = $12,
+                active_job_name = $13, retry_count = $14,
+                merge_sha = $15, merged_at = $16,
+                hardened_spec_path = $17, spec_pr_url = $18,
+                failed_from_state = $19::loop_state,
                 updated_at = NOW()
             WHERE id = $1
             "#,
@@ -351,7 +519,9 @@ impl StateStore for PgStateStore {
         .bind(record.reauth_from_state.map(loop_state_str))
         .bind(&record.failure_reason)
         .bind(&record.current_sha)
-        .bind(&record.session_id)
+        .bind(&record.opencode_session_id)
+        .bind(&record.claude_session_id)
+        .bind(&legacy_session_id)
         .bind(&record.active_job_name)
         .bind(record.retry_count)
         .bind(&record.merge_sha)
@@ -623,5 +793,122 @@ impl StateStore for PgStateStore {
             .await
             .map_err(crate::error::NautiloopError::Database)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn make_loop(state: LoopState) -> LoopRecord {
+        LoopRecord {
+            id: Uuid::new_v4(),
+            engineer: "alice".to_string(),
+            spec_path: "specs/test.md".to_string(),
+            spec_content_hash: "abc12345".to_string(),
+            branch: "agent/alice/test-abc12345".to_string(),
+            kind: LoopKind::Implement,
+            state,
+            sub_state: None,
+            round: 2,
+            max_rounds: 5,
+            harden: false,
+            harden_only: false,
+            auto_approve: false,
+            cancel_requested: false,
+            approve_requested: false,
+            resume_requested: false,
+            paused_from_state: None,
+            reauth_from_state: None,
+            failed_from_state: None,
+            failure_reason: None,
+            current_sha: None,
+            opencode_session_id: Some("ses_abc123XYZ".to_string()),
+            claude_session_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            active_job_name: None,
+            retry_count: 0,
+            ship_mode: false,
+            model_implementor: None,
+            model_reviewer: None,
+            merge_sha: None,
+            merged_at: None,
+            hardened_spec_path: None,
+            spec_pr_url: None,
+            resolved_default_branch: Some("main".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn compat_session_prefers_stage_specific_value() {
+        let implementing = make_loop(LoopState::Implementing);
+        assert_eq!(
+            compat_session_id_for_record(&implementing, None).as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+
+        let reviewing = make_loop(LoopState::Reviewing);
+        assert_eq!(
+            compat_session_id_for_record(&reviewing, None).as_deref(),
+            Some("ses_abc123XYZ")
+        );
+    }
+
+    #[test]
+    fn compat_session_uses_failed_stage_and_clears_cross_phase_states() {
+        let mut failed_harden = make_loop(LoopState::Failed);
+        failed_harden.failed_from_state = Some(LoopState::Hardening);
+        assert_eq!(
+            compat_session_id_for_record(&failed_harden, Some("revise")).as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+
+        let awaiting_approval = make_loop(LoopState::AwaitingApproval);
+        assert_eq!(compat_session_id_for_record(&awaiting_approval, None), None);
+    }
+
+    #[test]
+    fn compat_session_keeps_claude_during_testing_for_old_pods() {
+        let testing = make_loop(LoopState::Testing);
+        assert_eq!(
+            compat_session_id_for_record(&testing, None).as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    #[test]
+    fn resolve_session_columns_prefers_fresh_legacy_for_active_tool() {
+        let (opencode_session_id, claude_session_id) = resolve_session_columns_for_record(
+            LoopState::Implementing,
+            None,
+            None,
+            None,
+            Some("ses_old_opencode".to_string()),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            Some("550e8400-e29b-41d4-a716-446655440001".to_string()),
+        );
+        assert_eq!(opencode_session_id.as_deref(), Some("ses_old_opencode"));
+        assert_eq!(
+            claude_session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440001")
+        );
+
+        let (opencode_session_id, claude_session_id) = resolve_session_columns_for_record(
+            LoopState::Reviewing,
+            None,
+            None,
+            None,
+            Some("ses_old_review".to_string()),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            Some("ses_new_review".to_string()),
+        );
+        assert_eq!(opencode_session_id.as_deref(), Some("ses_new_review"));
+        assert_eq!(
+            claude_session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
     }
 }
