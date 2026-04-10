@@ -179,6 +179,63 @@ fn row_to_credential(row: &PgRow) -> EngineerCredential {
     }
 }
 
+fn compat_session_id_for_active_state(
+    state: LoopState,
+    last_stage: Option<&str>,
+    opencode_session_id: Option<&str>,
+    claude_session_id: Option<&str>,
+) -> Option<String> {
+    match state {
+        LoopState::Hardening => match last_stage {
+            Some("revise") => claude_session_id.map(str::to_string),
+            Some("audit") | None => opencode_session_id.map(str::to_string),
+            _ => None,
+        },
+        LoopState::Implementing => claude_session_id.map(str::to_string),
+        LoopState::Reviewing => opencode_session_id.map(str::to_string),
+        LoopState::Testing => None,
+        _ => None,
+    }
+}
+
+fn compat_session_id_for_record(record: &LoopRecord, last_stage: Option<&str>) -> Option<String> {
+    let opencode_session_id = record.opencode_session_id.as_deref();
+    let claude_session_id = record.claude_session_id.as_deref();
+
+    match record.state {
+        LoopState::Paused => record.paused_from_state.and_then(|paused_from| {
+            compat_session_id_for_active_state(
+                paused_from,
+                last_stage,
+                opencode_session_id,
+                claude_session_id,
+            )
+        }),
+        LoopState::AwaitingReauth => record.reauth_from_state.and_then(|reauth_from| {
+            compat_session_id_for_active_state(
+                reauth_from,
+                last_stage,
+                opencode_session_id,
+                claude_session_id,
+            )
+        }),
+        LoopState::Failed => record.failed_from_state.and_then(|failed_from| {
+            compat_session_id_for_active_state(
+                failed_from,
+                last_stage,
+                opencode_session_id,
+                claude_session_id,
+            )
+        }),
+        state => compat_session_id_for_active_state(
+            state,
+            last_stage,
+            opencode_session_id,
+            claude_session_id,
+        ),
+    }
+}
+
 #[async_trait]
 impl StateStore for PgStateStore {
     async fn create_loop(&self, record: &LoopRecord) -> Result<LoopRecord> {
@@ -351,6 +408,20 @@ impl StateStore for PgStateStore {
     /// approve_requested, resume_requested) to avoid read-modify-write race with
     /// set_loop_flag. Use set_loop_flag for flag changes.
     async fn update_loop(&self, record: &LoopRecord) -> Result<()> {
+        let last_stage = match record.state {
+            LoopState::Hardening
+            | LoopState::Paused
+            | LoopState::AwaitingReauth
+            | LoopState::Failed => self
+                .get_rounds(record.id)
+                .await?
+                .iter()
+                .rfind(|round| round.round == record.round)
+                .map(|round| round.stage.clone()),
+            _ => None,
+        };
+        let legacy_session_id = compat_session_id_for_record(record, last_stage.as_deref());
+
         sqlx::query(
             r#"
             UPDATE loops SET
@@ -358,11 +429,11 @@ impl StateStore for PgStateStore {
                 paused_from_state = $6::loop_state, reauth_from_state = $7::loop_state,
                 failure_reason = $8, current_sha = $9,
                 opencode_session_id = $10, claude_session_id = $11,
-                session_id = COALESCE($10, $11),
-                active_job_name = $12, retry_count = $13,
-                merge_sha = $14, merged_at = $15,
-                hardened_spec_path = $16, spec_pr_url = $17,
-                failed_from_state = $18::loop_state,
+                session_id = $12,
+                active_job_name = $13, retry_count = $14,
+                merge_sha = $15, merged_at = $16,
+                hardened_spec_path = $17, spec_pr_url = $18,
+                failed_from_state = $19::loop_state,
                 updated_at = NOW()
             WHERE id = $1
             "#,
@@ -378,6 +449,7 @@ impl StateStore for PgStateStore {
         .bind(&record.current_sha)
         .bind(&record.opencode_session_id)
         .bind(&record.claude_session_id)
+        .bind(&legacy_session_id)
         .bind(&record.active_job_name)
         .bind(record.retry_count)
         .bind(&record.merge_sha)
@@ -649,5 +721,80 @@ impl StateStore for PgStateStore {
             .await
             .map_err(crate::error::NautiloopError::Database)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn make_loop(state: LoopState) -> LoopRecord {
+        LoopRecord {
+            id: Uuid::new_v4(),
+            engineer: "alice".to_string(),
+            spec_path: "specs/test.md".to_string(),
+            spec_content_hash: "abc12345".to_string(),
+            branch: "agent/alice/test-abc12345".to_string(),
+            kind: LoopKind::Implement,
+            state,
+            sub_state: None,
+            round: 2,
+            max_rounds: 5,
+            harden: false,
+            harden_only: false,
+            auto_approve: false,
+            cancel_requested: false,
+            approve_requested: false,
+            resume_requested: false,
+            paused_from_state: None,
+            reauth_from_state: None,
+            failed_from_state: None,
+            failure_reason: None,
+            current_sha: None,
+            opencode_session_id: Some("ses_abc123XYZ".to_string()),
+            claude_session_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            active_job_name: None,
+            retry_count: 0,
+            ship_mode: false,
+            model_implementor: None,
+            model_reviewer: None,
+            merge_sha: None,
+            merged_at: None,
+            hardened_spec_path: None,
+            spec_pr_url: None,
+            resolved_default_branch: Some("main".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn compat_session_prefers_stage_specific_value() {
+        let implementing = make_loop(LoopState::Implementing);
+        assert_eq!(
+            compat_session_id_for_record(&implementing, None).as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+
+        let reviewing = make_loop(LoopState::Reviewing);
+        assert_eq!(
+            compat_session_id_for_record(&reviewing, None).as_deref(),
+            Some("ses_abc123XYZ")
+        );
+    }
+
+    #[test]
+    fn compat_session_uses_failed_stage_and_clears_cross_phase_states() {
+        let mut failed_harden = make_loop(LoopState::Failed);
+        failed_harden.failed_from_state = Some(LoopState::Hardening);
+        assert_eq!(
+            compat_session_id_for_record(&failed_harden, Some("revise")).as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+
+        let awaiting_approval = make_loop(LoopState::AwaitingApproval);
+        assert_eq!(compat_session_id_for_record(&awaiting_approval, None), None);
     }
 }

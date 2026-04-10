@@ -326,35 +326,40 @@ impl ConvergentLoopDriver {
             );
         }
 
-        // Persist session_id from the output into the right per-tool
-        // column so later rounds can resume the correct tool's session.
-        // Dispatch by format: ses_<chars> → opencode, UUID → claude.
+        let rounds = self.store.get_rounds(record.id).await?;
+        let active_round = rounds
+            .iter()
+            .rfind(|round| round.round == record.round && round.completed_at.is_none())
+            .cloned();
+        let stage_name = active_round
+            .as_ref()
+            .map(|round| round.stage.as_str())
+            .or_else(|| {
+                rounds
+                    .iter()
+                    .rfind(|round| round.round == record.round)
+                    .map(|round| round.stage.as_str())
+            });
+
         if let Some(ref data) = verdict_json
             && let Some(sid) = data.get("session_id").and_then(|v| v.as_str())
         {
-            if sid.starts_with("ses_") {
-                record.opencode_session_id = Some(sid.to_string());
-            } else if uuid::Uuid::try_parse(sid).is_ok() {
-                record.claude_session_id = Some(sid.to_string());
+            if let Some(stage) = stage_name {
+                Self::persist_session_id_for_stage(record, stage, sid);
             } else {
                 tracing::warn!(
                     loop_id = %record.id,
                     session_id = sid,
-                    "Session ID doesn't match opencode (ses_*) or claude (UUID) format; not persisting"
+                    "Could not determine stage for session ID persistence"
                 );
             }
         }
 
         // Update the round record with output + completion time
-        let rounds = self.store.get_rounds(record.id).await?;
-        if let Some(round) = rounds
-            .iter()
-            .rfind(|r| r.round == record.round && r.completed_at.is_none())
-        {
-            let mut updated_round = round.clone();
+        if let Some(mut updated_round) = active_round {
             updated_round.output = verdict_json;
             updated_round.completed_at = Some(chrono::Utc::now());
-            if let Some(started) = round.started_at {
+            if let Some(started) = updated_round.started_at {
                 let duration = chrono::Utc::now() - started;
                 updated_round.duration_secs = Some(duration.num_seconds());
             }
@@ -378,6 +383,43 @@ impl ConvergentLoopDriver {
                 None
             }
         })
+    }
+
+    fn persist_session_id_for_stage(record: &mut LoopRecord, stage: &str, session_id: &str) {
+        match stage {
+            "audit" | "review" => {
+                if session_id.starts_with("ses_") {
+                    record.opencode_session_id = Some(session_id.to_string());
+                } else {
+                    tracing::warn!(
+                        loop_id = %record.id,
+                        stage,
+                        session_id,
+                        "Stage emitted non-opencode session ID; not persisting"
+                    );
+                }
+            }
+            "implement" | "revise" => {
+                if uuid::Uuid::try_parse(session_id).is_ok() {
+                    record.claude_session_id = Some(session_id.to_string());
+                } else {
+                    tracing::warn!(
+                        loop_id = %record.id,
+                        stage,
+                        session_id,
+                        "Stage emitted non-claude session ID; not persisting"
+                    );
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    loop_id = %record.id,
+                    stage,
+                    session_id,
+                    "Non-resumable stage emitted a session ID; ignoring"
+                );
+            }
+        }
     }
 
     /// Evaluate harden stage output (audit or revise).
@@ -2850,6 +2892,58 @@ mod tests {
             Some("aabbccdd11223344".to_string()),
             "current_sha should be populated from branch tip"
         );
+    }
+
+    #[tokio::test]
+    async fn test_output_ingestion_rejects_wrong_tool_session_shape() {
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let git = Arc::new(MockGitOperations::new());
+        let driver = ConvergentLoopDriver::new(
+            store.clone(),
+            dispatcher.clone(),
+            git.clone(),
+            NautiloopConfig::default(),
+        );
+
+        git.set_branch_sha("agent/alice/test-abc12345", "aabbccdd11223344")
+            .await;
+        dispatcher
+            .set_job_logs(
+                "review-job",
+                "NAUTILOOP_RESULT:{\"stage\":\"review\",\"data\":{\"clean\":true,\"confidence\":0.95,\"issues\":[],\"summary\":\"LGTM\",\"token_usage\":{\"input\":1000,\"output\":200},\"session_id\":\"550e8400-e29b-41d4-a716-446655440000\"}}\n",
+            )
+            .await;
+
+        let mut record = make_pending_loop(true);
+        record.state = LoopState::Reviewing;
+        record.sub_state = Some(SubState::Dispatched);
+        record.round = 1;
+        record.active_job_name = Some("review-job".to_string());
+        record.current_sha = Some("aabbccdd11223344".to_string());
+        store.create_loop(&record).await.unwrap();
+
+        store
+            .create_round(&RoundRecord {
+                id: Uuid::new_v4(),
+                loop_id: record.id,
+                round: 1,
+                stage: "review".to_string(),
+                input: None,
+                output: None,
+                started_at: Some(chrono::Utc::now() - chrono::Duration::seconds(30)),
+                completed_at: None,
+                duration_secs: None,
+                job_name: Some("review-job".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let mut updated = store.get_loop(record.id).await.unwrap().unwrap();
+        driver.ingest_job_output(&mut updated).await.unwrap();
+
+        assert_eq!(updated.opencode_session_id, None);
+        assert_eq!(updated.claude_session_id, None);
     }
 
     #[tokio::test]
