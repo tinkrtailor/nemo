@@ -647,7 +647,7 @@ pub fn inject_auth_header(
             };
             let value = match credential {
                 OpenAiCredential::ApiKey(api_key) => format!("Bearer {api_key}"),
-                OpenAiCredential::CodexOauth(oauth) => format!("Bearer {}", oauth.access),
+                OpenAiCredential::CodexOauth(oauth) => format!("Bearer {}", oauth.refresh),
             };
             if let Ok(v) = http::HeaderValue::from_str(&value) {
                 headers.remove(http::header::AUTHORIZATION);
@@ -1066,7 +1066,7 @@ mod tests {
                 .expect("auth header present")
                 .to_str()
                 .expect("utf8"),
-            "Bearer access-token"
+            "Bearer refresh-token"
         );
         assert_eq!(
             h.get("chatgpt-account-id")
