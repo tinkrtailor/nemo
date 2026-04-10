@@ -1321,6 +1321,11 @@ impl ConvergentLoopDriver {
             updated.round = 1;
         }
         updated.retry_count = 0;
+        // Phase transition: clear sessions from the preceding harden
+        // phase so the first implement stage doesn't --resume a revise
+        // conversation. The implement phase builds its own sessions.
+        updated.opencode_session_id = None;
+        updated.claude_session_id = None;
 
         // #98: Claude credential preflight. See the comment on the
         // matching block in dispatch_revise for why we insert a

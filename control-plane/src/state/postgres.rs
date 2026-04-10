@@ -104,8 +104,29 @@ fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
             .flatten(),
         failure_reason: row.get("failure_reason"),
         current_sha: row.get("current_sha"),
-        opencode_session_id: row.try_get("opencode_session_id").ok().flatten(),
-        claude_session_id: row.try_get("claude_session_id").ok().flatten(),
+        // Dual-read: prefer the typed columns, fall back to the legacy
+        // session_id column for mixed-version rolling-deploy safety.
+        // Old pods still write session_id; new pods write both.
+        opencode_session_id: row
+            .try_get::<Option<String>, _>("opencode_session_id")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                row.try_get::<Option<String>, _>("session_id")
+                    .ok()
+                    .flatten()
+                    .filter(|s| s.starts_with("ses_"))
+            }),
+        claude_session_id: row
+            .try_get::<Option<String>, _>("claude_session_id")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                row.try_get::<Option<String>, _>("session_id")
+                    .ok()
+                    .flatten()
+                    .filter(|s| uuid::Uuid::try_parse(s).is_ok())
+            }),
         active_job_name: row.get("active_job_name"),
         retry_count: row.get("retry_count"),
         ship_mode: row.get("ship_mode"),
@@ -335,12 +356,13 @@ impl StateStore for PgStateStore {
             UPDATE loops SET
                 spec_path = $2, state = $3::loop_state, sub_state = $4::sub_state, round = $5,
                 paused_from_state = $6::loop_state, reauth_from_state = $7::loop_state,
-                failed_from_state = $18::loop_state,
                 failure_reason = $8, current_sha = $9,
                 opencode_session_id = $10, claude_session_id = $11,
+                session_id = COALESCE($10, $11),
                 active_job_name = $12, retry_count = $13,
                 merge_sha = $14, merged_at = $15,
                 hardened_spec_path = $16, spec_pr_url = $17,
+                failed_from_state = $18::loop_state,
                 updated_at = NOW()
             WHERE id = $1
             "#,
