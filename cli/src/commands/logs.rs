@@ -30,14 +30,13 @@ pub async fn run_tail(
     let resp = client.get_stream(&path).await?;
     let status = resp.status();
     let text = resp.text().await?;
+    // Server returns 204 No Content for benign "no pod" states.
+    // 4xx/5xx are real errors. 200 = real log output.
+    if status == reqwest::StatusCode::NO_CONTENT {
+        return Ok(TailResult::NoPod);
+    }
     if !status.is_success() {
         anyhow::bail!("pod-logs returned {status}: {text}");
-    }
-    // The server returns 200 with a "# ..." comment line for benign
-    // no-pod states (between-stage gap, container still creating).
-    // Treat as NoPod so the CLI can fall back to historical logs.
-    if text.starts_with("# ") && text.lines().count() <= 2 {
-        return Ok(TailResult::NoPod);
     }
     print!("{text}");
     if !text.ends_with('\n') {

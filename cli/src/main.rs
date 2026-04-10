@@ -349,8 +349,12 @@ async fn main() -> anyhow::Result<()> {
                 {
                     Ok(commands::logs::TailResult::Ok) => {}
                     Ok(commands::logs::TailResult::NoPod) => {
-                        eprintln!("--tail: no active pod; falling back to historical logs");
-                        commands::logs::run(&http_client, &loop_id, None, None).await?;
+                        // Don't fall back to the SSE stream here — that
+                        // would block forever if the loop is paused or
+                        // awaiting approval/auth. Just inform and exit.
+                        eprintln!(
+                            "No active pod. The loop may be between stages, paused, or awaiting auth. Try again shortly or use `nemo logs {loop_id}` (without --tail) for historical logs."
+                        );
                     }
                     Err(e) => {
                         let msg = e.to_string();

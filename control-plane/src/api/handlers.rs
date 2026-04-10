@@ -302,8 +302,10 @@ pub async fn pod_logs(
     fn info_response(msg: String) -> axum::response::Response {
         use axum::http::header;
         use axum::response::IntoResponse;
+        // Custom header so the CLI can detect "info, no real logs"
+        // without guessing from body content (codex round 6 on #99).
         (
-            axum::http::StatusCode::OK,
+            axum::http::StatusCode::NO_CONTENT,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
             msg,
         )
