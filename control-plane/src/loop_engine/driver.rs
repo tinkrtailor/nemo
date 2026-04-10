@@ -1670,6 +1670,7 @@ impl ConvergentLoopDriver {
     /// Session IDs are NOT forwarded across phase boundaries:
     /// - audit ↔ revise (same harden phase): shared opencode + claude sessions
     /// - audit → review, revise → implement: different phases, fresh sessions
+    ///
     /// A `review` or `implement` stage at the START of its phase must NOT
     /// inherit a session from the harden phase that preceded it. The helper
     /// uses `record.state` to determine the current phase and only returns
