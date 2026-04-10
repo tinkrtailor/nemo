@@ -293,9 +293,26 @@ pub async fn pod_logs(
         .await?
         .ok_or(NautiloopError::LoopNotFound { id })?;
 
+    // Helper: build a 200 OK informational text body so the CLI
+    // doesn't treat the benign "pod not ready yet" race condition
+    // like an error. The control plane persists active_job_name
+    // before the pod exists, so nemo logs --tail can land here
+    // right after a dispatch and succeed a few seconds later. A
+    // 4xx here would trigger unnecessary alerting.
+    fn info_response(msg: String) -> axum::response::Response {
+        use axum::http::header;
+        use axum::response::IntoResponse;
+        (
+            axum::http::StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            msg,
+        )
+            .into_response()
+    }
+
     let Some(job_name) = record.active_job_name.clone() else {
-        return Err(NautiloopError::BadRequest(format!(
-            "loop {id} has no active pod (state={})",
+        return Ok(info_response(format!(
+            "# loop {id} has no active pod right now (state={})\n",
             record.state
         )));
     };
@@ -327,8 +344,11 @@ pub async fn pod_logs(
     })?;
 
     let Some(pod) = pod_list.items.first() else {
-        return Err(NautiloopError::BadRequest(format!(
-            "no pod found for active job {job_name} (TTL cleanup or pre-creation race?)"
+        // Normal race: active_job_name is persisted before the Job's
+        // pod exists. Retrying in a few seconds usually works. Return
+        // a 200 with a hint instead of a 4xx so the CLI doesn't bark.
+        return Ok(info_response(format!(
+            "# no pod yet for job {job_name} (pre-creation race or TTL cleanup)\n"
         )));
     };
     let Some(pod_name) = pod.metadata.name.as_ref() else {

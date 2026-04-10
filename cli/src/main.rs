@@ -332,6 +332,15 @@ async fn main() -> anyhow::Result<()> {
             container,
         } => {
             if tail {
+                // --tail reads raw pod container stdout, which has
+                // no round/stage structure to filter on. Fail loud
+                // instead of silently ignoring the flags.
+                if round.is_some() || stage.is_some() {
+                    anyhow::bail!(
+                        "--round / --stage are not supported with --tail (pod stdout is unstructured); \
+                         run without --tail for filtered historical logs"
+                    );
+                }
                 commands::logs::run_tail(&http_client, &loop_id, tail_lines, &container).await?;
             } else {
                 commands::logs::run(&http_client, &loop_id, round, stage).await?;
