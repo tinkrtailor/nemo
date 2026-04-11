@@ -3,7 +3,7 @@ resolver = "2"
 members = ["control-plane", "cli", "sidecar", "sidecar/tests/parity"]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 license = "Apache-2.0"
 
