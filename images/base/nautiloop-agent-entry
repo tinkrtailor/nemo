@@ -355,10 +355,10 @@ case "$STAGE" in
             *) OPENCODE_MODEL="openai/$OPENCODE_MODEL" ;;
         esac
 
-        # opencode v1.3+ removed --prompt-file; the message is either a
-        # positional arg or piped in via stdin. We pipe via stdin to avoid
-        # argv length limits for large specs/diffs — same reasoning the
-        # original --prompt-file code had.
+        # opencode v1.3+ removed --prompt-file; the message must be passed as a
+        # positional arg. opencode run does NOT accept piped input via stdin.
+        # We read the prompt file and pass it as the message argument.
+        # Truncate to ~100KB to avoid ARG_MAX issues (opencode has limits anyway).
         OPENCODE_ARGS=(run --format json -m "$OPENCODE_MODEL")
         # Symmetric with the claude branch: only resume when SESSION_ID
         # looks like an opencode session (`ses_<chars>`), not a claude
@@ -368,7 +368,14 @@ case "$STAGE" in
            printf '%s' "$SESSION_ID" | grep -Eq '^ses_[a-zA-Z0-9]+$'; then
             OPENCODE_ARGS+=(-s "$SESSION_ID")
         fi
-        STDIN_FILE="$PROMPT_FILE" run_and_emit_result "$STAGE" opencode "${OPENCODE_ARGS[@]}"
+        # Read prompt and truncate if extremely large to avoid ARG_MAX
+        PROMPT_CONTENT=$(cat "$PROMPT_FILE")
+        if [ "${#PROMPT_CONTENT}" -gt 100000 ]; then
+            PROMPT_CONTENT="${PROMPT_CONTENT:0:100000}
+
+...[truncated: prompt exceeded 100KB limit]"
+        fi
+        run_and_emit_result "$STAGE" opencode "${OPENCODE_ARGS[@]}" "$PROMPT_CONTENT"
         ;;
 
     test)
