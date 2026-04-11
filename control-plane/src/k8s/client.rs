@@ -122,9 +122,10 @@ impl JobDispatcher for KubeJobDispatcher {
 
         for pod in &pod_list.items {
             if let Some(pod_name) = &pod.metadata.name {
+                // Fetch the full log so the driver can reconcile without
+                // silently dropping lines if a job emits more than a fixed tail.
                 let log_params = kube::api::LogParams {
                     container: Some("agent".to_string()),
-                    tail_lines: Some(5000), // Large enough for verbose agent output
                     ..Default::default()
                 };
                 match pods_api.logs(pod_name, &log_params).await {

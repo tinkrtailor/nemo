@@ -40,6 +40,8 @@ enum AppEvent {
     Resize,
     Status(Vec<LoopSummary>),
     StatusError(String),
+    InspectLoaded(String, InspectResponse),
+    InspectError(String, String),
     LogLine(uuid::Uuid, String),
     LogStatus(uuid::Uuid, String),
 }
@@ -51,10 +53,11 @@ enum LogSource {
     SidecarPod,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct LogSelection {
     loop_id: uuid::Uuid,
     source: LogSource,
+    job_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,9 +137,13 @@ impl App {
     }
 
     fn current_log_selection(&self) -> Option<LogSelection> {
-        self.selected_loop_id.map(|loop_id| LogSelection {
-            loop_id,
+        self.selected_loop().map(|loop_item| LogSelection {
+            loop_id: loop_item.loop_id,
             source: self.log_source,
+            job_name: match self.log_source {
+                LogSource::Persisted => None,
+                LogSource::AgentPod | LogSource::SidecarPod => loop_item.active_job_name.clone(),
+            },
         })
     }
 
@@ -343,10 +350,12 @@ async fn run_app(
 ) -> Result<()> {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let (selection_tx, selection_rx) = watch::channel(None::<LogSelection>);
+    let (inspect_tx, inspect_rx) = watch::channel(None::<String>);
 
     spawn_input_task(event_tx.clone());
     spawn_status_task(client.clone(), engineer.clone(), team, event_tx.clone());
     spawn_log_task(client.clone(), selection_rx, event_tx.clone());
+    spawn_inspect_task(client.clone(), inspect_rx, event_tx.clone());
 
     let mut app = App::new(team);
 
@@ -357,7 +366,8 @@ async fn run_app(
             break;
         };
 
-        let previous_selection = app.selected_loop_id;
+        let previous_log_selection = app.current_log_selection();
+        let previous_branch = app.selected_branch();
         match event {
             AppEvent::Input(key) => match app.handle_input(key) {
                 AppAction::Quit => break,
@@ -365,6 +375,7 @@ async fn run_app(
                     app.reset_logs();
                     app.reset_inspect();
                     let _ = selection_tx.send(app.current_log_selection());
+                    let _ = inspect_tx.send(app.selected_branch());
                 }
                 AppAction::ReconnectLogs | AppAction::SourceChanged => {
                     app.reset_logs();
@@ -386,12 +397,14 @@ async fn run_app(
                         match status::fetch(&client, &engineer, team).await {
                             Ok(response) => {
                                 app.set_loops(response.loops);
-                                if app.selected_loop_id != previous_selection {
+                                if app.current_log_selection() != previous_log_selection {
                                     app.reset_logs();
-                                    app.reset_inspect();
                                     let _ = selection_tx.send(app.current_log_selection());
                                 }
-                                refresh_selected_inspect(&client, &mut app).await;
+                                if app.selected_branch() != previous_branch {
+                                    app.reset_inspect();
+                                    let _ = inspect_tx.send(app.selected_branch());
+                                }
                             }
                             Err(error) => {
                                 app.status_line =
@@ -407,15 +420,29 @@ async fn run_app(
             AppEvent::Resize => {}
             AppEvent::Status(loops) => {
                 app.set_loops(loops);
-                if app.selected_loop_id != previous_selection {
+                if app.current_log_selection() != previous_log_selection {
                     app.reset_logs();
-                    app.reset_inspect();
                     let _ = selection_tx.send(app.current_log_selection());
                 }
-                refresh_selected_inspect(&client, &mut app).await;
+                if app.selected_branch() != previous_branch {
+                    app.reset_inspect();
+                    let _ = inspect_tx.send(app.selected_branch());
+                }
             }
             AppEvent::StatusError(error) => {
                 app.status_line = format!("status refresh failed: {error}");
+            }
+            AppEvent::InspectLoaded(branch, inspect) => {
+                if app.selected_branch().as_deref() == Some(branch.as_str()) {
+                    app.inspect_status = format!("inspect synced for {branch}");
+                    app.inspect = Some(inspect);
+                }
+            }
+            AppEvent::InspectError(branch, error) => {
+                if app.selected_branch().as_deref() == Some(branch.as_str()) {
+                    app.inspect = None;
+                    app.inspect_status = format!("inspect refresh failed: {error}");
+                }
             }
             AppEvent::LogLine(loop_id, line) => {
                 if Some(loop_id) == app.selected_loop_id {
@@ -506,25 +533,6 @@ async fn perform_loop_action(
     }
 }
 
-async fn refresh_selected_inspect(client: &NemoClient, app: &mut App) {
-    let Some(branch) = app.selected_branch() else {
-        app.inspect = None;
-        app.inspect_status = "Select a loop to inspect".to_string();
-        return;
-    };
-
-    match inspect::fetch(client, &branch).await {
-        Ok(response) => {
-            app.inspect = Some(response);
-            app.inspect_status = format!("inspect synced for {branch}");
-        }
-        Err(error) => {
-            app.inspect = None;
-            app.inspect_status = format!("inspect refresh failed: {error}");
-        }
-    }
-}
-
 fn spawn_input_task(event_tx: mpsc::UnboundedSender<AppEvent>) {
     tokio::task::spawn_blocking(move || {
         loop {
@@ -566,6 +574,66 @@ fn spawn_input_task(event_tx: mpsc::UnboundedSender<AppEvent>) {
             }
         }
     });
+}
+
+fn spawn_inspect_task(
+    client: NemoClient,
+    mut branch_rx: watch::Receiver<Option<String>>,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+) {
+    tokio::spawn(async move {
+        let mut current_task: Option<tokio::task::JoinHandle<()>> = None;
+
+        loop {
+            if let Some(task) = current_task.take() {
+                task.abort();
+            }
+
+            if let Some(branch) = branch_rx.borrow().clone() {
+                let client = client.clone();
+                let event_tx = event_tx.clone();
+                current_task = Some(tokio::spawn(async move {
+                    poll_inspect_for_branch(client, branch, event_tx).await;
+                }));
+            }
+
+            if branch_rx.changed().await.is_err() {
+                if let Some(task) = current_task {
+                    task.abort();
+                }
+                break;
+            }
+        }
+    });
+}
+
+async fn poll_inspect_for_branch(
+    client: NemoClient,
+    branch: String,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+) {
+    loop {
+        match inspect::fetch(&client, &branch).await {
+            Ok(response) => {
+                if event_tx
+                    .send(AppEvent::InspectLoaded(branch.clone(), response))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(error) => {
+                if event_tx
+                    .send(AppEvent::InspectError(branch.clone(), error.to_string()))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 fn spawn_status_task(
@@ -610,7 +678,7 @@ fn spawn_log_task(
                 task.abort();
             }
 
-            if let Some(selection) = *selection_rx.borrow() {
+            if let Some(selection) = selection_rx.borrow().clone() {
                 let client = client.clone();
                 let event_tx = event_tx.clone();
                 current_task = Some(tokio::spawn(async move {
@@ -1383,6 +1451,46 @@ mod tests {
             AppAction::SourceChanged
         );
         assert_eq!(app.log_source, LogSource::Persisted);
+    }
+
+    #[test]
+    fn persisted_log_selection_does_not_restart_on_job_name_changes() {
+        let first_id = uuid::Uuid::new_v4();
+        let mut app = App::new(false);
+        app.set_loops(vec![loop_summary(
+            first_id,
+            "alice",
+            "2026-04-10T10:00:00Z",
+        )]);
+
+        let first_selection = app.current_log_selection();
+        app.set_loops(vec![LoopSummary {
+            active_job_name: Some("job-2".to_string()),
+            ..loop_summary(first_id, "alice", "2026-04-10T11:00:00Z")
+        }]);
+
+        assert_eq!(first_selection, app.current_log_selection());
+    }
+
+    #[test]
+    fn pod_log_selection_tracks_active_job_name() {
+        let first_id = uuid::Uuid::new_v4();
+        let mut app = App::new(false);
+        app.log_source = LogSource::AgentPod;
+        app.set_loops(vec![loop_summary(
+            first_id,
+            "alice",
+            "2026-04-10T10:00:00Z",
+        )]);
+
+        assert_eq!(
+            app.current_log_selection(),
+            Some(LogSelection {
+                loop_id: first_id,
+                source: LogSource::AgentPod,
+                job_name: Some("job-1".to_string()),
+            })
+        );
     }
 
     #[test]
