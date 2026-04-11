@@ -8,7 +8,11 @@ mod project_config;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "nemo", about = "Nemo CLI - Convergent loop orchestrator")]
+#[command(
+    name = "nemo",
+    about = "Nemo CLI - Convergent loop orchestrator",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
