@@ -839,6 +839,35 @@ pub async fn upsert_credentials(
     Ok((StatusCode::OK, Json(serde_json::json!({"status": "ok"}))))
 }
 
+/// GET /credentials - List registered credential providers for an engineer.
+pub async fn list_credentials(
+    State(state): State<AppState>,
+    Query(query): Query<crate::types::api::CredentialsQuery>,
+) -> Result<Json<crate::types::api::CredentialsResponse>, NautiloopError> {
+    if query.engineer.is_empty() {
+        return Err(NautiloopError::BadRequest(
+            "engineer query parameter is required".to_string(),
+        ));
+    }
+
+    let creds = state.store.get_credentials(&query.engineer).await?;
+
+    let providers = creds
+        .into_iter()
+        .filter(|c| !c.provider.starts_with('_')) // Skip internal _name, _email
+        .map(|c| crate::types::api::ProviderInfo {
+            provider: c.provider,
+            valid: c.valid,
+            updated_at: c.updated_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(crate::types::api::CredentialsResponse {
+        engineer: query.engineer,
+        providers,
+    }))
+}
+
 /// Check if a sqlx error is a unique constraint violation.
 fn is_unique_violation(e: &sqlx::Error) -> bool {
     match e {

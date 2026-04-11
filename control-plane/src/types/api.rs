@@ -162,6 +162,27 @@ fn default_valid() -> bool {
     true
 }
 
+/// GET /credentials response - List registered credential providers for an engineer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialsResponse {
+    pub engineer: String,
+    pub providers: Vec<ProviderInfo>,
+}
+
+/// Information about a registered credential provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderInfo {
+    pub provider: String,
+    pub valid: bool,
+    pub updated_at: String,
+}
+
+/// Query parameters for GET /credentials
+#[derive(Debug, serde::Deserialize)]
+pub struct CredentialsQuery {
+    pub engineer: String,
+}
+
 /// Generic error response body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {

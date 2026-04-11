@@ -173,6 +173,9 @@ enum Commands {
         ssh: bool,
     },
 
+    /// Show authenticated providers and available models
+    Models,
+
     /// Edit ~/.nemo/config.toml
     Config {
         /// Set a config value
@@ -417,6 +420,9 @@ async fn main() -> anyhow::Result<()> {
                 ssh,
             )
             .await?;
+        }
+        Commands::Models => {
+            commands::models::run(&http_client, &eng_config).await?;
         }
         Commands::Config { set, get } => {
             commands::config::run(set, get)?;

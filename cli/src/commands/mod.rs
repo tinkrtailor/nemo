@@ -6,6 +6,7 @@ pub mod helm;
 pub mod init;
 pub mod inspect;
 pub mod logs;
+pub mod models;
 pub mod resume;
 pub mod start;
 pub mod status;

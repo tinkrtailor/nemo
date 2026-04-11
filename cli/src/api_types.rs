@@ -36,3 +36,16 @@ pub struct LoopSummary {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CredentialsResponse {
+    pub engineer: String,
+    pub providers: Vec<ProviderInfo>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ProviderInfo {
+    pub provider: String,
+    pub valid: bool,
+    pub updated_at: String,
+}
