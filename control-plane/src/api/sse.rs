@@ -90,5 +90,9 @@ pub async fn stream_logs(
         }
     };
 
-    Sse::new(stream)
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
 }
