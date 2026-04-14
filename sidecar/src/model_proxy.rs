@@ -356,15 +356,24 @@ async fn handle(
         Err(_) => return error_response(500, "invalid upstream URI"),
     };
 
-    // For POST /v1/responses we must buffer the body to inject the required
-    // `instructions` field when the caller (opencode) omits it. The Responses
-    // API rejects requests without `instructions` even when the value is empty.
+    // For POST /v1/responses we must buffer the body to patch it before
+    // forwarding. Two transforms are applied:
+    //
+    // 1. Inject `instructions` if absent — both api.openai.com and chatgpt.com
+    //    codex reject requests without a non-empty instructions field.
+    //
+    // 2. Rename `max_output_tokens` → `max_tokens` for CodexOauth requests.
+    //    The standard Responses API uses `max_output_tokens`; chatgpt.com's
+    //    /backend-api/codex/responses uses `max_tokens` and returns
+    //    "Unsupported parameter: max_output_tokens" otherwise.
+    //
     // All other requests stream through without buffering (FR-28).
+    let is_codex_oauth = matches!(openai_credential.as_ref(), Some(OpenAiCredential::CodexOauth(_)));
     let body = if method == hyper::Method::POST && path.contains("/v1/responses") {
         match req.into_body().collect().await {
             Ok(collected) => {
                 let bytes = collected.to_bytes();
-                let patched = inject_instructions_if_missing(bytes);
+                let patched = patch_responses_body(bytes, is_codex_oauth);
                 Full::new(patched).map_err(|e| match e {}).boxed()
             }
             Err(e) => {
@@ -746,20 +755,37 @@ fn static_error_response(
 /// `input` and takes precedence at inference time.
 const DEFAULT_INSTRUCTIONS: &str = "Follow the instructions provided in the input carefully.";
 
-/// Inject `"instructions"` into a Responses API JSON body if the field is
-/// absent. Returns the original bytes unchanged if the body is not valid
-/// JSON or already contains `instructions`.
-fn inject_instructions_if_missing(bytes: Bytes) -> Bytes {
+/// Patch a Responses API JSON body before forwarding.
+///
+/// Always: inject `"instructions"` if absent.
+/// When `is_codex_oauth`: rename `"max_output_tokens"` → `"max_tokens"`.
+///   chatgpt.com/backend-api/codex/responses rejects `max_output_tokens`
+///   with "Unsupported parameter: max_output_tokens"; it expects the legacy
+///   `max_tokens` name instead. api.openai.com uses `max_output_tokens`, so
+///   the rename is only applied on the CodexOauth path.
+///
+/// Returns the original bytes unchanged if the body is not valid JSON.
+fn patch_responses_body(bytes: Bytes, is_codex_oauth: bool) -> Bytes {
     let Ok(mut payload) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes) else {
         return bytes;
     };
-    if payload.contains_key("instructions") {
+    let mut modified = false;
+    if !payload.contains_key("instructions") {
+        payload.insert(
+            "instructions".to_string(),
+            serde_json::Value::String(DEFAULT_INSTRUCTIONS.to_string()),
+        );
+        modified = true;
+    }
+    if is_codex_oauth
+        && let Some(v) = payload.remove("max_output_tokens")
+    {
+        payload.insert("max_tokens".to_string(), v);
+        modified = true;
+    }
+    if !modified {
         return bytes;
     }
-    payload.insert(
-        "instructions".to_string(),
-        serde_json::Value::String(DEFAULT_INSTRUCTIONS.to_string()),
-    );
     match serde_json::to_vec(&payload) {
         Ok(v) => Bytes::from(v),
         Err(_) => bytes,
@@ -1126,12 +1152,12 @@ mod tests {
         );
     }
 
-    // --- inject_instructions_if_missing ---
+    // --- patch_responses_body ---
 
     #[test]
     fn test_inject_instructions_adds_field_when_absent() {
         let input = br#"{"model":"gpt-5.4","input":"do a review"}"#;
-        let result = inject_instructions_if_missing(Bytes::from_static(input));
+        let result = patch_responses_body(Bytes::from_static(input), false);
         let out: serde_json::Value = serde_json::from_slice(&result).unwrap();
         assert_eq!(out["instructions"], DEFAULT_INSTRUCTIONS);
         assert_eq!(out["model"], "gpt-5.4");
@@ -1140,7 +1166,7 @@ mod tests {
     #[test]
     fn test_inject_instructions_preserves_existing_value() {
         let input = br#"{"model":"gpt-5.4","input":"review","instructions":"be precise"}"#;
-        let result = inject_instructions_if_missing(Bytes::from_static(input));
+        let result = patch_responses_body(Bytes::from_static(input), false);
         let out: serde_json::Value = serde_json::from_slice(&result).unwrap();
         assert_eq!(out["instructions"], "be precise");
     }
@@ -1148,8 +1174,26 @@ mod tests {
     #[test]
     fn test_inject_instructions_passthrough_non_json() {
         let input = b"not json at all";
-        let result = inject_instructions_if_missing(Bytes::from_static(input));
+        let result = patch_responses_body(Bytes::from_static(input), false);
         assert_eq!(result.as_ref(), input.as_slice());
+    }
+
+    #[test]
+    fn test_codex_oauth_renames_max_output_tokens() {
+        let input = br#"{"model":"gpt-5.4","input":"review","max_output_tokens":4096}"#;
+        let result = patch_responses_body(Bytes::from_static(input), true);
+        let out: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(out["max_tokens"], 4096);
+        assert!(out.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn test_non_codex_oauth_preserves_max_output_tokens() {
+        let input = br#"{"model":"gpt-5.4","input":"review","max_output_tokens":4096}"#;
+        let result = patch_responses_body(Bytes::from_static(input), false);
+        let out: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(out["max_output_tokens"], 4096);
+        assert!(out.get("max_tokens").is_none());
     }
 
     // --- read_credential ---
