@@ -730,10 +730,18 @@ fn static_error_response(
     }
 }
 
-/// Inject `"instructions": ""` into a Responses API JSON body if the field is
-/// absent. The OpenAI Responses API requires the field; opencode passes the
-/// prompt as `input` and never sets it.  Returns the original bytes unchanged
-/// if the body is not valid JSON or already contains `instructions`.
+/// Default instructions value injected when opencode omits the field.
+///
+/// Both `api.openai.com` and `chatgpt.com/backend-api/codex/responses`
+/// require `instructions` to be present and non-empty. opencode passes
+/// the full prompt as `input` and never sets `instructions`, so we
+/// inject a neutral non-empty sentinel. The real prompt content is in
+/// `input` and takes precedence at inference time.
+const DEFAULT_INSTRUCTIONS: &str = "Follow the instructions provided in the input carefully.";
+
+/// Inject `"instructions"` into a Responses API JSON body if the field is
+/// absent. Returns the original bytes unchanged if the body is not valid
+/// JSON or already contains `instructions`.
 fn inject_instructions_if_missing(bytes: Bytes) -> Bytes {
     let Ok(mut payload) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes) else {
         return bytes;
@@ -743,7 +751,7 @@ fn inject_instructions_if_missing(bytes: Bytes) -> Bytes {
     }
     payload.insert(
         "instructions".to_string(),
-        serde_json::Value::String(String::new()),
+        serde_json::Value::String(DEFAULT_INSTRUCTIONS.to_string()),
     );
     match serde_json::to_vec(&payload) {
         Ok(v) => Bytes::from(v),
@@ -1118,7 +1126,7 @@ mod tests {
         let input = br#"{"model":"gpt-5.4","input":"do a review"}"#;
         let result = inject_instructions_if_missing(Bytes::from_static(input));
         let out: serde_json::Value = serde_json::from_slice(&result).unwrap();
-        assert_eq!(out["instructions"], serde_json::Value::String(String::new()));
+        assert_eq!(out["instructions"], DEFAULT_INSTRUCTIONS);
         assert_eq!(out["model"], "gpt-5.4");
     }
 
