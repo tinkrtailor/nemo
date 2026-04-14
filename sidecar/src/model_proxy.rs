@@ -34,6 +34,25 @@ use tokio::sync::{Mutex, watch};
 use crate::logging;
 use crate::ssrf_connector::SsrfConnector;
 
+/// Test-only configuration that redirects upstream calls to local mock servers.
+///
+/// Enabled only under `#[cfg(feature = "__test_utils")]`. Production builds
+/// must never include this type.
+#[cfg(feature = "__test_utils")]
+pub struct TestProxyConfig {
+    /// Path to the OpenAI credential file (may be a tempfile path).
+    pub openai_cred_path: String,
+    /// Path to the Anthropic credential file (may be a tempfile path).
+    pub anthropic_cred_path: String,
+    /// Base URL for OpenAI upstream, e.g. `"http://127.0.0.1:PORT"`.
+    pub openai_base_url: String,
+    /// Base URL for Anthropic upstream, e.g. `"http://127.0.0.1:PORT"`.
+    pub anthropic_base_url: String,
+    /// Base URL for CodexOauth upstream (replaces the chatgpt.com codex
+    /// endpoint), e.g. `"http://127.0.0.1:PORT"`.
+    pub codex_base_url: String,
+}
+
 const OPENAI_HOST: &str = "api.openai.com";
 const CHATGPT_CODEX_HOST: &str = "chatgpt.com";
 const ANTHROPIC_HOST: &str = "api.anthropic.com";
@@ -296,12 +315,30 @@ pub async fn serve(
     Ok(())
 }
 
-/// Handle a single request end-to-end.
+/// Handle a single request end-to-end (production path).
 async fn handle(
     req: Request<Incoming>,
     client: &UpstreamClient,
     openai_oauth_cache: &Mutex<Option<CodexOauthCredential>>,
 ) -> Response<BoxBody<Bytes, hyper::Error>> {
+    handle_inner(req, client, openai_oauth_cache, None).await
+}
+
+/// Shared request handling logic, parameterised over the connector type
+/// so the same code path runs in both production (SsrfConnector + TLS)
+/// and integration tests (plain HttpConnector).
+///
+/// When `test_config` is `Some`, credential paths and upstream base URLs
+/// are taken from the config instead of the production constants.
+async fn handle_inner<C>(
+    req: Request<Incoming>,
+    client: &Client<C, UpstreamBody>,
+    openai_oauth_cache: &Mutex<Option<CodexOauthCredential>>,
+    test_config: Option<&TestProxyConfigInner>,
+) -> Response<BoxBody<Bytes, hyper::Error>>
+where
+    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + 'static,
+{
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(|s| s.to_string());
     let method = req.method().clone();
@@ -311,13 +348,16 @@ async fn handle(
         return forbidden_response();
     };
 
+    // Resolve credential paths: use test overrides when present.
+    let openai_path: &str = resolve_openai_path(&target, test_config);
+    let anthropic_path: &str = resolve_anthropic_path(&target, test_config);
+
     let openai_credential = if target.kind == UpstreamKind::OpenAi {
-        let credential = match read_openai_credential(target.kind.credential_path()).await {
+        let credential = match read_openai_credential(openai_path).await {
             Ok(credential) => credential,
             Err(e) => {
                 logging::error(&format!(
-                    "failed to read credentials from {}: {e}",
-                    target.kind.credential_path()
+                    "failed to read credentials from {openai_path}: {e}"
                 ));
                 return error_response(500, "credential read failed");
             }
@@ -336,12 +376,11 @@ async fn handle(
     };
 
     let raw_credential = if target.kind == UpstreamKind::Anthropic {
-        match read_credential(target.kind.credential_path()).await {
+        match read_credential(anthropic_path).await {
             Ok(credential) => Some(credential),
             Err(e) => {
                 logging::error(&format!(
-                    "failed to read credentials from {}: {e}",
-                    target.kind.credential_path()
+                    "failed to read credentials from {anthropic_path}: {e}"
                 ));
                 return error_response(500, "credential read failed");
             }
@@ -350,11 +389,25 @@ async fn handle(
         None
     };
 
-    let uri_string = upstream_uri(&target, query.as_deref(), openai_credential.as_ref());
+    // Compute the upstream URI. In test mode, substitute base URLs from config.
+    let is_codex_oauth =
+        matches!(openai_credential.as_ref(), Some(OpenAiCredential::CodexOauth(_)));
+
+    let uri_string = build_upstream_uri(
+        &target,
+        query.as_deref(),
+        openai_credential.as_ref(),
+        is_codex_oauth,
+        test_config,
+    );
     let uri: hyper::Uri = match uri_string.parse() {
         Ok(u) => u,
         Err(_) => return error_response(500, "invalid upstream URI"),
     };
+
+    // Determine host header value.
+    let host_header_value: String =
+        resolve_host_header(&target, openai_credential.as_ref(), is_codex_oauth, test_config);
 
     // For POST /v1/responses we must buffer the body to patch it before
     // forwarding. Two transforms are applied:
@@ -368,7 +421,6 @@ async fn handle(
     //    "Unsupported parameter: max_output_tokens" otherwise.
     //
     // All other requests stream through without buffering (FR-28).
-    let is_codex_oauth = matches!(openai_credential.as_ref(), Some(OpenAiCredential::CodexOauth(_)));
     let body = if method == hyper::Method::POST && path.contains("/v1/responses") {
         match req.into_body().collect().await {
             Ok(collected) => {
@@ -407,7 +459,7 @@ async fn handle(
         // loopback bind (e.g. `127.0.0.1:9090`). Forwarding that verbatim
         // would poison upstream virtual-host routing and break TLS-SNI
         // audit expectations. Rewrite it to the upstream hostname.
-        rewrite_host_header(h, upstream_host(&target, openai_credential.as_ref()));
+        rewrite_host_header(h, &host_header_value);
         inject_auth_header(
             h,
             target.kind,
@@ -444,6 +496,171 @@ async fn handle(
         Ok(r) => r,
         Err(_) => error_response(500, "failed to build response"),
     }
+}
+
+/// Internal type alias used by `handle_inner`. In non-test builds this is
+/// a zero-sized uninhabited alias so the compiler elides all `if let Some`
+/// branches that reference it — they are statically unreachable.
+#[cfg(feature = "__test_utils")]
+type TestProxyConfigInner = TestProxyConfig;
+
+/// Uninhabited sentinel used in non-test builds so `handle_inner` compiles
+/// with the same signature regardless of the feature flag.
+#[cfg(not(feature = "__test_utils"))]
+enum TestProxyConfigInner {}
+
+/// Build the upstream URI string, applying test base-URL overrides when present.
+fn build_upstream_uri(
+    target: &RouteTarget,
+    query: Option<&str>,
+    openai_credential: Option<&OpenAiCredential>,
+    is_codex_oauth: bool,
+    test_config: Option<&TestProxyConfigInner>,
+) -> String {
+    // In test builds, redirect to the local mock server.
+    #[cfg(feature = "__test_utils")]
+    if let Some(cfg) = test_config {
+        if is_codex_oauth && is_codex_responses_path(&target.upstream_path) {
+            let base = cfg.codex_base_url.trim_end_matches('/');
+            return match query {
+                Some(q) if !q.is_empty() => format!("{base}?{q}"),
+                _ => base.to_string(),
+            };
+        }
+        let base = if target.kind == UpstreamKind::OpenAi {
+            cfg.openai_base_url.trim_end_matches('/')
+        } else {
+            cfg.anthropic_base_url.trim_end_matches('/')
+        };
+        return match query {
+            Some(q) if !q.is_empty() => {
+                format!("{base}{}?{q}", target.upstream_path)
+            }
+            _ => format!("{base}{}", target.upstream_path),
+        };
+    }
+
+    // Suppress unused-variable warnings in non-test builds.
+    let _ = (is_codex_oauth, test_config);
+
+    // Production path.
+    upstream_uri(target, query, openai_credential)
+}
+
+/// Resolve the OpenAI credential file path (test override or production default).
+fn resolve_openai_path<'cfg, 'tgt: 'cfg>(
+    target: &'tgt RouteTarget,
+    test_config: Option<&'cfg TestProxyConfigInner>,
+) -> &'cfg str {
+    #[cfg(feature = "__test_utils")]
+    if let Some(cfg) = test_config {
+        return cfg.openai_cred_path.as_str();
+    }
+    let _ = test_config;
+    target.kind.credential_path()
+}
+
+/// Resolve the Anthropic credential file path (test override or production default).
+fn resolve_anthropic_path<'cfg, 'tgt: 'cfg>(
+    target: &'tgt RouteTarget,
+    test_config: Option<&'cfg TestProxyConfigInner>,
+) -> &'cfg str {
+    #[cfg(feature = "__test_utils")]
+    if let Some(cfg) = test_config {
+        return cfg.anthropic_cred_path.as_str();
+    }
+    let _ = test_config;
+    target.kind.credential_path()
+}
+
+/// Resolve the value to use in the `Host` header sent upstream.
+fn resolve_host_header(
+    target: &RouteTarget,
+    openai_credential: Option<&OpenAiCredential>,
+    is_codex_oauth: bool,
+    test_config: Option<&TestProxyConfigInner>,
+) -> String {
+    #[cfg(feature = "__test_utils")]
+    if let Some(cfg) = test_config {
+        let base = if is_codex_oauth && is_codex_responses_path(&target.upstream_path) {
+            cfg.codex_base_url.as_str()
+        } else if target.kind == UpstreamKind::OpenAi {
+            cfg.openai_base_url.as_str()
+        } else {
+            cfg.anthropic_base_url.as_str()
+        };
+        return base
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .to_string();
+    }
+    let _ = (is_codex_oauth, test_config);
+    upstream_host(target, openai_credential).to_string()
+}
+
+/// Test-only serve function that uses a plain HTTP connector instead of
+/// `SsrfConnector` + TLS, allowing tests to point the proxy at local mock
+/// servers without valid TLS certificates.
+#[cfg(feature = "__test_utils")]
+pub async fn serve_for_test(
+    listener: TcpListener,
+    mut shutdown_rx: watch::Receiver<bool>,
+    config: Arc<TestProxyConfig>,
+) -> Result<(), ModelProxyError> {
+    use hyper_util::client::legacy::connect::HttpConnector;
+
+    let connector = HttpConnector::new();
+    let client: Client<HttpConnector, UpstreamBody> =
+        Client::builder(TokioExecutor::new()).build(connector);
+    let client = Arc::new(client);
+    let openai_oauth_cache: SharedOpenAiOauthCache = Arc::new(Mutex::new(None));
+
+    let graceful = GracefulShutdown::new();
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            accept = listener.accept() => {
+                let (stream, _) = accept.map_err(ModelProxyError::Accept)?;
+                let client = Arc::clone(&client);
+                let openai_oauth_cache = Arc::clone(&openai_oauth_cache);
+                let config = Arc::clone(&config);
+                let io = TokioIo::new(stream);
+                let svc = service_fn(move |req: Request<Incoming>| {
+                    let client = Arc::clone(&client);
+                    let openai_oauth_cache = Arc::clone(&openai_oauth_cache);
+                    let config = Arc::clone(&config);
+                    async move {
+                        Ok::<_, Infallible>(
+                            handle_inner(
+                                req,
+                                client.as_ref(),
+                                openai_oauth_cache.as_ref(),
+                                Some(config.as_ref()),
+                            )
+                            .await,
+                        )
+                    }
+                });
+                let conn = http1::Builder::new().serve_connection(io, svc);
+                let watched = graceful.watch(conn);
+                tokio::spawn(async move {
+                    let _ = watched.await;
+                });
+            }
+        }
+    }
+
+    match tokio::time::timeout(GRACEFUL_DRAIN_TIMEOUT, graceful.shutdown()).await {
+        Ok(()) => logging::info("model proxy (test) drained in-flight requests"),
+        Err(_) => logging::warn("model proxy (test) drain timed out, forcing shutdown"),
+    }
+    Ok(())
 }
 
 /// Read a credential file fresh, trimming full whitespace per FR-4.
@@ -550,11 +767,14 @@ async fn maybe_resolve_cached_oauth_credential(
     OpenAiCredential::CodexOauth(effective)
 }
 
-async fn ensure_fresh_oauth_credential(
-    client: &UpstreamClient,
+async fn ensure_fresh_oauth_credential<C>(
+    client: &Client<C, UpstreamBody>,
     credential: OpenAiCredential,
     openai_oauth_cache: &Mutex<Option<CodexOauthCredential>>,
-) -> Result<OpenAiCredential, String> {
+) -> Result<OpenAiCredential, String>
+where
+    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + 'static,
+{
     let OpenAiCredential::CodexOauth(oauth) = credential else {
         return Ok(credential);
     };
@@ -568,10 +788,13 @@ async fn ensure_fresh_oauth_credential(
     Ok(OpenAiCredential::CodexOauth(refreshed))
 }
 
-async fn refresh_codex_oauth_credential(
-    client: &UpstreamClient,
+async fn refresh_codex_oauth_credential<C>(
+    client: &Client<C, UpstreamBody>,
     credential: &CodexOauthCredential,
-) -> Result<CodexOauthCredential, String> {
+) -> Result<CodexOauthCredential, String>
+where
+    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + 'static,
+{
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "refresh_token")
         .append_pair("refresh_token", &credential.refresh)

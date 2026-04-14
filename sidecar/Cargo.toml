@@ -119,3 +119,8 @@ __test_utils = []
 name = "git_ssh_proxy_e2e"
 path = "tests/git_ssh_proxy_e2e.rs"
 required-features = ["__test_utils"]
+
+[[test]]
+name = "model_proxy_e2e"
+path = "tests/model_proxy_e2e.rs"
+required-features = ["__test_utils"]
