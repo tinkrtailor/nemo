@@ -336,54 +336,52 @@ case "$STAGE" in
         ;;
 
     review|audit)
-        # FR-6, FR-7: OpenCode for review/audit (read-only)
-        export OPENCODE_PERMISSIONS='{"edit":"deny","bash":"deny","read":"allow"}'
-        # Prevent opencode from auto-upgrading its binary at runtime. The image
-        # pins a specific opencode version; a self-upgrade would replace it with
-        # an untested version and void our SHA256 verification at build time.
-        # Also disable the models.dev fetch — the sidecar egress logger showed
-        # this as a ~168KB outbound call that isn't needed for headless operation.
-        export OPENCODE_DISABLE_AUTOUPDATE=1
-        export OPENCODE_DISABLE_MODELS_FETCH=1
+        # FR-6, FR-7: Cross-model review for review/audit (read-only).
+        # Route to claude CLI for claude-* models, opencode for OpenAI models.
+        REVIEW_MODEL="${MODEL:-gpt-4o-mini}"
+        case "$REVIEW_MODEL" in
+            claude-*)
+                # Use Claude Code CLI for Claude models (same as implement/revise).
+                CLAUDE_ARGS=(--print --output-format stream-json --verbose --dangerously-skip-permissions)
+                CLAUDE_ARGS+=(--model "$REVIEW_MODEL")
+                # Only resume a Claude UUID session, not an opencode ses_ ID.
+                if [ -n "${SESSION_ID:-}" ] && \
+                   printf '%s' "$SESSION_ID" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+                    CLAUDE_ARGS+=(--resume "$SESSION_ID")
+                fi
+                STDIN_FILE="$PROMPT_FILE" run_and_emit_result "$STAGE" claude "${CLAUDE_ARGS[@]}"
+                ;;
+            *)
+                # Use OpenCode for OpenAI (and other) models.
+                export OPENCODE_PERMISSIONS='{"edit":"deny","bash":"deny","read":"allow"}'
+                export OPENCODE_DISABLE_AUTOUPDATE=1
+                export OPENCODE_DISABLE_MODELS_FETCH=1
 
-        # Pin the provider to `openai` so opencode routes through the sidecar
-        # model proxy (OPENAI_BASE_URL=http://localhost:9090/openai) instead
-        # of falling back to its built-in `opencode/*` models that go to the
-        # opencode.ai hosted backend with unknown billing. See issue #62.
-        #
-        # opencode expects `-m provider/model`. If MODEL is unset or doesn't
-        # contain a provider prefix, we prepend `openai/`. If it already has
-        # a prefix (e.g. user explicitly set `anthropic/...`), pass through.
-        # If MODEL is entirely unset, default to a cheap OpenAI model so the
-        # reviewer doesn't silently fall back to a nondeterministic default.
-        OPENCODE_MODEL="${MODEL:-gpt-4o-mini}"
-        case "$OPENCODE_MODEL" in
-            */*) ;;                                          # already has provider prefix
-            claude-*) OPENCODE_MODEL="anthropic/$OPENCODE_MODEL" ;;  # Anthropic models
-            *) OPENCODE_MODEL="openai/$OPENCODE_MODEL" ;;            # default: OpenAI
-        esac
+                # Pin the provider to `openai` so opencode routes through the sidecar
+                # model proxy (OPENAI_BASE_URL=http://localhost:9090/openai) instead
+                # of falling back to its built-in `opencode/*` models that go to the
+                # opencode.ai hosted backend with unknown billing. See issue #62.
+                case "$REVIEW_MODEL" in
+                    */*) OPENCODE_MODEL="$REVIEW_MODEL" ;;
+                    *) OPENCODE_MODEL="openai/$REVIEW_MODEL" ;;
+                esac
 
-        # opencode v1.3+ removed --prompt-file; the message must be passed as a
-        # positional arg. opencode run does NOT accept piped input via stdin.
-        # We read the prompt file and pass it as the message argument.
-        # Truncate to ~100KB to avoid ARG_MAX issues (opencode has limits anyway).
-        OPENCODE_ARGS=(run --format json -m "$OPENCODE_MODEL")
-        # Symmetric with the claude branch: only resume when SESSION_ID
-        # looks like an opencode session (`ses_<chars>`), not a claude
-        # UUID carried over from a previous revise. See the matching
-        # comment in the implement|revise branch.
-        if [ -n "${SESSION_ID:-}" ] && \
-           printf '%s' "$SESSION_ID" | grep -Eq '^ses_[a-zA-Z0-9]+$'; then
-            OPENCODE_ARGS+=(-s "$SESSION_ID")
-        fi
-        # Read prompt and truncate if extremely large to avoid ARG_MAX
-        PROMPT_CONTENT=$(cat "$PROMPT_FILE")
-        if [ "${#PROMPT_CONTENT}" -gt 100000 ]; then
-            PROMPT_CONTENT="${PROMPT_CONTENT:0:100000}
+                OPENCODE_ARGS=(run --format json -m "$OPENCODE_MODEL")
+                # Only resume an opencode ses_ session, not a Claude UUID.
+                if [ -n "${SESSION_ID:-}" ] && \
+                   printf '%s' "$SESSION_ID" | grep -Eq '^ses_[a-zA-Z0-9]+$'; then
+                    OPENCODE_ARGS+=(-s "$SESSION_ID")
+                fi
+                # Read prompt and truncate if extremely large to avoid ARG_MAX
+                PROMPT_CONTENT=$(cat "$PROMPT_FILE")
+                if [ "${#PROMPT_CONTENT}" -gt 100000 ]; then
+                    PROMPT_CONTENT="${PROMPT_CONTENT:0:100000}
 
 ...[truncated: prompt exceeded 100KB limit]"
-        fi
-        run_and_emit_result "$STAGE" opencode "${OPENCODE_ARGS[@]}" "$PROMPT_CONTENT"
+                fi
+                run_and_emit_result "$STAGE" opencode "${OPENCODE_ARGS[@]}" "$PROMPT_CONTENT"
+                ;;
+        esac
         ;;
 
     test)
