@@ -338,6 +338,13 @@ case "$STAGE" in
     review|audit)
         # FR-6, FR-7: OpenCode for review/audit (read-only)
         export OPENCODE_PERMISSIONS='{"edit":"deny","bash":"deny","read":"allow"}'
+        # Prevent opencode from auto-upgrading its binary at runtime. The image
+        # pins a specific opencode version; a self-upgrade would replace it with
+        # an untested version and void our SHA256 verification at build time.
+        # Also disable the models.dev fetch — the sidecar egress logger showed
+        # this as a ~168KB outbound call that isn't needed for headless operation.
+        export OPENCODE_DISABLE_AUTOUPDATE=1
+        export OPENCODE_DISABLE_MODELS_FETCH=1
 
         # Pin the provider to `openai` so opencode routes through the sidecar
         # model proxy (OPENAI_BASE_URL=http://localhost:9090/openai) instead
