@@ -114,6 +114,7 @@ check_sidecar() {
 run_and_emit_result() {
     local stage_name="$1"
     shift
+    local cli_cmd="$1"  # claude or opencode — used for extraction dispatch below
     local cli_stdout="/tmp/cli-stdout-$$"
     local cli_stderr="/tmp/cli-stderr-$$"
     local exit_code=0
@@ -213,6 +214,7 @@ run_and_emit_result() {
     # engine logs "No NAUTILOOP_RESULT line found in pod logs" and retries.
     local result
     if [ "$stage_name" = "implement" ] || [ "$stage_name" = "revise" ]; then
+        # Claude stream-json: keep the last assistant event object as data.
         result=$(jq -nc \
             --arg stage "$stage_name" \
             --slurpfile events "$cli_stdout" \
@@ -222,7 +224,72 @@ run_and_emit_result() {
             --arg stage "$stage_name" \
             --rawfile data "$cli_stdout" \
             '{stage: $stage, data: $data}')
+    elif [ "$cli_cmd" = "claude" ]; then
+        # Claude stream-json for review/audit with a claude-* model.
+        # The audit/review prompts instruct the model to output ONLY the
+        # verdict JSON as its final message. Extract it from the last
+        # assistant event that has a text content block (skips tool_use
+        # events which also appear as type=="assistant"), pull token_usage
+        # from the final `result` event, and wrap in the ReviewResultData
+        # envelope that the loop engine parses via serde_json::from_value.
+        #
+        # The text may be wrapped in markdown fences (```json ... ```)
+        # even though the prompt says not to — strip them defensively.
+        result=$(jq -nc \
+            --arg stage "$stage_name" \
+            --argjson exit_code "$exit_code" \
+            --slurpfile events "$cli_stdout" \
+            '
+              def strip_fences:
+                ltrimstr("```json\n") | ltrimstr("```\n") | ltrimstr("```")
+                | if endswith("```") then .[:-3] else . end
+                | ltrimstr("\n") | rtrimstr("\n");
+
+              ($events
+                | map(select(
+                    .type == "assistant" and
+                    (.message.content | map(select(.type == "text")) | length > 0)
+                  ))
+                | last
+                | .message.content
+                | map(select(.type == "text"))
+                | last
+                | .text
+                | strip_fences
+                | fromjson
+              ) as $verdict
+              |
+              ($events
+                | map(select(.type == "result"))
+                | last
+                | .usage // {}
+              ) as $usage
+              |
+              ($events
+                | map(select(.type == "result"))
+                | last
+                | .session_id // ""
+              ) as $session_id
+              |
+              {
+                stage: $stage,
+                data: {
+                  verdict: $verdict,
+                  token_usage: {
+                    input:  ($usage.input_tokens  // 0),
+                    output: ($usage.output_tokens // 0)
+                  },
+                  exit_code: $exit_code,
+                  session_id: $session_id
+                }
+              }
+            ' 2>/dev/null) || \
+        result=$(jq -nc \
+            --arg stage "$stage_name" \
+            --rawfile data "$cli_stdout" \
+            '{stage: $stage, data: $data}')
     else
+        # OpenCode streaming JSON for review/audit with an OpenAI model.
         result=$(jq -nc \
             --arg stage "$stage_name" \
             --argjson exit_code "$exit_code" \
