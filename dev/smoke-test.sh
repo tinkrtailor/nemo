@@ -3,12 +3,9 @@ set -euo pipefail
 
 NAUTILOOP_SERVER="${NAUTILOOP_SERVER:-http://localhost:18080}"
 ENGINEER="${NAUTILOOP_ENGINEER:-dev}"
-SPEC="${1:-$(dirname "$0")/test-spec.md}"
-
-if [ ! -f "$SPEC" ]; then
-    echo "ERROR: Spec file not found: ${SPEC}"
-    exit 1
-fi
+# SPEC is a repo-relative path read by the server from origin/main.
+# Default to the sidecar-followups spec which exists on main.
+SPEC="${1:-specs/sidecar-followups.md}"
 
 echo "==> Submitting harden job for: ${SPEC}"
 echo "    Server:   ${NAUTILOOP_SERVER}"

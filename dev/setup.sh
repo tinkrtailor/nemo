@@ -55,8 +55,9 @@ fi
 if k3d cluster list 2>/dev/null | grep -q "nautiloop-dev"; then
     echo "==> Cluster nautiloop-dev already exists, skipping creation."
 else
-    echo "==> Creating k3d cluster nautiloop-dev..."
+    echo "==> Creating k3d cluster nautiloop-dev (k3s v1.30 for native sidecar support)..."
     k3d cluster create nautiloop-dev \
+        --image rancher/k3s:v1.30.4-k3s1 \
         --k3s-arg "--disable=traefik@server:0" \
         --agents 0 \
         -p "18080:80@loadbalancer"
@@ -202,6 +203,12 @@ spec:
               value: "${NAUTILOOP_GIT_REPO_URL}"
             - name: GIT_SSH_COMMAND
               value: "ssh -i /tmp/id_ed25519 -o UserKnownHostsFile=/secrets/ssh-known-hosts/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: "*"
           volumeMounts:
             - name: bare-repo
               mountPath: /bare-repo
@@ -231,7 +238,7 @@ kubectl -n nautiloop-system wait --for=condition=complete job/nautiloop-repo-ini
     exit 1
 }
 
-# ── Restart control plane to pick up updated secrets and config ───────────────
+# ── Restart control plane (re-runs chown init container after repo-init) ─────
 
 echo "==> Restarting control plane deployments..."
 kubectl rollout restart deployment/nautiloop-api-server deployment/nautiloop-loop-engine \
