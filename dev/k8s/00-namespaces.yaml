@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nautiloop-system
+  labels:
+    app: nautiloop
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nautiloop-jobs
+  labels:
+    app: nautiloop

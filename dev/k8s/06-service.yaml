@@ -1,0 +1,30 @@
+# ClusterIP service for internal traffic between components
+apiVersion: v1
+kind: Service
+metadata:
+  name: nautiloop-api-server
+  namespace: nautiloop-system
+spec:
+  selector:
+    app: nautiloop-api-server
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# LoadBalancer service to expose the API server on the host.
+# k3d maps host port 18080 to the load balancer on port 80,
+# so the nemo CLI can reach the server at http://localhost:18080.
+# k3d routes LoadBalancer port 80 to this service's port 80.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nautiloop-api-server-lb
+  namespace: nautiloop-system
+spec:
+  type: LoadBalancer
+  selector:
+    app: nautiloop-api-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nautiloop-postgres
+  namespace: nautiloop-system
+  labels:
+    app: nautiloop-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nautiloop-postgres
+  template:
+    metadata:
+      labels:
+        app: nautiloop-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: nautiloop
+            - name: POSTGRES_USER
+              value: nautiloop
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nautiloop-postgres-credentials
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "nautiloop"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: nautiloop-postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nautiloop-postgres
+  namespace: nautiloop-system
+spec:
+  selector:
+    app: nautiloop-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

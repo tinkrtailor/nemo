@@ -1,0 +1,182 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nautiloop-api-server
+  namespace: nautiloop-system
+  labels:
+    app: nautiloop-api-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nautiloop-api-server
+  template:
+    metadata:
+      labels:
+        app: nautiloop-api-server
+    spec:
+      serviceAccountName: nautiloop-api-server
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: api-server
+          image: k3d-nautiloop-registry:5001/nautiloop-control-plane:dev
+          args: ["api-server"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: nautiloop-postgres-credentials
+                  key: DATABASE_URL
+            - name: NAUTILOOP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nautiloop-api-key
+                  key: NAUTILOOP_API_KEY
+            - name: GIT_HOST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nautiloop-git-host-token
+                  key: GIT_HOST_TOKEN
+            - name: BARE_REPO_PATH
+              value: /bare-repo
+            - name: GIT_SSH_COMMAND
+              value: "ssh -i /etc/git-ssh/id_ed25519 -o UserKnownHostsFile=/etc/git-ssh-known-hosts/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+            - name: NAUTILOOP_CONFIG_PATH
+              value: /etc/nautiloop/nemo.toml
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: bare-repo
+              mountPath: /bare-repo
+            - name: nautiloop-config
+              mountPath: /etc/nautiloop
+              readOnly: true
+            - name: git-ssh-key
+              mountPath: /etc/git-ssh
+              readOnly: true
+            - name: git-ssh-known-hosts
+              mountPath: /etc/git-ssh-known-hosts
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 2
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 3
+      volumes:
+        - name: bare-repo
+          persistentVolumeClaim:
+            claimName: nautiloop-bare-repo
+        - name: nautiloop-config
+          configMap:
+            name: nautiloop-config
+        - name: git-ssh-key
+          secret:
+            secretName: nautiloop-repo-ssh-key
+            defaultMode: 0400
+        - name: git-ssh-known-hosts
+          configMap:
+            name: nautiloop-ssh-known-hosts
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nautiloop-loop-engine
+  namespace: nautiloop-system
+  labels:
+    app: nautiloop-loop-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nautiloop-loop-engine
+  template:
+    metadata:
+      labels:
+        app: nautiloop-loop-engine
+    spec:
+      serviceAccountName: nautiloop-loop-engine
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: loop-engine
+          image: k3d-nautiloop-registry:5001/nautiloop-control-plane:dev
+          args: ["loop-engine"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: nautiloop-postgres-credentials
+                  key: DATABASE_URL
+            - name: GIT_HOST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nautiloop-git-host-token
+                  key: GIT_HOST_TOKEN
+            - name: BARE_REPO_PATH
+              value: /bare-repo
+            - name: AGENT_IMAGE
+              value: k3d-nautiloop-registry:5001/nautiloop-agent-base:dev
+            - name: GIT_SSH_COMMAND
+              value: "ssh -i /etc/git-ssh/id_ed25519 -o UserKnownHostsFile=/etc/git-ssh-known-hosts/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+            - name: NAUTILOOP_CONFIG_PATH
+              value: /etc/nautiloop/nemo.toml
+          volumeMounts:
+            - name: bare-repo
+              mountPath: /bare-repo
+            - name: nautiloop-config
+              mountPath: /etc/nautiloop
+              readOnly: true
+            - name: git-ssh-key
+              mountPath: /etc/git-ssh
+              readOnly: true
+            - name: git-ssh-known-hosts
+              mountPath: /etc/git-ssh-known-hosts
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command: ["kill", "-0", "1"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 3
+      volumes:
+        - name: bare-repo
+          persistentVolumeClaim:
+            claimName: nautiloop-bare-repo
+        - name: nautiloop-config
+          configMap:
+            name: nautiloop-config
+        - name: git-ssh-key
+          secret:
+            secretName: nautiloop-repo-ssh-key
+            defaultMode: 0400
+        - name: git-ssh-known-hosts
+          configMap:
+            name: nautiloop-ssh-known-hosts

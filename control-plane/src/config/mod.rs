@@ -341,6 +341,11 @@ pub struct ClusterConfig {
     /// Default branch name for the target repo (e.g., "main", "master", "trunk").
     #[serde(default = "default_branch_name")]
     pub default_branch: String,
+    /// Skip the init-iptables container. Set to true for local dev (k3d)
+    /// where NET_ADMIN privileged init containers may not behave identically
+    /// to production. Egress enforcement is best-effort in dev.
+    #[serde(default)]
+    pub skip_iptables: bool,
 }
 
 impl Default for ClusterConfig {
@@ -361,6 +366,7 @@ impl Default for ClusterConfig {
             max_connections: default_max_connections(),
             reconcile_interval_secs: default_reconcile_interval(),
             default_branch: default_branch_name(),
+            skip_iptables: false,
         }
     }
 }

@@ -1,0 +1,81 @@
+# Postgres data: RWO, local-path (k3d default)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nautiloop-postgres-data
+  namespace: nautiloop-system
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+# Bare repo: shared between nautiloop-system and nautiloop-jobs via hostPath PVs.
+# k3d is single-node so both PVs can point at the same host directory.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nautiloop-bare-repo-system
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /tmp/nautiloop-dev/bare-repo
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nautiloop-bare-repo
+  namespace: nautiloop-system
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: manual
+  volumeName: nautiloop-bare-repo-system
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nautiloop-bare-repo-jobs
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /tmp/nautiloop-dev/bare-repo
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nautiloop-bare-repo
+  namespace: nautiloop-jobs
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: manual
+  volumeName: nautiloop-bare-repo-jobs
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Sessions: RWO in nautiloop-jobs
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nautiloop-sessions
+  namespace: nautiloop-jobs
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi

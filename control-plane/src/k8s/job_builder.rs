@@ -24,6 +24,8 @@ pub struct JobBuildConfig {
     pub git_repo_url: String,
     /// ConfigMap name containing SSH known_hosts for sidecar host key verification.
     pub ssh_known_hosts_configmap: String,
+    /// Skip the init-iptables container (for local dev with k3d).
+    pub skip_iptables: bool,
 }
 
 /// Build a K8s Job spec for a given stage.
@@ -207,8 +209,14 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
         ..Default::default()
     };
 
-    // FR-41a: Init container for iptables network enforcement (runs and exits)
-    let init_container = build_init_iptables_container();
+    // FR-41a: Init container for iptables network enforcement (runs and exits).
+    // Skipped in local dev (k3d) where NET_ADMIN privileged init containers
+    // may not behave identically to production.
+    let maybe_init_container = if cfg.skip_iptables {
+        None
+    } else {
+        Some(build_init_iptables_container())
+    };
 
     let timeout_secs = stage.timeout.as_secs();
     let active_deadline = if timeout_secs > 0 {
@@ -248,7 +256,12 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
                     // (native sidecar via restartPolicy: Always) then
                     // stays up for the lifetime of the agent and is
                     // auto-terminated when the agent exits.
-                    init_containers: Some(vec![init_container, sidecar_container]),
+                    init_containers: Some(
+                        maybe_init_container
+                            .into_iter()
+                            .chain(std::iter::once(sidecar_container))
+                            .collect(),
+                    ),
                     containers: vec![agent_container],
                     volumes: Some(volumes),
                     image_pull_secrets,
@@ -700,6 +713,7 @@ mod tests {
             image_pull_secret: None,
             git_repo_url: "git@github.com:test-org/test-repo.git".to_string(),
             ssh_known_hosts_configmap: "nautiloop-ssh-known-hosts".to_string(),
+            skip_iptables: false,
         }
     }
 

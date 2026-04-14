@@ -1,0 +1,43 @@
+# nautiloop-config is created/updated by setup.sh with the correct database URL,
+# git_repo_url, and image references. This placeholder ensures the ConfigMap
+# exists so the control plane manifests can reference it before setup.sh runs.
+# setup.sh will overwrite this with the real values.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nautiloop-config
+  namespace: nautiloop-system
+data:
+  nemo.toml: |
+    [cluster]
+    git_repo_url = ""
+    agent_image = "k3d-nautiloop-registry:5001/nautiloop-agent-base:dev"
+    sidecar_image = "k3d-nautiloop-registry:5001/nautiloop-sidecar:dev"
+    skip_iptables = true
+---
+# SSH known_hosts ConfigMaps — populated by setup.sh via ssh-keyscan.
+# These placeholder entries exist so the control plane can start without waiting
+# for setup.sh to complete the keyscan. They are overwritten by setup.sh.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nautiloop-ssh-known-hosts
+  namespace: nautiloop-system
+data:
+  known_hosts: |
+    # Populated by dev/setup.sh via ssh-keyscan
+    github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+    github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+    github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SLeEgdzV3tMF/GRpVLvkfv96yRMXgGKfat2M8ZEBcO/k0MCO42kABSQz7S6crVmXJMriMilFMr2bN5LjOP/2cSBHvU9n/uR5oFGO2Bt7j9sEusFnbNDEwDNbqfkXxFWcvbXpoxC5exWJMKtdoJC+gVK7YNv3qGpMv7TWPJ8m0Aq/wGH3MTVF5J/Cq1EE=
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nautiloop-ssh-known-hosts
+  namespace: nautiloop-jobs
+data:
+  known_hosts: |
+    # Populated by dev/setup.sh via ssh-keyscan
+    github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+    github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+    github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SLeEgdzV3tMF/GRpVLvkfv96yRMXgGKfat2M8ZEBcO/k0MCO42kABSQz7S6crVmXJMriMilFMr2bN5LjOP/2cSBHvU9n/uR5oFGO2Bt7j9sEusFnbNDEwDNbqfkXxFWcvbXpoxC5exWJMKtdoJC+gVK7YNv3qGpMv7TWPJ8m0Aq/wGH3MTVF5J/Cq1EE=
