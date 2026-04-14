@@ -18,6 +18,13 @@ spec:
       serviceAccountName: nautiloop-api-server
       securityContext:
         fsGroup: 1000
+      initContainers:
+        - name: fix-bare-repo-perms
+          image: busybox:latest
+          command: ["sh", "-c", "chown -R 1000:1000 /bare-repo"]
+          volumeMounts:
+            - name: bare-repo
+              mountPath: /bare-repo
       containers:
         - name: api-server
           image: nautiloop-control-plane:dev
@@ -47,6 +54,12 @@ spec:
               value: "ssh -i /etc/git-ssh/id_ed25519 -o UserKnownHostsFile=/etc/git-ssh-known-hosts/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
             - name: NAUTILOOP_CONFIG_PATH
               value: /etc/nautiloop/nemo.toml
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: /bare-repo
           resources:
             requests:
               cpu: 100m
@@ -119,6 +132,13 @@ spec:
       serviceAccountName: nautiloop-loop-engine
       securityContext:
         fsGroup: 1000
+      initContainers:
+        - name: fix-bare-repo-perms
+          image: busybox:latest
+          command: ["sh", "-c", "chown -R 1000:1000 /bare-repo"]
+          volumeMounts:
+            - name: bare-repo
+              mountPath: /bare-repo
       containers:
         - name: loop-engine
           image: nautiloop-control-plane:dev
@@ -143,6 +163,12 @@ spec:
               value: "ssh -i /etc/git-ssh/id_ed25519 -o UserKnownHostsFile=/etc/git-ssh-known-hosts/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
             - name: NAUTILOOP_CONFIG_PATH
               value: /etc/nautiloop/nemo.toml
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: /bare-repo
           volumeMounts:
             - name: bare-repo
               mountPath: /bare-repo
