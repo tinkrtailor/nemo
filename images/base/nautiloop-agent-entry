@@ -351,8 +351,9 @@ case "$STAGE" in
         # reviewer doesn't silently fall back to a nondeterministic default.
         OPENCODE_MODEL="${MODEL:-gpt-4o-mini}"
         case "$OPENCODE_MODEL" in
-            */*) ;;                              # already has provider prefix
-            *) OPENCODE_MODEL="openai/$OPENCODE_MODEL" ;;
+            */*) ;;                                          # already has provider prefix
+            claude-*) OPENCODE_MODEL="anthropic/$OPENCODE_MODEL" ;;  # Anthropic models
+            *) OPENCODE_MODEL="openai/$OPENCODE_MODEL" ;;            # default: OpenAI
         esac
 
         # opencode v1.3+ removed --prompt-file; the message must be passed as a
