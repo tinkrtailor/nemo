@@ -377,7 +377,7 @@ async fn handle(
     };
 
     // Build the outgoing request.
-    let mut builder = Request::builder().method(method).uri(uri);
+    let mut builder = Request::builder().method(&method).uri(uri);
     // Copy every header through, then overwrite the auth header and
     // Host header so upstream sees the correct values.
     {
@@ -386,6 +386,13 @@ async fn handle(
         };
         for (k, v) in headers.iter() {
             h.append(k.clone(), v.clone());
+        }
+        // When we patch the body (instructions injection), the byte count
+        // changes. Remove the stale Content-Length so hyper recalculates
+        // it from the Full body's exact size_hint instead of forwarding
+        // the caller's (now-incorrect) value.
+        if method == hyper::Method::POST && path.contains("/v1/responses") {
+            h.remove(http::header::CONTENT_LENGTH);
         }
         // FR-18 / SR-5: the inbound Host header reflects the sidecar's
         // loopback bind (e.g. `127.0.0.1:9090`). Forwarding that verbatim
