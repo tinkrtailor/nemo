@@ -226,47 +226,53 @@ run_and_emit_result() {
             '{stage: $stage, data: $data}')
     elif [ "$cli_cmd" = "claude" ]; then
         # Claude stream-json for review/audit with a claude-* model.
-        # The audit/review prompts instruct the model to output ONLY the
-        # verdict JSON as its final message. Extract it from the last
-        # assistant event that has a text content block (skips tool_use
-        # events which also appear as type=="assistant"), pull token_usage
-        # from the final `result` event, and wrap in the ReviewResultData
-        # envelope that the loop engine parses via serde_json::from_value.
         #
-        # The text may be wrapped in markdown fences (```json ... ```)
-        # even though the prompt says not to — strip them defensively.
+        # Claude Code emits the model's final text response in the
+        # `result` event's `result` field (type=="result", subtype=="success"),
+        # not as a separate assistant text-content block. The prompt instructs
+        # the model to output only the verdict JSON, but in practice Claude
+        # often adds a preamble sentence and wraps the JSON in a markdown
+        # code fence (```json ... ```) even when told not to.
+        #
+        # Extraction strategy: find the first `{` and last `}` in the
+        # result string — this reliably isolates the JSON object regardless
+        # of surrounding text or fence wrapping.
         result=$(jq -nc \
             --arg stage "$stage_name" \
             --argjson exit_code "$exit_code" \
             --slurpfile events "$cli_stdout" \
             '
-              def strip_fences:
-                ltrimstr("```json\n") | ltrimstr("```\n") | ltrimstr("```")
-                | if endswith("```") then .[:-3] else . end
-                | ltrimstr("\n") | rtrimstr("\n");
+              def extract_json_from_result:
+                # The result field may contain preamble text + the JSON in a
+                # ```json...``` fence, or just the raw JSON object. Use split
+                # on the fence markers (not character-position arithmetic,
+                # which has jq-version-specific bugs with unicode strings).
+                if contains("```json\n") then
+                    split("```json\n")[1] |
+                    if contains("\n```") then split("\n```")[0] else . end
+                elif (contains("```\n") and contains("\n```")) then
+                    split("```\n")[1] | split("\n```")[0]
+                else
+                    ltrimstr("\n") | ltrimstr(" ")
+                end |
+                ltrimstr("\n") | rtrimstr("\n") |
+                fromjson;
 
               ($events
-                | map(select(
-                    .type == "assistant" and
-                    (.message.content | map(select(.type == "text")) | length > 0)
-                  ))
+                | map(select(.type == "result" and .subtype == "success"))
                 | last
-                | .message.content
-                | map(select(.type == "text"))
-                | last
-                | .text
-                | strip_fences
-                | fromjson
+                | .result
+                | extract_json_from_result
               ) as $verdict
               |
               ($events
-                | map(select(.type == "result"))
+                | map(select(.type == "result" and .subtype == "success"))
                 | last
                 | .usage // {}
               ) as $usage
               |
               ($events
-                | map(select(.type == "result"))
+                | map(select(.type == "result" and .subtype == "success"))
                 | last
                 | .session_id // ""
               ) as $session_id
