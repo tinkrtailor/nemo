@@ -48,6 +48,11 @@ spec:
                 secretKeyRef:
                   name: nautiloop-git-host-token
                   key: GIT_HOST_TOKEN
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nautiloop-git-host-token
+                  key: GIT_HOST_TOKEN
             - name: BARE_REPO_PATH
               value: /bare-repo
             - name: GIT_SSH_COMMAND
@@ -151,6 +156,11 @@ spec:
                   name: nautiloop-postgres-credentials
                   key: DATABASE_URL
             - name: GIT_HOST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nautiloop-git-host-token
+                  key: GIT_HOST_TOKEN
+            - name: GH_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: nautiloop-git-host-token
