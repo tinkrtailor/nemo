@@ -143,7 +143,7 @@ pub mod bare {
             })?;
 
             let add = Command::new("git")
-                .args(["add", path])
+                .args(["add", "-f", path])
                 .current_dir(worktree_dir)
                 .output()
                 .await
