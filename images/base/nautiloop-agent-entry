@@ -392,6 +392,7 @@ case "$STAGE" in
         # K8s job to hit BackoffLimitExceeded. Each implement/revise pod
         # starts a fresh Claude session. Session persistence via PVC is a
         # future enhancement tracked separately.
+        echo "[${STAGE}/r${ROUND}] Starting ${STAGE} (loop ${LOOP_ID}, branch ${BRANCH})"
         STDIN_FILE="$PROMPT_FILE" run_and_emit_result "$STAGE" claude "${CLAUDE_ARGS[@]}"
         ;;
 
@@ -406,6 +407,7 @@ case "$STAGE" in
                 CLAUDE_ARGS+=(--model "$REVIEW_MODEL")
                 # No --resume: same reason as implement/revise — claude sessions
                 # live in the pod's emptyDir and don't survive across pods.
+                echo "[${STAGE}/r${ROUND}] Starting ${STAGE} with claude (loop ${LOOP_ID})"
                 STDIN_FILE="$PROMPT_FILE" run_and_emit_result "$STAGE" claude "${CLAUDE_ARGS[@]}"
                 ;;
             *)

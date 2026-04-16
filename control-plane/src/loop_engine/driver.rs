@@ -506,7 +506,7 @@ impl ConvergentLoopDriver {
         let new_lines: Vec<String> = logs
             .lines()
             .map(str::trim_end)
-            .filter(|line| !line.is_empty() && !line.starts_with("NAUTILOOP_RESULT:"))
+            .filter(|line| !line.is_empty())
             .map(ToOwned::to_owned)
             .collect();
 
@@ -571,6 +571,28 @@ impl ConvergentLoopDriver {
                     Some(v) if v.clean => {
                         // Audit passed
                         if record.harden_only {
+                            // Check if the branch has any commits ahead of the default branch.
+                            // If the spec was already clean on round 1 (no revise ran), the
+                            // branch has no new commits and GitHub will reject PR creation.
+                            let default_branch = self.default_branch_for(record);
+                            let branch_sha = self.git.get_branch_sha(&record.branch).await?;
+                            // Compare against origin/<default_branch> since the bare repo
+                            // uses remote-tracking refs, not local branch refs, for main.
+                            let remote_ref = format!("origin/{default_branch}");
+                            let default_sha = self.git.get_branch_sha(&remote_ref).await?;
+                            let has_commits = branch_sha != default_sha;
+
+                            if !has_commits {
+                                // Spec was already clean — no revisions needed, no PR to create.
+                                record.state = LoopState::Hardened;
+                                record.sub_state = None;
+                                record.active_job_name = None;
+                                record.hardened_spec_path = Some(record.spec_path.clone());
+                                self.store.update_loop(record).await?;
+                                tracing::info!(loop_id = %record.id, "Harden loop HARDENED (spec already clean, no PR needed)");
+                                return Ok(LoopState::Hardened);
+                            }
+
                             // Clean up .agent/ artifacts before PR creation
                             if let Err(e) = self.git.remove_path(&record.branch, ".agent").await {
                                 tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
@@ -591,7 +613,7 @@ impl ConvergentLoopDriver {
                                     &record.branch,
                                     &pr_title,
                                     &pr_body,
-                                    &self.default_branch_for(record),
+                                    &default_branch,
                                 )
                                 .await?;
                             record.spec_pr_url = Some(pr_url);
@@ -602,7 +624,7 @@ impl ConvergentLoopDriver {
                                     .merge_pr(
                                         &record.branch,
                                         &self.config.harden.merge_strategy,
-                                        &self.default_branch_for(record),
+                                        &default_branch,
                                     )
                                     .await?;
                                 record.merge_sha = Some(merge_sha);
