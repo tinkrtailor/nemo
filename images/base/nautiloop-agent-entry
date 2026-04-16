@@ -341,6 +341,15 @@ run_and_emit_result() {
     echo "NAUTILOOP_RESULT:$result"
 }
 
+# --- Copy Claude credentials to writable ~/.claude/ ---
+# Credentials are mounted read-only at /secrets/claude-creds/.credentials.json.
+# Claude Code (v2.x+) needs to write session-env/ and other runtime directories
+# under ~/.claude/, so we copy the credentials file into the writable home EmptyDir.
+if [ -f "/secrets/claude-creds/.credentials.json" ]; then
+    mkdir -p "${HOME}/.claude"
+    cp /secrets/claude-creds/.credentials.json "${HOME}/.claude/.credentials.json"
+fi
+
 # --- FR-4: Stage dispatch ---
 case "$STAGE" in
     implement|revise)

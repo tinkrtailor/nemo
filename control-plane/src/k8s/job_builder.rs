@@ -534,11 +534,14 @@ fn build_agent_mounts(
         },
     ];
 
-    // FR-25b: Mount Claude session directory for IMPLEMENT/REVISE/REVIEW/AUDIT stages
+    // FR-25b: Mount Claude credentials for IMPLEMENT/REVISE/REVIEW/AUDIT stages.
+    // Mounted at /secrets/claude-creds/ (read-only), NOT at ~/.claude directly.
+    // The entrypoint copies .credentials.json to the writable ~/.claude/ so that
+    // Claude Code can create session-env/ and other runtime directories there.
     if is_implement_or_revise || is_review_or_audit {
         mounts.push(VolumeMount {
             name: "claude-session".to_string(),
-            mount_path: "/home/agent/.claude".to_string(),
+            mount_path: "/secrets/claude-creds".to_string(),
             read_only: Some(true),
             ..Default::default()
         });
@@ -1043,7 +1046,7 @@ mod tests {
 
     #[test]
     fn test_build_job_implement_has_claude_session() {
-        // FR-25b: Claude session mounted for implement stage
+        // FR-25b: Claude credentials mounted at /secrets/claude-creds for implement stage
         let ctx = test_ctx();
         let stage = test_stage(); // implement
         let cfg = test_cfg();
@@ -1052,23 +1055,22 @@ mod tests {
         let mounts = agent.volume_mounts.as_ref().unwrap();
         let claude_mount = mounts
             .iter()
-            .find(|m| m.mount_path == "/home/agent/.claude");
+            .find(|m| m.mount_path == "/secrets/claude-creds");
         assert!(
             claude_mount.is_some(),
-            "Claude session should be mounted for implement"
+            "Claude credentials should be mounted at /secrets/claude-creds for implement"
         );
         assert_eq!(claude_mount.unwrap().read_only, Some(true));
-        // No /secrets or model-credentials in agent
+        // ~/.claude is NOT mounted directly (entrypoint copies from /secrets/claude-creds)
         assert!(
-            !mounts
-                .iter()
-                .any(|m| m.mount_path.contains("/secrets") || m.mount_path.contains("credential"))
+            !mounts.iter().any(|m| m.mount_path == "/home/agent/.claude"),
+            "~/.claude should not be directly mounted; credentials are copied by entrypoint"
         );
     }
 
     #[test]
     fn test_build_job_review_has_claude_session() {
-        // Claude session IS mounted for review stage (review may use claude CLI)
+        // Claude credentials are mounted at /secrets/claude-creds for review stage
         let ctx = test_ctx();
         let stage = StageConfig {
             name: "review".to_string(),
@@ -1079,7 +1081,7 @@ mod tests {
         let job = build_job(&ctx, &stage, &cfg);
         let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let mounts = agent.volume_mounts.as_ref().unwrap();
-        assert!(mounts.iter().any(|m| m.mount_path == "/home/agent/.claude"));
+        assert!(mounts.iter().any(|m| m.mount_path == "/secrets/claude-creds"));
     }
 
     #[test]
@@ -1119,13 +1121,14 @@ mod tests {
                 .any(|m| m.mount_path == "/secrets/ssh-key")
         );
 
-        // Agent does NOT have /secrets/ mounts (FR-26)
+        // Agent does NOT have model-credentials or ssh-key mounts (FR-26).
+        // /secrets/claude-creds is allowed (read-only Claude credentials for the agent).
         let pod_spec = job.spec.unwrap().template.spec.unwrap();
         let agent_mounts = pod_spec.containers[0].volume_mounts.as_ref().unwrap();
         assert!(
             !agent_mounts
                 .iter()
-                .any(|m| m.mount_path.starts_with("/secrets"))
+                .any(|m| m.mount_path == "/secrets/model-credentials" || m.mount_path == "/secrets/ssh-key")
         );
     }
 
