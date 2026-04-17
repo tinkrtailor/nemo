@@ -201,7 +201,7 @@ fn default_max_judge_calls() -> u32 {
 }
 
 fn default_judge_min_round() -> i32 {
-    3
+    2
 }
 
 fn default_true() -> bool {

@@ -69,6 +69,25 @@ pub async fn run(client: &NemoClient, path: &str) -> Result<()> {
         println!();
     }
 
+    // Show any judge decisions not rendered inline (edge case: round number mismatch)
+    let rendered_rounds: std::collections::HashSet<i32> = resp
+        .rounds
+        .iter()
+        .filter(|r| r.judge_decision.is_some())
+        .map(|r| r.round)
+        .collect();
+    let orphaned_count = resp
+        .judge_decisions
+        .iter()
+        .filter(|jd| !rendered_rounds.contains(&jd.round))
+        .count();
+    if orphaned_count > 0 {
+        println!(
+            "{orphaned_count} additional judge decision(s) not shown inline (use --json for details)"
+        );
+        println!();
+    }
+
     Ok(())
 }
 

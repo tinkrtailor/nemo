@@ -266,10 +266,10 @@ impl OrchestratorJudge {
         };
 
         // FR-4b total-size guard: verify serialized input stays within ~8K token budget.
-        // Approximate 1 token ≈ 4 chars; 8K tokens ≈ 32K chars. We use 28K as the threshold
-        // to leave headroom for the system prompt (~2K chars). If exceeded, progressively
-        // reduce round history and spec content until it fits.
-        const MAX_INPUT_CHARS: usize = 28_000;
+        // Approximate 1 token ≈ 4 chars; 8K tokens ≈ 32K chars. We use 24K as the threshold
+        // to leave headroom for the system prompt (~2K chars sent separately). If exceeded,
+        // progressively reduce round history and spec content until it fits.
+        const MAX_INPUT_CHARS: usize = 24_000;
         let input = {
             let serialized = serde_json::to_string(&input).unwrap_or_default();
             if serialized.len() > MAX_INPUT_CHARS {
@@ -439,26 +439,34 @@ impl OrchestratorJudge {
             // Per FR-1b, verdict.clean == false is a trigger, but early rounds with
             // non-recurring findings are near-certain "continue" cases. Operators can
             // set judge_min_round = 1 to allow the judge on every round, or increase it
-            // to further preserve budget. Default is 3.
+            // to further preserve budget. Default is 2, which means round 2+ verdicts
+            // are eligible for the judge.
             //
-            // Exception: low/medium-only findings at round 2+ still trigger the judge
-            // for triviality override (Problem 1), since those are the ambiguous cases.
+            // Exception: low/medium-only findings still trigger the judge for triviality
+            // override (Problem 1), since those are the ambiguous cases.
             //
-            // Known deviation: rounds below judge_min_round with ANY high/critical
-            // finding skip the judge entirely, which means the judge cannot
-            // override-accept a borderline high-severity classification at round 2.
-            // Operators can set judge_min_round = 1 to override this behavior.
-            // A future refinement could allow the judge when high-severity count <= 1
-            // and all other findings are low/medium.
-            if !current_issues.is_empty()
-                && current_issues.iter().all(|i| {
-                    i.severity == crate::types::verdict::Severity::Low
-                        || i.severity == crate::types::verdict::Severity::Medium
-                })
-            {
-                Some(JudgeTrigger::NotClean)
-            } else {
+            // Note: rounds below judge_min_round with high/critical findings also
+            // trigger the judge if the high-severity count is <= 1 and all other
+            // findings are low/medium, enabling the judge to override borderline
+            // severity classifications.
+            if current_issues.is_empty() {
                 None
+            } else {
+                let high_critical_count = current_issues
+                    .iter()
+                    .filter(|i| {
+                        i.severity == crate::types::verdict::Severity::High
+                            || i.severity == crate::types::verdict::Severity::Critical
+                    })
+                    .count();
+                // Allow the judge for triviality override when:
+                // - All findings are low/medium, OR
+                // - At most 1 high/critical finding (borderline classification)
+                if high_critical_count <= 1 {
+                    Some(JudgeTrigger::NotClean)
+                } else {
+                    None
+                }
             }
         } else {
             // The caller already checked verdict.clean == false
@@ -1345,7 +1353,9 @@ That's my decision."#;
     }
 
     #[tokio::test]
-    async fn test_evaluate_round2_high_severity_skips_judge() {
+    async fn test_evaluate_round2_high_severity_triggers_judge_default() {
+        // With default judge_min_round=2, round 2 is >= min_round so the judge
+        // always triggers regardless of severity.
         let config = OrchestratorConfig::default();
         let store = Arc::new(crate::state::memory::MemoryStateStore::new());
         let client = Arc::new(MockJudgeClient {
@@ -1363,7 +1373,7 @@ That's my decision."#;
             suggestion: "Fix".to_string(),
         }];
 
-        // Round 2 with high-severity findings and no recurring -> should skip judge
+        // Round 2 with high-severity findings, default judge_min_round=2 -> triggers judge
         let result = judge
             .evaluate(
                 Uuid::new_v4(),
@@ -1378,7 +1388,111 @@ That's my decision."#;
             )
             .await;
 
-        assert!(result.is_none(), "Round 2 with high-severity findings should skip judge");
+        assert!(result.is_some(), "Round 2 with default judge_min_round=2 should trigger judge");
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_below_min_round_high_severity_skips_judge() {
+        // With judge_min_round=3, round 2 is below min_round. Multiple high-severity
+        // findings (>1) should skip the judge.
+        let config = OrchestratorConfig {
+            judge_min_round: 3,
+            ..Default::default()
+        };
+        let store = Arc::new(crate::state::memory::MemoryStateStore::new());
+        let client = Arc::new(MockJudgeClient {
+            response: r#"{"decision": "continue", "confidence": 0.8, "reasoning": "test"}"#
+                .to_string(),
+        });
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
+
+        let issues = vec![
+            Issue {
+                severity: Severity::High,
+                category: None,
+                file: None,
+                line: None,
+                description: "Serious bug 1".to_string(),
+                suggestion: "Fix".to_string(),
+            },
+            Issue {
+                severity: Severity::High,
+                category: None,
+                file: None,
+                line: None,
+                description: "Serious bug 2".to_string(),
+                suggestion: "Fix".to_string(),
+            },
+        ];
+
+        // Round 2 with 2 high-severity findings, judge_min_round=3 -> should skip judge
+        let result = judge
+            .evaluate(
+                Uuid::new_v4(),
+                "specs/test.md",
+                "test spec",
+                "review",
+                2,
+                15,
+                &serde_json::json!({"clean": false}),
+                &issues,
+                &[],
+            )
+            .await;
+
+        assert!(result.is_none(), "Below min_round with multiple high-severity findings should skip judge");
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_below_min_round_single_high_triggers_judge() {
+        // With judge_min_round=3, round 2 with a single high-severity finding
+        // should still trigger the judge (borderline classification).
+        let config = OrchestratorConfig {
+            judge_min_round: 3,
+            ..Default::default()
+        };
+        let store = Arc::new(crate::state::memory::MemoryStateStore::new());
+        let client = Arc::new(MockJudgeClient {
+            response: r#"{"decision": "continue", "confidence": 0.8, "reasoning": "Borderline high"}"#
+                .to_string(),
+        });
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
+
+        let issues = vec![
+            Issue {
+                severity: Severity::High,
+                category: None,
+                file: None,
+                line: None,
+                description: "Borderline bug".to_string(),
+                suggestion: "Fix".to_string(),
+            },
+            Issue {
+                severity: Severity::Low,
+                category: None,
+                file: None,
+                line: None,
+                description: "Nit".to_string(),
+                suggestion: "Maybe".to_string(),
+            },
+        ];
+
+        // Round 2 with 1 high + 1 low, judge_min_round=3 -> triggers judge (high count <= 1)
+        let result = judge
+            .evaluate(
+                Uuid::new_v4(),
+                "specs/test.md",
+                "test spec",
+                "review",
+                2,
+                15,
+                &serde_json::json!({"clean": false}),
+                &issues,
+                &[],
+            )
+            .await;
+
+        assert!(result.is_some(), "Below min_round with single high-severity finding should trigger judge");
     }
 
     #[tokio::test]
@@ -1433,7 +1547,9 @@ That's my decision."#;
     }
 
     #[tokio::test]
-    async fn test_evaluate_round2_mixed_high_medium_skips_judge() {
+    async fn test_evaluate_round2_mixed_high_medium_triggers_judge_default() {
+        // With default judge_min_round=2, round 2 is >= min_round so the judge
+        // triggers regardless of severity distribution.
         let config = OrchestratorConfig::default();
         let store = Arc::new(crate::state::memory::MemoryStateStore::new());
         let client = Arc::new(MockJudgeClient {
@@ -1461,7 +1577,70 @@ That's my decision."#;
             },
         ];
 
-        // Round 2 with mixed high+medium findings and no recurring -> should skip judge
+        // Round 2 with mixed high+medium findings, default judge_min_round=2 -> triggers judge
+        let result = judge
+            .evaluate(
+                Uuid::new_v4(),
+                "specs/test.md",
+                "test spec",
+                "review",
+                2,
+                15,
+                &serde_json::json!({"clean": false}),
+                &issues,
+                &[],
+            )
+            .await;
+
+        assert!(
+            result.is_some(),
+            "Round 2 with default judge_min_round=2 should trigger judge"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_below_min_round_mixed_high_medium_skips_judge() {
+        // With judge_min_round=3, round 2 with multiple high-severity findings
+        // (>1 high/critical) should skip the judge.
+        let config = OrchestratorConfig {
+            judge_min_round: 3,
+            ..Default::default()
+        };
+        let store = Arc::new(crate::state::memory::MemoryStateStore::new());
+        let client = Arc::new(MockJudgeClient {
+            response: r#"{"decision": "continue", "confidence": 0.8, "reasoning": "test"}"#
+                .to_string(),
+        });
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
+
+        let issues = vec![
+            Issue {
+                severity: Severity::Medium,
+                category: None,
+                file: Some("src/lib.rs".to_string()),
+                line: Some(10),
+                description: "Style nit".to_string(),
+                suggestion: "Fix".to_string(),
+            },
+            Issue {
+                severity: Severity::High,
+                category: None,
+                file: None,
+                line: None,
+                description: "Serious bug 1".to_string(),
+                suggestion: "Fix".to_string(),
+            },
+            Issue {
+                severity: Severity::High,
+                category: None,
+                file: None,
+                line: None,
+                description: "Serious bug 2".to_string(),
+                suggestion: "Fix".to_string(),
+            },
+        ];
+
+        // Round 2 with 2 high + 1 medium, judge_min_round=3 -> should skip judge
         let result = judge
             .evaluate(
                 Uuid::new_v4(),
@@ -1478,7 +1657,7 @@ That's my decision."#;
 
         assert!(
             result.is_none(),
-            "Round 2 with high-severity findings mixed in should skip judge"
+            "Below min_round with multiple high-severity findings should skip judge"
         );
     }
 }

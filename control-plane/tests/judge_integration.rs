@@ -1133,3 +1133,68 @@ async fn test_harden_revise_no_judge_at_max_rounds_fails() {
     let decisions = store.get_judge_decisions(record.id).await.unwrap();
     assert_eq!(decisions.len(), 0);
 }
+
+/// FR-5b: Cancelling a loop with prior judge decisions correctly backfills
+/// loop_final_state='CANCELLED' and loop_terminated_at on all judge_decisions rows.
+#[tokio::test]
+async fn test_cancel_backfills_judge_decisions() {
+    let store = Arc::new(MemoryStateStore::new());
+    let dispatcher = Arc::new(MockJobDispatcher::new());
+    let git = Arc::new(MockGitOperations::new());
+    install_fresh_creds(&dispatcher).await;
+
+    let review_verdict = serde_json::json!({
+        "clean": false,
+        "issues": [{
+            "severity": "medium",
+            "category": "style",
+            "file": "src/lib.rs",
+            "line": 10,
+            "description": "Nit",
+            "suggestion": "Fix"
+        }],
+        "summary": "Minor issues",
+        "token_usage": {"input": 100, "output": 50}
+    });
+
+    // Set up a reviewing loop at round 3 so the judge is triggered
+    let record =
+        setup_reviewing_loop(&store, &dispatcher, &git, 3, review_verdict).await;
+
+    // Have the judge return "continue"
+    let judge_response = r#"{"decision": "continue", "confidence": 0.7, "reasoning": "Keep iterating"}"#;
+    let driver = build_driver(store.clone(), dispatcher.clone(), git.clone(), judge_response);
+
+    // Tick to trigger the judge and process the review
+    let new_state = driver.tick(record.id).await.unwrap();
+    // Should dispatch next implement round (Implementing state)
+    assert_eq!(new_state, LoopState::Implementing);
+
+    // Verify judge decision was created
+    let decisions = store.get_judge_decisions(record.id).await.unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert!(decisions[0].loop_final_state.is_none());
+    assert!(decisions[0].loop_terminated_at.is_none());
+
+    // Now cancel the loop
+    store
+        .set_loop_flag(record.id, nautiloop_control_plane::state::LoopFlag::Cancel, true)
+        .await
+        .unwrap();
+
+    let cancel_state = driver.tick(record.id).await.unwrap();
+    assert_eq!(cancel_state, LoopState::Cancelled);
+
+    // Verify backfill: all judge_decisions rows should have CANCELLED state
+    let decisions = store.get_judge_decisions(record.id).await.unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(
+        decisions[0].loop_final_state.as_deref(),
+        Some("CANCELLED"),
+        "Judge decision should be backfilled with CANCELLED state"
+    );
+    assert!(
+        decisions[0].loop_terminated_at.is_some(),
+        "Judge decision should have loop_terminated_at set"
+    );
+}
