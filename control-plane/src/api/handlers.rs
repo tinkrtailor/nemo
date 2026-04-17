@@ -8,8 +8,9 @@ use super::AppState;
 use crate::error::NautiloopError;
 use crate::state::LoopFlag;
 use crate::types::api::{
-    ApproveResponse, CancelResponse, CredentialRequest, InspectResponse, LogsQuery, LoopSummary,
-    ResumeResponse, RoundSummary, StartRequest, StartResponse, StatusQuery, StatusResponse,
+    ApproveResponse, CancelResponse, CredentialRequest, ExtendRequest, ExtendResponse,
+    InspectResponse, LogsQuery, LoopSummary, ResumeResponse, RoundSummary, StartRequest,
+    StartResponse, StatusQuery, StatusResponse,
 };
 use crate::types::{LoopKind, LoopRecord, LoopState, generate_branch_name};
 
@@ -626,6 +627,85 @@ pub async fn resume(
         loop_id: id,
         state: record.state,
         resume_requested: true,
+    }))
+}
+
+/// POST /extend/:id - Extend a FAILED loop's max_rounds and resume it.
+///
+/// Only permitted on loops in FAILED state with a `failed_from_state` set
+/// (transient or max-rounds failures — logical failures with no prior stage
+/// are rejected the same way resume rejects them).
+///
+/// Bumps `max_rounds` by `add_rounds`, clears `failure_reason`, and flags
+/// the resume so the reconciler picks up where the loop left off.
+pub async fn extend(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ExtendRequest>,
+) -> Result<Json<ExtendResponse>, NautiloopError> {
+    if req.add_rounds == 0 {
+        return Err(NautiloopError::BadRequest(
+            "add_rounds must be > 0".to_string(),
+        ));
+    }
+
+    let record = state
+        .store
+        .get_loop(id)
+        .await?
+        .ok_or(NautiloopError::LoopNotFound { id })?;
+
+    if record.state != LoopState::Failed {
+        return Err(NautiloopError::InvalidStateTransition {
+            action: "extend".to_string(),
+            state: record.state.to_string(),
+            expected: "FAILED".to_string(),
+        });
+    }
+
+    let Some(resume_state) = record.failed_from_state else {
+        return Err(NautiloopError::InvalidStateTransition {
+            action: "extend".to_string(),
+            state: record.state.to_string(),
+            expected:
+                "FAILED loop with a preserved failed_from_state (older failures without this metadata are not extendable — start a fresh loop)"
+                    .to_string(),
+        });
+    };
+
+    // Same safety check as resume: if another loop has taken over this branch,
+    // refuse. The worktree contents no longer correspond to this row.
+    if let Some(other) = state.store.get_loop_by_branch_any(&record.branch).await?
+        && other.id != record.id
+        && other.updated_at > record.updated_at
+    {
+        return Err(NautiloopError::InvalidStateTransition {
+            action: "extend".to_string(),
+            state: record.state.to_string(),
+            expected: format!(
+                "branch {} was taken over by a newer loop {} (state {}) — start a fresh loop instead",
+                record.branch, other.id, other.state
+            ),
+        });
+    }
+
+    let prior_max = record.max_rounds as u32;
+    let new_max = prior_max + req.add_rounds;
+
+    let mut updated = record.clone();
+    updated.max_rounds = new_max as i32;
+    updated.failure_reason = None;
+    state.store.update_loop(&updated).await?;
+    state
+        .store
+        .set_loop_flag(id, LoopFlag::Resume, true)
+        .await?;
+
+    Ok(Json(ExtendResponse {
+        loop_id: id,
+        prior_max_rounds: prior_max,
+        new_max_rounds: new_max,
+        resumed_to_state: resume_state,
     }))
 }
 

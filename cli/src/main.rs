@@ -151,6 +151,15 @@ enum Commands {
         loop_id: String,
     },
 
+    /// Extend a FAILED loop's max_rounds and resume it from the last stage
+    Extend {
+        /// Loop ID
+        loop_id: String,
+        /// Number of rounds to add to max_rounds
+        #[arg(long, default_value_t = 5)]
+        add: u32,
+    },
+
     /// Scan monorepo, generate nemo.toml
     Init {
         /// Overwrite existing nemo.toml
@@ -400,6 +409,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Resume { loop_id } => {
             commands::resume::run(&http_client, &loop_id).await?;
+        }
+        Commands::Extend { loop_id, add } => {
+            commands::extend::run(&http_client, &loop_id, add).await?;
         }
         Commands::Init { .. } => {
             // Handled above before config loading

@@ -710,6 +710,8 @@ impl ConvergentLoopDriver {
                         record.max_rounds
                     ));
                     record.active_job_name = None;
+                    // Preserve the pre-failure state so `nemo extend` can resume here.
+                    record.failed_from_state = Some(LoopState::Hardening);
                     self.store.update_loop(record).await?;
                     return Ok(LoopState::Failed);
                 }
@@ -831,6 +833,8 @@ impl ConvergentLoopDriver {
                         record.max_rounds
                     ));
                     record.active_job_name = None;
+                    // Preserve the pre-failure state so `nemo extend` can resume here.
+                    record.failed_from_state = Some(LoopState::Implementing);
                     self.store.update_loop(record).await?;
                     return Ok(LoopState::Failed);
                 }
@@ -1078,6 +1082,8 @@ impl ConvergentLoopDriver {
                         record.max_rounds
                     ));
                     record.active_job_name = None;
+                    // Preserve the pre-failure state so `nemo extend` can resume here.
+                    record.failed_from_state = Some(LoopState::Implementing);
                     self.store.update_loop(record).await?;
                     return Ok(LoopState::Failed);
                 }

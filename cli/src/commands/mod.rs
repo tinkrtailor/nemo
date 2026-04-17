@@ -2,6 +2,7 @@ pub mod approve;
 pub mod auth;
 pub mod cancel;
 pub mod config;
+pub mod extend;
 pub mod helm;
 pub mod init;
 pub mod inspect;

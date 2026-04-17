@@ -60,6 +60,7 @@ fn build_routes(_state: AppState) -> Router<AppState> {
         .route("/cancel/{id}", delete(handlers::cancel))
         .route("/approve/{id}", post(handlers::approve))
         .route("/resume/{id}", post(handlers::resume))
+        .route("/extend/{id}", post(handlers::extend))
         .route("/inspect", get(handlers::inspect))
         .route("/credentials", get(handlers::list_credentials))
         .route("/credentials", post(handlers::upsert_credentials))
