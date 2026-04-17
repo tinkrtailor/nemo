@@ -441,7 +441,9 @@ async fn run_app(
                             let _ = introspect_tx.send(app.selected_loop_id);
                         }
                         SidePanel::Inspect => {
-                            // Ensure inspect data is fetched when toggling to panel
+                            // Reset inspect status to handle the no-branch case
+                            // (shows "No branch available" instead of perpetual "Loading...")
+                            app.reset_inspect();
                             let _ = inspect_tx.send(app.selected_branch());
                             let _ = introspect_tx.send(None);
                         }

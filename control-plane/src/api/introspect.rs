@@ -159,10 +159,22 @@ pub async fn pod_introspect(
     let mut warnings: Vec<String> = Vec::new();
     let (processes, worktree) = match exec_result {
         Ok(output) => parse_introspect_output(&output),
-        Err(ExecError::Timeout(msg)) => {
+        Err(ExecError::Timeout {
+            msg,
+            partial_output,
+        }) => {
             tracing::warn!(pod = %pod_name, error = %msg, "introspect exec timed out, returning partial snapshot");
             warnings.push(format!("exec timed out ({msg}), showing partial data"));
-            (Vec::new(), default_worktree())
+            // Parse whatever was read before the timeout fired. The NDJSON
+            // design emits processes first, so partial output typically
+            // contains the processes line even when worktree collection
+            // was slow and got cancelled.
+            match partial_output {
+                Some(ref partial) if !partial.trim().is_empty() => {
+                    parse_introspect_output(partial)
+                }
+                _ => (Vec::new(), default_worktree()),
+            }
         }
         Err(ExecError::Other(e)) => {
             tracing::warn!(pod = %pod_name, error = %e, "introspect exec failed, returning partial");
@@ -206,16 +218,22 @@ pub async fn pod_introspect(
 }
 
 /// Error type for exec operations, distinguishing timeouts from other failures.
+/// `Timeout` carries an optional partial output string so that already-read data
+/// (e.g. the processes NDJSON line) survives a read-timeout cancellation instead
+/// of being dropped with the cancelled async block.
 #[derive(Debug)]
 enum ExecError {
-    Timeout(String),
+    Timeout {
+        msg: String,
+        partial_output: Option<String>,
+    },
     Other(String),
 }
 
 impl std::fmt::Display for ExecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExecError::Timeout(msg) => write!(f, "{msg}"),
+            ExecError::Timeout { msg, .. } => write!(f, "{msg}"),
             ExecError::Other(msg) => write!(f, "{msg}"),
         }
     }
@@ -269,13 +287,17 @@ async fn exec_introspect_script(
 
     match result {
         Ok(Ok(mut attached)) => {
-            // 1s read timeout: script emits NDJSON incrementally (processes first,
-            // worktree second). This timeout may capture only the first line if
-            // worktree collection is slow — the parser handles partial NDJSON.
+            // Use a shared buffer so partial stdout survives timeout cancellation.
+            // The NDJSON design emits processes first (fast) then worktree (slow).
+            // When the 1s read timeout fires mid-worktree, the processes line is
+            // already in the shared buffer and can be returned to the caller for
+            // parsing, instead of being dropped with the cancelled async block.
+            let shared_output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let shared_output_writer = shared_output.clone();
+
             let read_result = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 async {
-                    let mut output = String::new();
                     let mut stderr_output = String::new();
                     // Take streams before async blocks to avoid double-borrow of `attached`
                     let mut maybe_stdout = attached.stdout();
@@ -287,7 +309,10 @@ async fn exec_introspect_script(
                             loop {
                                 match stdout.read(&mut buf).await {
                                     Ok(0) => break,
-                                    Ok(n) => output.push_str(&String::from_utf8_lossy(&buf[..n])),
+                                    Ok(n) => {
+                                        let chunk = String::from_utf8_lossy(&buf[..n]);
+                                        shared_output_writer.lock().unwrap().push_str(&chunk);
+                                    }
                                     Err(_) => break,
                                 }
                             }
@@ -309,17 +334,34 @@ async fn exec_introspect_script(
                     if !stderr_output.is_empty() {
                         tracing::debug!(stderr = %stderr_output, "introspect exec stderr");
                     }
-                    output
                 },
             )
             .await;
             match read_result {
-                Ok(output) => Ok(output),
-                Err(_) => Err(ExecError::Timeout("exec read timed out after 1s".to_string())),
+                Ok(()) => {
+                    let output = shared_output.lock().unwrap().clone();
+                    Ok(output)
+                }
+                Err(_) => {
+                    // Timeout fired — extract whatever was read before cancellation.
+                    let partial = shared_output.lock().unwrap().clone();
+                    let partial_output = if partial.is_empty() {
+                        None
+                    } else {
+                        Some(partial)
+                    };
+                    Err(ExecError::Timeout {
+                        msg: "exec read timed out after 1s".to_string(),
+                        partial_output,
+                    })
+                }
             }
         }
         Ok(Err(e)) => Err(ExecError::Other(format!("exec failed: {e}"))),
-        Err(_) => Err(ExecError::Timeout("exec handshake timed out after 1.5s".to_string())),
+        Err(_) => Err(ExecError::Timeout {
+            msg: "exec handshake timed out after 1.5s".to_string(),
+            partial_output: None,
+        }),
     }
 }
 
@@ -455,8 +497,10 @@ pub fn parse_introspect_output(output: &str) -> (Vec<ProcessInfo>, WorktreeInfo)
     }
 
     // Collect all parsed JSON values. Try the whole output as a single object
-    // first (legacy format / exec fallback), then fall back to line-by-line
-    // NDJSON parsing.
+    // first — this handles both the legacy single-object format AND the case
+    // where only one complete NDJSON line was emitted (e.g. processes only,
+    // because the script was killed mid-worktree by `timeout 2`). Fall back
+    // to line-by-line NDJSON parsing for multi-line output.
     let values: Vec<serde_json::Value> =
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
             vec![v]
