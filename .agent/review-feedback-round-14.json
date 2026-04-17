@@ -1,0 +1,61 @@
+{
+  "round": 14,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/state/mod.rs",
+      "line": 476,
+      "description": "MemoryStateStore.backfill_judge_outcomes overwrites ALL judge_decisions rows unconditionally, while PgStateStore only updates rows WHERE loop_final_state IS NULL. This means tests using MemoryStateStore don't faithfully simulate the production behavior for resumed loops (FAILED -> resume -> CONVERGED). In tests, ALL prior decisions get overwritten with the new terminal state, while in production, only unbackfilled ones are updated.",
+      "suggestion": "Add `&& d.loop_final_state.is_none()` to the filter in MemoryStateStore.backfill_judge_outcomes to match the Postgres WHERE clause."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 461,
+      "description": "FR-1b spec deviation: round <= 1 unconditionally skips the judge (returns None) even for verdict.clean==false. The spec says verdict.clean==false is sufficient to trigger the judge. The round <= 1 check (line 450) takes priority over the configurable judge_min_round, meaning judge_min_round=1 still skips round 1. The OrchestratorConfig doc comment says 'Setting judge_min_round = 1 enables the judge from round 2 onward but cannot override the round-1 skip' which is documented, but contradicts what an operator would expect when setting judge_min_round=1.",
+      "suggestion": "This is an acknowledged deviation with a reasonable tradeoff. Add a note in the nemo.toml example config clarifying that round 1 is always skipped regardless of judge_min_round."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/tests/judge_integration.rs",
+      "description": "No integration test covers the cancel path's judge decision backfill for the case where the cancel transition itself is what triggers backfill. The test test_cancel_backfills_judge_decisions exists and covers this correctly - the test creates a judge decision, then cancels. However, there is no test for the harden path ErrorJudgeClient at max_rounds case, which is the harden-path equivalent of test_review_judge_error_at_max_rounds_falls_back_to_fail. The test test_harden_judge_error_at_max_rounds_falls_back_to_fail exists, so this is covered. The remaining gap is: no test exercises the revise-evaluation path with ErrorJudgeClient (judge errors during the revise-evaluation code path at max_rounds, not the audit-evaluation path).",
+      "suggestion": "Add an integration test that sets up a hardening loop at max_rounds with a completed revise stage, wires ErrorJudgeClient, and verifies fallback to heuristic FAILED."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 1049,
+      "description": "FR-1c says the judge is NOT invoked on 'clean==true AND round==1'. The code skips the judge for ALL clean verdicts at every round by routing directly through review_converge_clean. While the behavior is reasonable (clean verdicts are unambiguous), this is a literal deviation from FR-1c's specific round-1 exemption. FR-1c's wording implies round 2+ clean verdicts after prior non-clean verdicts should potentially pass through the judge. The code has a comment documenting this as intentional.",
+      "suggestion": "No code change needed — the behavior is sound and well-documented. Track as a spec clarification item: recommend updating FR-1c to say 'NOT invoked on clean verdicts at any round' to match the implementation."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/inspect.rs",
+      "line": 82,
+      "description": "The orphaned judge decisions message says 'use API /inspect endpoint for full details' but doesn't specify the actual API path or how to access it. More helpfully, it could suggest a --json flag, but no such flag exists on the inspect command.",
+      "suggestion": "Change the message to reference a concrete access method, e.g., 'use nemo api inspect <branch> for raw JSON' or implement a --json flag."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 146,
+      "description": "evaluate() takes 9 parameters with #[allow(clippy::too_many_arguments)]. While functional and called from only one place, this makes the API surface fragile for Stage 2 extensions.",
+      "suggestion": "Consider bundling parameters into a JudgeEvaluateContext struct if Stage 2 adds more callers. Low priority for Stage 1."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 396,
+      "description": "FR-6b requires a Grafana-friendly metric judge_decision_total{decision=...}. The implementation has a tracing::info with judge_decision_total=1 span attribute (line 396), which is good. However, the spec says 'Not blocking; the logs are sufficient for Stage 1' so this is informational. The attribute name is a counter but emitted as a constant 1, which requires a log-scraping pipeline to aggregate — a proper metrics counter (e.g., via metrics crate) would be more idiomatic for Grafana scraping.",
+      "suggestion": "Acceptable for Stage 1 as-is. Consider adding a proper metrics::counter! in Stage 2 for native Prometheus scraping."
+    }
+  ]
+}
