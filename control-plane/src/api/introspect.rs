@@ -55,6 +55,18 @@ pub async fn pod_introspect(
     })?;
     let namespace = &state.config.cluster.jobs_namespace;
 
+    // Validate job_name is a safe Kubernetes label value (alphanumeric + hyphens + dots)
+    if !job_name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
+    {
+        return Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "invalid job name in database"})),
+        )
+            .into_response());
+    }
+
     // Find the running pod for this job
     let pods_api: kube::Api<k8s_openapi::api::core::v1::Pod> =
         kube::Api::namespaced(kube_client.clone(), namespace);
@@ -119,23 +131,20 @@ pub async fn pod_introspect(
         }
     };
 
-    // FR-1c: if exec itself timed out (within the 3s window), return 503
-    if let Err(ref e) = exec_result
-        && e.contains("timed out")
-    {
-        return Ok((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "pod introspection timeout"})),
-        )
-            .into_response());
-    }
-
     let collected_at = Utc::now();
 
-    // Parse exec output — non-timeout exec failures return partial snapshot (NFR-4)
+    // Parse exec output — timeout → 503, other failures → partial snapshot (NFR-4)
     let (processes, worktree) = match exec_result {
         Ok(output) => parse_introspect_output(&output),
-        Err(e) => {
+        Err(ExecError::Timeout(msg)) => {
+            tracing::warn!(pod = %pod_name, error = %msg, "introspect exec timed out");
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "pod introspection timeout"})),
+            )
+                .into_response());
+        }
+        Err(ExecError::Other(e)) => {
             tracing::warn!(pod = %pod_name, error = %e, "introspect exec failed, returning partial");
             (Vec::new(), default_worktree())
         }
@@ -174,13 +183,29 @@ pub async fn pod_introspect(
     Ok((StatusCode::OK, Json(response)).into_response())
 }
 
+/// Error type for exec operations, distinguishing timeouts from other failures.
+#[derive(Debug)]
+enum ExecError {
+    Timeout(String),
+    Other(String),
+}
+
+impl std::fmt::Display for ExecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExecError::Timeout(msg) => write!(f, "{msg}"),
+            ExecError::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
 /// Execute the introspection script on the agent container via pod exec.
 /// Has a 3s wall-clock budget (FR-1c). The script itself has a 2s timeout (FR-2c).
 async fn exec_introspect_script(
     client: &kube::Client,
     pod_name: &str,
     namespace: &str,
-) -> Result<String, String> {
+) -> Result<String, ExecError> {
     use tokio::io::AsyncReadExt;
 
     let pods_api: kube::Api<k8s_openapi::api::core::v1::Pod> =
@@ -190,7 +215,7 @@ async fn exec_introspect_script(
         container: Some("agent".to_string()),
         stdin: false,
         stdout: true,
-        stderr: false,
+        stderr: true,
         tty: false,
         ..Default::default()
     };
@@ -216,15 +241,38 @@ async fn exec_introspect_script(
                 std::time::Duration::from_secs(2),
                 async {
                     let mut output = String::new();
-                    if let Some(mut stdout) = attached.stdout() {
-                        let mut buf = vec![0u8; 65536];
-                        loop {
-                            match stdout.read(&mut buf).await {
-                                Ok(0) => break,
-                                Ok(n) => output.push_str(&String::from_utf8_lossy(&buf[..n])),
-                                Err(_) => break,
+                    let mut stderr_output = String::new();
+                    // Take streams before async blocks to avoid double-borrow of `attached`
+                    let mut maybe_stdout = attached.stdout();
+                    let mut maybe_stderr = attached.stderr();
+                    // Read stdout (main output) and stderr (for debugging) concurrently
+                    let stdout_fut = async {
+                        if let Some(ref mut stdout) = maybe_stdout {
+                            let mut buf = vec![0u8; 65536];
+                            loop {
+                                match stdout.read(&mut buf).await {
+                                    Ok(0) => break,
+                                    Ok(n) => output.push_str(&String::from_utf8_lossy(&buf[..n])),
+                                    Err(_) => break,
+                                }
                             }
                         }
+                    };
+                    let stderr_fut = async {
+                        if let Some(ref mut stderr) = maybe_stderr {
+                            let mut buf = vec![0u8; 4096];
+                            loop {
+                                match stderr.read(&mut buf).await {
+                                    Ok(0) => break,
+                                    Ok(n) => stderr_output.push_str(&String::from_utf8_lossy(&buf[..n])),
+                                    Err(_) => break,
+                                }
+                            }
+                        }
+                    };
+                    tokio::join!(stdout_fut, stderr_fut);
+                    if !stderr_output.is_empty() {
+                        tracing::debug!(stderr = %stderr_output, "introspect exec stderr");
                     }
                     output
                 },
@@ -232,11 +280,11 @@ async fn exec_introspect_script(
             .await;
             match read_result {
                 Ok(output) => Ok(output),
-                Err(_) => Err("exec read timed out after 2s".to_string()),
+                Err(_) => Err(ExecError::Timeout("exec read timed out after 2s".to_string())),
             }
         }
-        Ok(Err(e)) => Err(format!("exec failed: {e}")),
-        Err(_) => Err("exec timed out after 3s".to_string()),
+        Ok(Err(e)) => Err(ExecError::Other(format!("exec failed: {e}"))),
+        Err(_) => Err(ExecError::Timeout("exec timed out after 3s".to_string())),
     }
 }
 

@@ -44,6 +44,8 @@ impl Reconciler {
 
         // FR-6b: daily sweep of old pod_snapshots (7-day TTL = 168 hours)
         let mut cleanup_interval = tokio::time::interval(Duration::from_secs(86400));
+        // Delay missed ticks so accumulated misses don't burst-fire multiple sweeps.
+        cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // First tick fires immediately; skip it so the first sweep happens after 24h
         cleanup_interval.tick().await;
 

@@ -2,7 +2,8 @@
 # nautiloop-introspect — collect agent container runtime state (FR-2d).
 # Output: newline-delimited JSON, one object per section.
 # Designed to run in < 2s. Read-only: ps, du, git-status. No writes.
-set -e
+# No set -e: each section must fail independently so partial output is still
+# collected (FR-2c). The control-plane parser handles missing/null fields.
 
 # Section 1: processes (top 30 by CPU)
 ps_output=$(ps -eo pid,ppid,user,pcpu,etime,args --sort=-pcpu --no-headers 2>/dev/null | head -30 || echo "")
@@ -31,11 +32,11 @@ ps_json=$(echo "$ps_output" | jq -Rs '
       )
     }
   ]
-')
+') || ps_json='[]'
 
 # Section 2: worktree info
 target_bytes=$(du -sb /work/target 2>/dev/null | awk '{print $1}' || echo "null")
-target_artifacts=$(ls /work/target/debug/deps 2>/dev/null | wc -l || echo "0")
+target_artifacts=$(ls -f /work/target/debug/deps 2>/dev/null | wc -l || echo "0")
 head_sha=$(git -C /work rev-parse HEAD 2>/dev/null || echo "null")
 uncommitted=$(git -C /work status --porcelain 2>/dev/null | wc -l || echo "0")
 
