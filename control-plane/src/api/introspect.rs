@@ -151,14 +151,17 @@ pub async fn pod_introspect(
     let collected_at = Utc::now();
 
     // Parse exec output — timeout/failure → partial snapshot with metrics (FR-2c, NFR-4)
+    let mut warnings: Vec<String> = Vec::new();
     let (processes, worktree) = match exec_result {
         Ok(output) => parse_introspect_output(&output),
         Err(ExecError::Timeout(msg)) => {
             tracing::warn!(pod = %pod_name, error = %msg, "introspect exec timed out, returning partial snapshot");
+            warnings.push(format!("exec timed out ({msg}), showing partial data"));
             (Vec::new(), default_worktree())
         }
         Err(ExecError::Other(e)) => {
             tracing::warn!(pod = %pod_name, error = %e, "introspect exec failed, returning partial");
+            warnings.push(format!("exec failed ({e}), showing partial data"));
             (Vec::new(), default_worktree())
         }
     };
@@ -171,6 +174,7 @@ pub async fn pod_introspect(
         container_stats,
         processes,
         worktree,
+        warnings,
     };
 
     // FR-6a: optionally record snapshot to pod_snapshots table
@@ -233,11 +237,12 @@ async fn exec_introspect_script(
         ..Default::default()
     };
 
-    // The script has `timeout 2` internally; the exec handshake gets 2s so
-    // loaded clusters with slow API server -> kubelet chains won't miss data.
+    // The script has `timeout 2` internally; the exec handshake gets 1.5s.
     // The read timeout is 1s since the script output arrives in a single burst
-    // once the 2s script completes. Total budget (2s handshake + 1s read) = 3s,
-    // bounded by the outer handler timeout.
+    // once the 2s script completes. Total budget (1.5s handshake + 1s read) = 2.5s,
+    // which is strictly less than the outer 3s handler timeout. This ensures the
+    // inner timeout always fires first, producing a deterministic partial-result
+    // path instead of a non-deterministic 503-vs-partial race.
     let cmd = vec![
         "/bin/sh",
         "-c",
@@ -245,7 +250,7 @@ async fn exec_introspect_script(
     ];
 
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_millis(1500),
         pods_api.exec(pod_name, cmd, &attach_params),
     )
     .await;
@@ -301,7 +306,7 @@ async fn exec_introspect_script(
             }
         }
         Ok(Err(e)) => Err(ExecError::Other(format!("exec failed: {e}"))),
-        Err(_) => Err(ExecError::Timeout("exec handshake timed out after 2s".to_string())),
+        Err(_) => Err(ExecError::Timeout("exec handshake timed out after 1.5s".to_string())),
     }
 }
 

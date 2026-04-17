@@ -421,14 +421,21 @@ async fn run_app(
                     let _ = selection_tx.send(app.current_log_selection());
                 }
                 AppAction::PanelToggle => {
-                    // Update introspect polling based on panel state
-                    if app.side_panel == SidePanel::Introspect {
-                        // Reset to clean state before starting to poll
-                        app.introspect = None;
-                        app.introspect_status = "Loading...".to_string();
-                        let _ = introspect_tx.send(app.selected_loop_id);
-                    } else {
-                        let _ = introspect_tx.send(None);
+                    match app.side_panel {
+                        SidePanel::Introspect => {
+                            // Reset to clean state before starting to poll
+                            app.introspect = None;
+                            app.introspect_status = "Loading...".to_string();
+                            let _ = introspect_tx.send(app.selected_loop_id);
+                        }
+                        SidePanel::Inspect => {
+                            // Ensure inspect data is fetched when toggling to panel
+                            let _ = inspect_tx.send(app.selected_branch());
+                            let _ = introspect_tx.send(None);
+                        }
+                        SidePanel::Closed => {
+                            let _ = introspect_tx.send(None);
+                        }
                     }
                 }
                 AppAction::Trigger(command) => {
@@ -1480,6 +1487,16 @@ fn render_introspect_pane(app: &App) -> Paragraph<'static> {
                 "(no processes)",
                 Style::default().fg(MUTED),
             )));
+        }
+
+        if !snapshot.warnings.is_empty() {
+            lines.push(Line::from(Span::styled("", Style::default())));
+            for w in &snapshot.warnings {
+                lines.push(Line::from(Span::styled(
+                    format!("⚠ {w}"),
+                    Style::default().fg(AMBER),
+                )));
+            }
         }
 
         Text::from(lines)

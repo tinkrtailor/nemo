@@ -120,7 +120,13 @@ async fn run_watch_loop(client: &NemoClient, loop_id: &str) -> Result<()> {
                 {
                     return Ok(());
                 }
-                _ => {} // ignore non-key events and read errors
+                Ok(_) => {} // ignore non-key events (resize, mouse, etc.)
+                Err(_) => {
+                    // Prevent tight spin if read() fails persistently
+                    // (poll returns true but read errors). Sleep briefly
+                    // before the next iteration.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
             }
         }
 
@@ -224,6 +230,13 @@ pub fn render_snapshot(snapshot: &PodIntrospectResponse, w: &mut dyn Write) -> R
         writeln!(w, "(no processes)")?;
     }
 
+    if !snapshot.warnings.is_empty() {
+        writeln!(w)?;
+        for warning in &snapshot.warnings {
+            writeln!(w, "\x1b[33mwarning:\x1b[0m {warning}")?;
+        }
+    }
+
     Ok(())
 }
 
@@ -305,6 +318,7 @@ mod tests {
                 uncommitted_files: Some(2),
                 head_sha: Some("42bffd9abc".to_string()),
             },
+            warnings: Vec::new(),
         }
     }
 
@@ -345,6 +359,20 @@ mod tests {
         assert_eq!(format_bytes(1024), "1 KiB");
         assert_eq!(format_bytes(1048576), "1 MiB");
         assert_eq!(format_bytes(3221225472), "3.0 GiB");
+    }
+
+    #[test]
+    fn test_render_snapshot_with_warnings() {
+        let mut snapshot = sample_snapshot();
+        snapshot.warnings = vec!["exec timed out (read timeout after 1s), showing partial data".to_string()];
+        snapshot.processes = Vec::new();
+        let mut buf = Vec::new();
+        render_snapshot(&snapshot, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("warning:"));
+        assert!(output.contains("exec timed out"));
+        assert!(output.contains("(no processes)"));
     }
 
     #[test]

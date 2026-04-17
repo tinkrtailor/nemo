@@ -47,6 +47,8 @@ pub struct PodIntrospectResponse {
     pub container_stats: Option<ContainerStats>,
     pub processes: Vec<ProcessInfo>,
     pub worktree: WorktreeInfo,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

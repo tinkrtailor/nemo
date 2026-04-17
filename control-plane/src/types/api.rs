@@ -193,6 +193,10 @@ pub struct PodIntrospectResponse {
     pub container_stats: Option<ContainerStats>,
     pub processes: Vec<ProcessInfo>,
     pub worktree: WorktreeInfo,
+    /// Non-empty when the snapshot is partial/degraded (e.g. exec timed out).
+    /// Callers use this to distinguish "genuinely idle" from "data unavailable".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

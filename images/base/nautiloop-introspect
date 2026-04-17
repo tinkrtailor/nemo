@@ -1,11 +1,15 @@
 #!/bin/sh
 # nautiloop-introspect — collect agent container runtime state (FR-2d).
-# Output: newline-delimited JSON, one object per section.
+# Output: single JSON object with "processes" and "worktree" sections.
 # Designed to run in < 2s. Read-only: ps, du, git-status. No writes.
 # No set -e: each section must fail independently so partial output is still
 # collected (FR-2c). The control-plane parser handles missing/null fields.
+#
+# Processes are emitted FIRST so that a timeout mid-script still yields
+# process data (the most valuable diagnostic signal). Worktree info is
+# collected second and may be truncated on large projects.
 
-# Section 1: processes (top 30 by CPU)
+# Section 1: processes (top 30 by CPU) — fastest section, emitted first
 ps_output=$(ps -eo pid,ppid,user,pcpu,etime,args --sort=-pcpu --no-headers 2>/dev/null | head -30 || echo "")
 ps_json=$(echo "$ps_output" | jq -Rs '
   [split("\n") | .[] | select(length > 0) |
@@ -36,29 +40,36 @@ ps_json=$(echo "$ps_output" | jq -Rs '
   ]
 ') || ps_json='[]'
 
-# Section 2: worktree info
-# du -sb summarizes total size in bytes (FR-2a). The -s flag means summarize
-# (one entry for the entire tree). On large target dirs this can take >1s.
+# Section 2: worktree info (can be slow on large projects)
+# du -sb summarizes total size in bytes (FR-2a). On large target dirs this
+# can take >1s, which is why processes are collected first.
 target_bytes=$(du -sb /work/target 2>/dev/null | awk '{print $1}' || echo "null")
-# Check if deps dir exists before counting to distinguish "empty" (0) from
-# "not present" (null). Matches null semantics of target_dir_bytes (FR-2a).
+# Use ls -U to skip sorting — unnecessary overhead on large dep dirs.
 if [ -d /work/target/debug/deps ]; then
-  target_artifacts=$(ls /work/target/debug/deps 2>/dev/null | wc -l)
+  target_artifacts=$(ls -U /work/target/debug/deps 2>/dev/null | wc -l)
 else
   target_artifacts="null"
 fi
-head_sha=$(git -C /work rev-parse HEAD 2>/dev/null || echo "null")
+# Use jq -Rs for safe JSON escaping of head_sha (handles malformed output)
+head_sha=$(git -C /work rev-parse HEAD 2>/dev/null) || head_sha=""
 # FR-2a: git status --porcelain counts all dirty files including untracked.
-uncommitted=$(git -C /work status --porcelain 2>/dev/null | wc -l || echo "0")
+# Fallback to "null" (not "0") so callers can distinguish "clean" from "unknown".
+if uncommitted_raw=$(git -C /work status --porcelain 2>/dev/null); then
+  uncommitted=$(printf '%s' "$uncommitted_raw" | wc -l | tr -d ' ')
+else
+  # git status failed entirely — report unknown, not clean
+  uncommitted="null"
+fi
 
 # Quote strings, handle nulls
 if [ "$target_bytes" = "" ] || [ "$target_bytes" = "null" ]; then
   target_bytes="null"
 fi
-if [ "$head_sha" = "null" ] || [ "$head_sha" = "" ]; then
-  head_sha_json="null"
+# Use jq for safe JSON string escaping of head_sha
+if [ -n "$head_sha" ]; then
+  head_sha_json=$(printf '%s' "$head_sha" | jq -Rs '.')
 else
-  head_sha_json="\"$head_sha\""
+  head_sha_json="null"
 fi
 
 # Build final JSON
@@ -69,7 +80,7 @@ cat <<ENDJSON
     "path": "/work",
     "target_dir_bytes": $target_bytes,
     "target_dir_artifacts": $(echo "$target_artifacts" | tr -d ' '),
-    "uncommitted_files": $(echo "$uncommitted" | tr -d ' '),
+    "uncommitted_files": $uncommitted,
     "head_sha": $head_sha_json
   }
 }
