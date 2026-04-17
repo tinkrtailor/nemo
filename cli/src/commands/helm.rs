@@ -3,6 +3,7 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::{DateTime, Local, Utc};
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -34,6 +35,18 @@ const BLUE: Color = Color::Rgb(59, 123, 192);
 const MAX_LOG_LINES: usize = 500;
 const POD_TAIL_LINES: u32 = 200;
 
+#[derive(Debug, Clone)]
+struct LogEntry {
+    timestamp: DateTime<Utc>,
+    line: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    LoopsList,
+    LogPane,
+}
+
 #[derive(Debug)]
 enum AppEvent {
     Input(KeyEvent),
@@ -42,7 +55,7 @@ enum AppEvent {
     StatusError(String),
     InspectLoaded(String, InspectResponse),
     InspectError(String, String),
-    LogLine(uuid::Uuid, String),
+    LogLine(uuid::Uuid, LogEntry),
     LogStatus(uuid::Uuid, String),
 }
 
@@ -103,13 +116,16 @@ struct App {
     loops: Vec<LoopSummary>,
     list_state: ListState,
     selected_loop_id: Option<uuid::Uuid>,
-    logs: VecDeque<String>,
+    logs: VecDeque<LogEntry>,
     log_source: LogSource,
     status_line: String,
     log_status: String,
     inspect_status: String,
     inspect: Option<InspectResponse>,
     team_view: bool,
+    focus: Focus,
+    log_scroll_offset: usize,
+    log_pane_height: usize,
 }
 
 impl App {
@@ -125,6 +141,9 @@ impl App {
             inspect_status: "Loading inspect data...".to_string(),
             inspect: None,
             team_view,
+            focus: Focus::LoopsList,
+            log_scroll_offset: 0,
+            log_pane_height: 0,
         }
     }
 
@@ -231,6 +250,7 @@ impl App {
 
     fn reset_logs(&mut self) {
         self.logs.clear();
+        self.log_scroll_offset = 0;
         self.log_status = match self.selected_loop() {
             Some(loop_item) => match self.log_source {
                 LogSource::Persisted => {
@@ -261,16 +281,81 @@ impl App {
         };
     }
 
-    fn push_log_line(&mut self, line: String) {
+    fn push_log_line(&mut self, entry: LogEntry) {
+        let was_at_bottom = self.is_scrolled_to_bottom();
         if self.logs.len() == MAX_LOG_LINES {
             self.logs.pop_front();
+            // Adjust scroll offset when oldest line is dropped
+            if self.log_scroll_offset > 0 {
+                self.log_scroll_offset = self.log_scroll_offset.saturating_sub(1);
+            }
         }
-        self.logs.push_back(line);
+        self.logs.push_back(entry);
+        // Auto-scroll: if we were at the bottom, stay there
+        if was_at_bottom {
+            self.log_scroll_offset = 0;
+        }
+    }
+
+    fn is_scrolled_to_bottom(&self) -> bool {
+        self.log_scroll_offset == 0
+    }
+
+    fn max_scroll_offset(&self) -> usize {
+        self.logs.len().saturating_sub(self.log_pane_height)
+    }
+
+    fn scroll_up(&mut self, lines: usize) {
+        let max = self.max_scroll_offset();
+        self.log_scroll_offset = (self.log_scroll_offset + lines).min(max);
+    }
+
+    fn scroll_down(&mut self, lines: usize) {
+        self.log_scroll_offset = self.log_scroll_offset.saturating_sub(lines);
+    }
+
+    fn scroll_to_top(&mut self) {
+        self.log_scroll_offset = self.max_scroll_offset();
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.log_scroll_offset = 0;
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> AppAction {
+        // Global keys: always active regardless of focus
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => AppAction::Quit,
+            KeyCode::Char('q') | KeyCode::Esc => return AppAction::Quit,
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.focus = match self.focus {
+                    Focus::LoopsList => Focus::LogPane,
+                    Focus::LogPane => Focus::LoopsList,
+                };
+                return AppAction::None;
+            }
+            // Action keys always work regardless of focus
+            KeyCode::Char('a') => return AppAction::Trigger(LoopCommand::Approve),
+            KeyCode::Char('u') => return AppAction::Trigger(LoopCommand::Resume),
+            KeyCode::Char('c') => return AppAction::Trigger(LoopCommand::Cancel),
+            KeyCode::Char('l') => {
+                self.cycle_log_source();
+                return AppAction::SourceChanged;
+            }
+            KeyCode::Char('r') => return AppAction::ReconnectLogs,
+            _ => {}
+        }
+
+        match self.focus {
+            Focus::LoopsList => self.handle_loops_list_input(key),
+            Focus::LogPane => {
+                self.handle_log_pane_input(key);
+                AppAction::None
+            }
+        }
+    }
+
+    fn handle_loops_list_input(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.move_selection(1) {
                     AppAction::SelectionChanged
@@ -285,7 +370,7 @@ impl App {
                     AppAction::None
                 }
             }
-            KeyCode::Char('g') => {
+            KeyCode::Char('g') | KeyCode::Home => {
                 if self.select_first() {
                     AppAction::SelectionChanged
                 } else {
@@ -299,22 +384,19 @@ impl App {
                     AppAction::None
                 }
             }
-            KeyCode::Home => {
-                if self.select_first() {
-                    AppAction::SelectionChanged
-                } else {
-                    AppAction::None
-                }
-            }
-            KeyCode::Char('l') => {
-                self.cycle_log_source();
-                AppAction::SourceChanged
-            }
-            KeyCode::Char('a') => AppAction::Trigger(LoopCommand::Approve),
-            KeyCode::Char('u') => AppAction::Trigger(LoopCommand::Resume),
-            KeyCode::Char('c') => AppAction::Trigger(LoopCommand::Cancel),
-            KeyCode::Char('r') => AppAction::ReconnectLogs,
             _ => AppAction::None,
+        }
+    }
+
+    fn handle_log_pane_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.scroll_up(1),
+            KeyCode::Down | KeyCode::Char('j') => self.scroll_down(1),
+            KeyCode::PageUp => self.scroll_up(self.log_pane_height.max(1)),
+            KeyCode::PageDown => self.scroll_down(self.log_pane_height.max(1)),
+            KeyCode::Home => self.scroll_to_top(),
+            KeyCode::End => self.scroll_to_bottom(),
+            _ => {}
         }
     }
 }
@@ -444,9 +526,9 @@ async fn run_app(
                     app.inspect_status = format!("inspect refresh failed: {error}");
                 }
             }
-            AppEvent::LogLine(loop_id, line) => {
+            AppEvent::LogLine(loop_id, entry) => {
                 if Some(loop_id) == app.selected_loop_id {
-                    app.push_log_line(line);
+                    app.push_log_line(entry);
                 }
             }
             AppEvent::LogStatus(loop_id, status_line) => {
@@ -828,8 +910,12 @@ async fn stream_pod_logs(
 
                 let overlap = overlapping_suffix_len(&previous_lines, &lines);
                 for line in lines.iter().skip(overlap) {
+                    let entry = LogEntry {
+                        timestamp: Utc::now(),
+                        line: line.clone(),
+                    };
                     if event_tx
-                        .send(AppEvent::LogLine(loop_id, line.clone()))
+                        .send(AppEvent::LogLine(loop_id, entry))
                         .is_err()
                     {
                         return;
@@ -909,12 +995,12 @@ async fn stream_historical_logs(
 
     let mut replay_index = 0;
     for log in logs {
-        let Some(formatted_line) = format_log_json(&log) else {
+        let Some(entry) = format_log_json(&log) else {
             continue;
         };
         emit_or_skip_replayed_line(
             loop_id,
-            formatted_line,
+            entry,
             emitted_lines,
             &mut replay_index,
             event_tx,
@@ -960,12 +1046,12 @@ async fn stream_sse_logs(
                     return Ok(StreamOutcome::Ended(state));
                 }
 
-                let Some(formatted_line) = format_log_json(&parsed) else {
+                let Some(entry) = format_log_json(&parsed) else {
                     continue;
                 };
                 emit_or_skip_replayed_line(
                     loop_id,
-                    formatted_line,
+                    entry,
                     emitted_lines,
                     &mut replay_index,
                     event_tx,
@@ -979,27 +1065,158 @@ async fn stream_sse_logs(
 
 fn emit_or_skip_replayed_line(
     loop_id: uuid::Uuid,
-    formatted_line: String,
+    entry: LogEntry,
     emitted_lines: &mut Vec<String>,
     replay_index: &mut usize,
     event_tx: &mpsc::UnboundedSender<AppEvent>,
 ) -> Result<()> {
-    if *replay_index < emitted_lines.len() && emitted_lines[*replay_index] == formatted_line {
+    if *replay_index < emitted_lines.len() && emitted_lines[*replay_index] == entry.line {
         *replay_index += 1;
         return Ok(());
     }
 
-    emitted_lines.push(formatted_line.clone());
+    emitted_lines.push(entry.line.clone());
     event_tx
-        .send(AppEvent::LogLine(loop_id, formatted_line))
+        .send(AppEvent::LogLine(loop_id, entry))
         .map_err(|_| anyhow::anyhow!("helm event channel closed"))
 }
 
-fn format_log_json(value: &serde_json::Value) -> Option<String> {
+fn format_log_json(value: &serde_json::Value) -> Option<LogEntry> {
     let stage = value.get("stage")?.as_str()?;
     let round = value.get("round")?.as_i64()?;
     let line = value.get("line")?.as_str()?;
-    Some(format!("[{stage}/r{round}] {line}"))
+
+    let timestamp = value
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now);
+
+    let formatted = format!("[{stage}/r{round}] {line}");
+    let display_line = compress_nautiloop_result(&formatted);
+
+    Some(LogEntry {
+        timestamp,
+        line: display_line,
+    })
+}
+
+/// Compress `NAUTILOOP_RESULT:{json}` lines into a single summary line.
+/// Returns the original line unchanged if it doesn't match the prefix.
+fn compress_nautiloop_result(line: &str) -> String {
+    // The formatted line looks like: [stage/rN] NAUTILOOP_RESULT:{json}
+    // We need to find the NAUTILOOP_RESULT: within the formatted line
+    let Some(result_start) = line.find("NAUTILOOP_RESULT:") else {
+        return line.to_string();
+    };
+
+    let json_str = &line[result_start + "NAUTILOOP_RESULT:".len()..];
+    let parsed: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(_) => {
+            // FR-2b: fall back to truncated raw line
+            let truncated: String = line.chars().take(200).collect();
+            return truncated;
+        }
+    };
+
+    let stage = parsed
+        .get("stage")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+
+    // Extract round from the prefix "[stage/rN] " if present
+    let round_str = line
+        .strip_prefix('[')
+        .and_then(|s| s.find("/r"))
+        .and_then(|pos| {
+            let after = &line[pos + 3..]; // skip "[" prefix + "/r"
+            after.find(']').map(|end| &after[..end])
+        })
+        .unwrap_or("?");
+
+    match stage {
+        "implement" | "revise" => {
+            let output_tokens = parsed
+                .get("data")
+                .and_then(|d| d.get("token_usage"))
+                .and_then(|t| t.get("output"))
+                .and_then(|o| o.as_u64())
+                .map(format_token_count)
+                .unwrap_or_else(|| "?".to_string());
+            format!("\u{2713} {stage} r{round_str} \u{00b7} {output_tokens} tokens")
+        }
+        "test" => {
+            let data = parsed.get("data");
+            let ci_status = data
+                .and_then(|d| d.get("ci_status"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown");
+            let services_count = data
+                .and_then(|d| d.get("services"))
+                .and_then(|s| s.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let all_passed = data
+                .and_then(|d| d.get("all_passed"))
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let check = if all_passed && ci_status == "passed" {
+                "\u{2713}"
+            } else {
+                "\u{2717}"
+            };
+            format!(
+                "{check} test r{round_str} \u{00b7} {ci_status} \u{00b7} {services_count} service{}",
+                if services_count == 1 { "" } else { "s" }
+            )
+        }
+        "review" | "audit" => {
+            let data = parsed.get("data");
+            let verdict = data
+                .and_then(|d| d.get("verdict"))
+                .or(data);
+            let clean = verdict
+                .and_then(|v| v.get("clean"))
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let issue_count = verdict
+                .and_then(|v| v.get("issues"))
+                .and_then(|i| i.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let confidence = verdict
+                .and_then(|v| v.get("confidence"))
+                .and_then(|c| c.as_f64())
+                .map(|c| format!("{c:.2}"))
+                .unwrap_or_else(|| "?".to_string());
+            let check = if clean { "\u{2713}" } else { "\u{2717}" };
+            format!(
+                "{check} {stage} r{round_str} \u{00b7} clean={clean} \u{00b7} {issue_count} issue{} \u{00b7} conf={confidence}",
+                if issue_count == 1 { "" } else { "s" }
+            )
+        }
+        _ => {
+            // Unknown stage: just show a basic summary
+            let truncated: String = line.chars().take(200).collect();
+            truncated
+        }
+    }
+}
+
+fn format_token_count(n: u64) -> String {
+    if n >= 1_000 {
+        let thousands = n / 1_000;
+        let remainder = (n % 1_000) / 100;
+        if remainder > 0 {
+            format!("{thousands},{:03}", n % 1_000)
+        } else {
+            format!("{thousands},000")
+        }
+    } else {
+        n.to_string()
+    }
 }
 
 fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
@@ -1017,7 +1234,8 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         .split(content[1]);
 
     frame.render_widget(render_details(app), right[0]);
-    frame.render_widget(render_logs(app, right[1]), right[1]);
+    let logs_widget = render_logs(app, right[1]);
+    frame.render_widget(logs_widget, right[1]);
     frame.render_stateful_widget(render_loop_selector(app), content[0], &mut app.list_state);
     frame.render_widget(render_footer(app), root[1]);
 }
@@ -1130,7 +1348,10 @@ fn render_details(app: &App) -> Paragraph<'static> {
         .wrap(Wrap { trim: false })
 }
 
-fn render_logs(app: &App, area: Rect) -> Paragraph<'static> {
+fn render_logs(app: &mut App, area: Rect) -> Paragraph<'static> {
+    let inner_height = area.height.saturating_sub(2) as usize;
+    app.log_pane_height = inner_height;
+
     let lines: Vec<Line<'static>> = if app.logs.is_empty() {
         vec![Line::from(Span::styled(
             app.log_status.clone(),
@@ -1139,27 +1360,99 @@ fn render_logs(app: &App, area: Rect) -> Paragraph<'static> {
     } else {
         app.logs
             .iter()
-            .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(TEXT))))
+            .map(|entry| render_log_line(entry))
             .collect()
     };
 
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let scroll = lines.len().saturating_sub(inner_height) as u16;
+    let paused = !app.is_scrolled_to_bottom();
+    // Clamp scroll offset to valid range
+    let max_offset = app.max_scroll_offset();
+    if app.log_scroll_offset > max_offset {
+        app.log_scroll_offset = max_offset;
+    }
+
+    // scroll position: bottom-anchored with offset
+    let total = lines.len();
+    let scroll = total.saturating_sub(inner_height).saturating_sub(app.log_scroll_offset) as u16;
+
+    let title = if paused {
+        format!(" logs {} [paused] ", app.log_source.label())
+    } else {
+        format!(" logs {} ", app.log_source.label())
+    };
+
+    let border_color = if app.focus == Focus::LogPane {
+        TEAL
+    } else {
+        BORDER
+    };
 
     Paragraph::new(Text::from(lines))
         .block(
             Block::default()
                 .title(Span::styled(
-                    format!(" logs {} ", app.log_source.label()),
+                    title,
                     Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
                 ))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(BORDER).bg(SURFACE))
+                .border_style(Style::default().fg(border_color).bg(SURFACE))
                 .style(Style::default().bg(BG)),
         )
         .style(Style::default().fg(TEXT).bg(BG))
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0))
+}
+
+fn render_log_line(entry: &LogEntry) -> Line<'static> {
+    let local_time: DateTime<Local> = entry.timestamp.with_timezone(&Local);
+    let time_str = local_time.format("%H:%M:%S").to_string();
+
+    let line = &entry.line;
+
+    // Color the check/cross marks for NAUTILOOP_RESULT compressed lines
+    if line.starts_with('\u{2713}') {
+        // ✓ line - green check
+        let rest = &line['\u{2713}'.len_utf8()..];
+        Line::from(vec![
+            Span::styled(
+                format!("{time_str}  "),
+                Style::default().fg(MUTED),
+            ),
+            Span::styled(
+                "\u{2713}".to_string(),
+                Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                rest.to_string(),
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else if line.starts_with('\u{2717}') {
+        // ✗ line - red cross
+        let rest = &line['\u{2717}'.len_utf8()..];
+        Line::from(vec![
+            Span::styled(
+                format!("{time_str}  "),
+                Style::default().fg(MUTED),
+            ),
+            Span::styled(
+                "\u{2717}".to_string(),
+                Style::default().fg(RED).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                rest.to_string(),
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(
+                format!("{time_str}  "),
+                Style::default().fg(MUTED),
+            ),
+            Span::styled(line.clone(), Style::default().fg(TEXT)),
+        ])
+    }
 }
 
 fn latest_round(inspect: &InspectResponse) -> Option<&RoundSummary> {
@@ -1279,27 +1572,36 @@ fn short_sha(sha: &str) -> &str {
 
 fn render_footer(app: &App) -> Paragraph<'static> {
     let mode = if app.team_view { "team" } else { "engineer" };
+    let focus_label = match app.focus {
+        Focus::LoopsList => "loops",
+        Focus::LogPane => "logs",
+    };
     Paragraph::new(Line::from(vec![
         Span::styled("mode ", Style::default().fg(MUTED)),
         Span::styled(mode, Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
-        Span::raw("   "),
-        Span::styled("keys ", Style::default().fg(MUTED)),
+        Span::raw("  "),
+        Span::styled("focus ", Style::default().fg(MUTED)),
+        Span::styled(
+            focus_label,
+            Style::default().fg(BLUE).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
         Span::styled("q", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
-        Span::styled(" quit  ", Style::default().fg(MUTED)),
+        Span::styled(" quit ", Style::default().fg(MUTED)),
+        Span::styled(
+            "Tab",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" focus ", Style::default().fg(MUTED)),
         Span::styled(
             "j/k",
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" move  ", Style::default().fg(MUTED)),
-        Span::styled(
-            "g/G",
-            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" top/bottom  ", Style::default().fg(MUTED)),
+        Span::styled(" move ", Style::default().fg(MUTED)),
         Span::styled("l", Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
-        Span::styled(" log source  ", Style::default().fg(MUTED)),
+        Span::styled(" source ", Style::default().fg(MUTED)),
         Span::styled("r", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-        Span::styled(" reconnect logs  ", Style::default().fg(MUTED)),
+        Span::styled(" reconnect ", Style::default().fg(MUTED)),
         Span::styled(
             "a/u/c",
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
@@ -1367,7 +1669,10 @@ mod tests {
 
         emit_or_skip_replayed_line(
             loop_id,
-            "[implement/r1] first".to_string(),
+            LogEntry {
+                timestamp: Utc::now(),
+                line: "[implement/r1] first".to_string(),
+            },
             &mut emitted_lines,
             &mut replay_index,
             &event_tx,
@@ -1375,7 +1680,10 @@ mod tests {
         .unwrap();
         emit_or_skip_replayed_line(
             loop_id,
-            "[implement/r1] second".to_string(),
+            LogEntry {
+                timestamp: Utc::now(),
+                line: "[implement/r1] second".to_string(),
+            },
             &mut emitted_lines,
             &mut replay_index,
             &event_tx,
@@ -1384,9 +1692,9 @@ mod tests {
 
         let received = event_rx.try_recv().unwrap();
         match received {
-            AppEvent::LogLine(received_loop_id, line) => {
+            AppEvent::LogLine(received_loop_id, entry) => {
                 assert_eq!(received_loop_id, loop_id);
-                assert_eq!(line, "[implement/r1] second");
+                assert_eq!(entry.line, "[implement/r1] second");
             }
             _ => panic!("expected log line event"),
         }
@@ -1417,6 +1725,22 @@ mod tests {
     fn action_hotkeys_map_to_loop_commands() {
         let mut app = App::new(false);
 
+        // Action keys work from loops list focus
+        assert_eq!(
+            app.handle_input(KeyEvent::from(KeyCode::Char('a'))),
+            AppAction::Trigger(LoopCommand::Approve)
+        );
+        assert_eq!(
+            app.handle_input(KeyEvent::from(KeyCode::Char('u'))),
+            AppAction::Trigger(LoopCommand::Resume)
+        );
+        assert_eq!(
+            app.handle_input(KeyEvent::from(KeyCode::Char('c'))),
+            AppAction::Trigger(LoopCommand::Cancel)
+        );
+
+        // Action keys also work from log pane focus
+        app.focus = Focus::LogPane;
         assert_eq!(
             app.handle_input(KeyEvent::from(KeyCode::Char('a'))),
             AppAction::Trigger(LoopCommand::Approve)
@@ -1499,5 +1823,155 @@ mod tests {
         let current = vec!["a".to_string(), "b".to_string(), "c".to_string()];
 
         assert_eq!(overlapping_suffix_len(&previous, &current), 2);
+    }
+
+    // FR-2a: Each stage's compression produces the expected summary string
+    #[test]
+    fn compress_implement_stage() {
+        let line = r#"[implement/r1] NAUTILOOP_RESULT:{"stage":"implement","data":{"token_usage":{"input":5,"output":1712},"exit_code":0,"session_id":"abc"}}"#;
+        let result = compress_nautiloop_result(line);
+        assert_eq!(result, "\u{2713} implement r1 \u{00b7} 1,712 tokens");
+    }
+
+    #[test]
+    fn compress_revise_stage() {
+        let line = r#"[revise/r2] NAUTILOOP_RESULT:{"stage":"revise","data":{"token_usage":{"input":10,"output":500},"exit_code":0}}"#;
+        let result = compress_nautiloop_result(line);
+        assert_eq!(result, "\u{2713} revise r2 \u{00b7} 500 tokens");
+    }
+
+    #[test]
+    fn compress_test_stage_passed() {
+        let line = r#"[test/r1] NAUTILOOP_RESULT:{"stage":"test","data":{"all_passed":true,"ci_status":"passed","services":[]}}"#;
+        let result = compress_nautiloop_result(line);
+        assert_eq!(
+            result,
+            "\u{2713} test r1 \u{00b7} passed \u{00b7} 0 services"
+        );
+    }
+
+    #[test]
+    fn compress_test_stage_failed() {
+        let line = r#"[test/r1] NAUTILOOP_RESULT:{"stage":"test","data":{"all_passed":false,"ci_status":"failed","services":[{"name":"api","passed":false}]}}"#;
+        let result = compress_nautiloop_result(line);
+        assert_eq!(
+            result,
+            "\u{2717} test r1 \u{00b7} failed \u{00b7} 1 service"
+        );
+    }
+
+    #[test]
+    fn compress_review_stage_clean() {
+        let line = r#"[review/r1] NAUTILOOP_RESULT:{"stage":"review","data":{"verdict":{"clean":true,"confidence":0.95,"issues":[],"summary":"looks good"}}}"#;
+        let result = compress_nautiloop_result(line);
+        assert_eq!(
+            result,
+            "\u{2713} review r1 \u{00b7} clean=true \u{00b7} 0 issues \u{00b7} conf=0.95"
+        );
+    }
+
+    #[test]
+    fn compress_review_stage_dirty() {
+        let line = r#"[review/r1] NAUTILOOP_RESULT:{"stage":"review","data":{"verdict":{"clean":false,"confidence":0.88,"issues":[{"severity":"medium","description":"bug"}],"summary":"needs work"}}}"#;
+        let result = compress_nautiloop_result(line);
+        assert_eq!(
+            result,
+            "\u{2717} review r1 \u{00b7} clean=false \u{00b7} 1 issue \u{00b7} conf=0.88"
+        );
+    }
+
+    #[test]
+    fn compress_audit_stage() {
+        let line = r#"[audit/r1] NAUTILOOP_RESULT:{"stage":"audit","data":{"verdict":{"clean":true,"confidence":0.99,"issues":[]}}}"#;
+        let result = compress_nautiloop_result(line);
+        assert_eq!(
+            result,
+            "\u{2713} audit r1 \u{00b7} clean=true \u{00b7} 0 issues \u{00b7} conf=0.99"
+        );
+    }
+
+    // FR-2b: Malformed JSON falls back to truncated raw line
+    #[test]
+    fn compress_malformed_json_falls_back_to_truncated() {
+        let line = "[implement/r1] NAUTILOOP_RESULT:{not valid json!!!";
+        let result = compress_nautiloop_result(line);
+        assert_eq!(result, line); // line is <200 chars so returned as-is
+        // Verify it doesn't panic
+    }
+
+    #[test]
+    fn compress_malformed_json_truncates_long_lines() {
+        let long_suffix = "x".repeat(300);
+        let line = format!("[implement/r1] NAUTILOOP_RESULT:{{{long_suffix}");
+        let result = compress_nautiloop_result(&line);
+        assert_eq!(result.len(), 200);
+    }
+
+    // FR-3b: Timestamp rendering
+    #[test]
+    fn log_line_renders_with_timestamp_prefix() {
+        use chrono::TimeZone;
+        let timestamp = Utc.with_ymd_and_hms(2026, 4, 17, 14, 30, 42).unwrap();
+        let entry = LogEntry {
+            timestamp,
+            line: "[implement/r1] Starting implement".to_string(),
+        };
+        let rendered = render_log_line(&entry);
+        // The line should have spans: timestamp + content
+        let full_text: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
+        // Check that it contains HH:MM:SS format (in local time)
+        let local_time: DateTime<Local> = timestamp.with_timezone(&Local);
+        let expected_prefix = local_time.format("%H:%M:%S").to_string();
+        assert!(
+            full_text.starts_with(&expected_prefix),
+            "expected line to start with '{expected_prefix}', got: {full_text}"
+        );
+        assert!(full_text.contains("[implement/r1] Starting implement"));
+    }
+
+    // FR-1b: Scroll-paused state
+    #[test]
+    fn scroll_paused_reports_correctly() {
+        let mut app = App::new(false);
+        app.log_pane_height = 10;
+
+        // Push enough lines to enable scrolling
+        for i in 0..20 {
+            app.push_log_line(LogEntry {
+                timestamp: Utc::now(),
+                line: format!("line {i}"),
+            });
+        }
+
+        // At bottom by default (auto-scroll)
+        assert!(app.is_scrolled_to_bottom());
+
+        // Scroll up
+        app.scroll_up(5);
+        assert!(!app.is_scrolled_to_bottom());
+
+        // Scroll back to bottom
+        app.scroll_to_bottom();
+        assert!(app.is_scrolled_to_bottom());
+    }
+
+    #[test]
+    fn tab_cycles_focus() {
+        let mut app = App::new(false);
+        assert_eq!(app.focus, Focus::LoopsList);
+
+        app.handle_input(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::LogPane);
+
+        app.handle_input(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::LoopsList);
+    }
+
+    // FR-2d: Non-NAUTILOOP_RESULT lines are unchanged
+    #[test]
+    fn non_nautiloop_lines_pass_through() {
+        let line = "[implement/r1] Starting implement with claude...";
+        let result = compress_nautiloop_result(line);
+        assert_eq!(result, line);
     }
 }
