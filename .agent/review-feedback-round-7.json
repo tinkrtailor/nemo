@@ -1,0 +1,70 @@
+{
+  "round": 7,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 43,
+      "description": "target_dir_bytes uses `find -maxdepth 3` which significantly underestimates actual target directory size. Rust target directories commonly have depths of 5+ (e.g., target/debug/build/<crate>-<hash>/out/...). The spec FR-2a explicitly specifies `du -sb /work/target`. On a 5GB target dir, maxdepth 3 could report 1-2GB, misleading operators about compile progress. The comment says 'faster than du' but the accuracy loss undermines the diagnostic purpose.",
+      "suggestion": "Increase to `-maxdepth 6` for a better accuracy/speed tradeoff, or use `du -sb --max-depth=0 /work/target` which only stats the top-level directory without recursing into subdirectories (still accurate for total size via filesystem metadata). Alternatively, accept the approximation but document it in the response or CLI output."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 244,
+      "description": "The shell fallback command on exec timeout emits a JSON string with `target_dir_artifacts: 0` (integer) but the script's normal output path and the Rust parser treat `target_dir_artifacts` as `Option<u64>` (nullable). When `timeout 2` kills the script and the fallback fires, the parser gets `0` instead of `null`, creating an inconsistency: operators see '0 artifacts' (meaning empty target dir) rather than 'unavailable' (meaning we couldn't check). This gives a false signal that no compilation has happened.",
+      "suggestion": "Change the fallback JSON to use `\"target_dir_artifacts\":null` instead of `0` so partial/timed-out results consistently show as unavailable."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 341,
+      "description": "The metrics fetch constructs the HTTP request via `axum::http::Request` which is a re-export of the `http` crate. If axum upgrades to `http` v2 while kube-rs stays on v1 (or vice versa), this becomes a compile error. This is a fragile transitive dependency coupling. The kube crate already re-exports `http` as `kube::client::http`.",
+      "suggestion": "Import `http::Request` directly from the `http` crate (already a transitive dependency) or use `kube`'s re-export, rather than going through `axum::http`."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 45,
+      "description": "`ls -fA` includes hidden files (dotfiles) that plain `ls` (piped) would not. In target/debug/deps/, files like `.cargo-lock` are hidden entries. The spec's FR-2a command is `ls /work/target/debug/deps 2>/dev/null | wc -l` which does NOT count hidden files when piped. The -f flag implies -a (all files), and while -A removes . and .., it still includes dotfiles. This inflates the artifact count relative to the spec's intended command.",
+      "suggestion": "Use `ls /work/target/debug/deps 2>/dev/null | wc -l` to match the spec exactly (piped ls already skips sorting on most modern GNU coreutils), or use `ls -U /work/target/debug/deps 2>/dev/null | wc -l` if you specifically want unsorted output without including dotfiles."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm.rs",
+      "line": 405,
+      "description": "When selection changes while the side panel is in Introspect mode, `app.introspect` is cleared and `introspect_status` is set to 'Loading...' (line 407-408), and the new loop_id is sent to the introspect channel (line 411). However, if the newly selected loop is terminal, the `IntrospectStatus` event with 'Pod gone...' races with the 'Loading...' assignment. More importantly, when selection changes while the panel is NOT in Introspect mode (Closed or Inspect), `introspect_status` is still set to 'Loading...' but no introspect_tx send occurs. Later when toggling to Introspect, the user sees stale 'Loading...' until the first poll completes — a minor but confusing UX gap.",
+      "suggestion": "Set `introspect_status` to a neutral message like 'Press p to toggle introspect pane' when the panel is not in Introspect mode during selection change, and only set 'Loading...' when actively entering Introspect mode."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 156,
+      "description": "When exec times out (ExecError::Timeout), the handler returns a 200 with empty processes and default worktree but DOES include the container_stats from the concurrent metrics fetch. This is good partial degradation per FR-2c. However, when the OUTER 3s handler timeout fires (line 139-145), the response is HTTP 503 and ALL data is discarded — including both exec results AND metrics. If the outer timeout fires because the pod listing was slow (e.g., 2s) but the exec+metrics completed successfully, the valid data is thrown away.",
+      "suggestion": "This is an inherent limitation of the timeout-wrapping approach. To preserve data when the outer timeout fires, you'd need to restructure so the pod listing has its own timeout separate from exec+metrics. Acceptable as-is given the 3s budget constraint."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/ps.rs",
+      "line": 96,
+      "description": "run_watch_loop uses crossterm raw mode but doesn't register a panic hook or signal handler to restore the terminal. If the process is killed (SIGTERM/SIGKILL) or panics during watch mode, the terminal will be left in raw mode requiring the user to run `reset`.",
+      "suggestion": "Add a panic hook that calls disable_raw_mode() and LeaveAlternateScreen, similar to how ratatui's init() does it. For signals, consider using ctrlc crate or tokio::signal."
+    },
+    {
+      "severity": "low",
+      "category": "performance",
+      "file": "images/base/nautiloop-introspect",
+      "line": 47,
+      "description": "`git status --porcelain` can be slow on large repositories with many untracked files, potentially taking 1-2 seconds on a cold git index. Combined with the find, ls, and jq operations, the script may frequently approach the 2s timeout on large Rust monorepos, causing the fallback to fire and producing empty results — exactly when the feature is most needed.",
+      "suggestion": "Use `git -C /work status --porcelain -uno 2>/dev/null | wc -l` to skip untracked files (which aren't meaningful for commit dirtiness), or `git -C /work diff --name-only HEAD 2>/dev/null | wc -l` for a faster check."
+    }
+  ]
+}
