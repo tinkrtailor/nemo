@@ -1,0 +1,64 @@
+#!/bin/sh
+# nautiloop-introspect — collect agent container runtime state (FR-2d).
+# Output: newline-delimited JSON, one object per section.
+# Designed to run in < 2s. Read-only: ps, du, git-status. No writes.
+set -e
+
+# Section 1: processes (top 30 by CPU)
+ps_output=$(ps -eo pid,ppid,user,pcpu,etime,args --sort=-pcpu --no-headers 2>/dev/null | head -30 || echo "")
+ps_json=$(echo "$ps_output" | jq -Rs '
+  [split("\n") | .[] | select(length > 0) |
+    capture("^\\s*(?<pid>[0-9]+)\\s+(?<ppid>[0-9]+)\\s+(?<user>\\S+)\\s+(?<cpu>[0-9.]+)\\s+(?<etime>\\S+)\\s+(?<cmd>.+)$") |
+    {
+      pid: (.pid | tonumber),
+      ppid: (.ppid | tonumber),
+      user: .user,
+      cpu_percent: (.cpu | tonumber),
+      cmd: (.cmd | ltrimstr(" ")),
+      age_seconds: (
+        .etime |
+        if test("^[0-9]+-") then
+          (capture("^(?<d>[0-9]+)-(?<h>[0-9]+):(?<m>[0-9]+):(?<s>[0-9]+)$") |
+            ((.d|tonumber)*86400 + (.h|tonumber)*3600 + (.m|tonumber)*60 + (.s|tonumber)))
+        elif test("^[0-9]+:[0-9]+:[0-9]+$") then
+          (capture("^(?<h>[0-9]+):(?<m>[0-9]+):(?<s>[0-9]+)$") |
+            ((.h|tonumber)*3600 + (.m|tonumber)*60 + (.s|tonumber)))
+        elif test("^[0-9]+:[0-9]+$") then
+          (capture("^(?<m>[0-9]+):(?<s>[0-9]+)$") |
+            ((.m|tonumber)*60 + (.s|tonumber)))
+        else 0
+        end
+      )
+    }
+  ]
+')
+
+# Section 2: worktree info
+target_bytes=$(du -sb /work/target 2>/dev/null | awk '{print $1}' || echo "null")
+target_artifacts=$(ls /work/target/debug/deps 2>/dev/null | wc -l || echo "0")
+head_sha=$(git -C /work rev-parse HEAD 2>/dev/null || echo "null")
+uncommitted=$(git -C /work status --porcelain 2>/dev/null | wc -l || echo "0")
+
+# Quote strings, handle nulls
+if [ "$target_bytes" = "" ] || [ "$target_bytes" = "null" ]; then
+  target_bytes="null"
+fi
+if [ "$head_sha" = "null" ] || [ "$head_sha" = "" ]; then
+  head_sha_json="null"
+else
+  head_sha_json="\"$head_sha\""
+fi
+
+# Build final JSON
+cat <<ENDJSON
+{
+  "processes": $ps_json,
+  "worktree": {
+    "path": "/work",
+    "target_dir_bytes": $target_bytes,
+    "target_dir_artifacts": $(echo "$target_artifacts" | tr -d ' '),
+    "uncommitted_files": $(echo "$uncommitted" | tr -d ' '),
+    "head_sha": $head_sha_json
+  }
+}
+ENDJSON

@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod handlers;
+pub mod introspect;
 pub mod sse;
 
 use std::sync::Arc;
@@ -22,6 +23,10 @@ pub struct AppState {
     /// Optional kube client for creating K8s Secrets during credential registration.
     /// None in test environments.
     pub kube_client: Option<kube::Client>,
+    /// Optional Postgres pool for snapshot recording (FR-6a).
+    /// Separate from the trait-based StateStore so we can write directly
+    /// without adding snapshot methods to the test-focused trait.
+    pub pool: Option<sqlx::PgPool>,
 }
 
 /// Build the axum router with all endpoints and auth middleware.
@@ -57,6 +62,7 @@ fn build_routes(_state: AppState) -> Router<AppState> {
         .route("/status", get(handlers::status))
         .route("/logs/{id}", get(handlers::logs))
         .route("/pod-logs/{id}", get(handlers::pod_logs))
+        .route("/pod-introspect/{id}", get(introspect::pod_introspect))
         .route("/cancel/{id}", delete(handlers::cancel))
         .route("/approve/{id}", post(handlers::approve))
         .route("/resume/{id}", post(handlers::resume))

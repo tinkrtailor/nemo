@@ -86,6 +86,10 @@ RUN chmod +x /usr/local/bin/opencode && /usr/local/bin/opencode --version
 COPY images/base/nautiloop-agent-entry /usr/local/bin/nautiloop-agent-entry
 RUN chmod +x /usr/local/bin/nautiloop-agent-entry
 
+# FR-2d: Pod introspection script (read-only runtime diagnostics)
+COPY images/base/nautiloop-introspect /usr/local/bin/nautiloop-introspect
+RUN chmod +x /usr/local/bin/nautiloop-introspect
+
 # Default prompt templates (FR-33)
 # Build context must be the repo root: docker build -f images/base/Dockerfile .
 # Prompts are embedded in the image as fallback defaults.

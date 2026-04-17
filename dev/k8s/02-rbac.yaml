@@ -58,6 +58,17 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "update", "get"]
+  # FR-3a: pods/exec for pod introspection (nemo ps / helm introspect pane)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+  # FR-3a: pods/log for nemo logs --tail
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -68,6 +79,30 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: nautiloop-api-server
+subjects:
+  - kind: ServiceAccount
+    name: nautiloop-api-server
+    namespace: nautiloop-system
+---
+# FR-3b: cluster-scoped access to metrics.k8s.io for pod introspection stats.
+# Skippable when metrics-server is absent; handler degrades gracefully (FR-1e).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nautiloop-metrics-reader
+rules:
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nautiloop-api-server-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nautiloop-metrics-reader
 subjects:
   - kind: ServiceAccount
     name: nautiloop-api-server

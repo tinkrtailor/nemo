@@ -31,6 +31,9 @@ pub struct NautiloopConfig {
     /// look up test commands for the TEST stage (FR-42a, FR-42b).
     #[serde(default)]
     pub services: HashMap<String, ServiceConfig>,
+    /// Observability configuration from `[observability]` in nemo.toml.
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
 }
 
 /// Configuration for a single service in the monorepo.
@@ -158,6 +161,15 @@ impl Default for HardenMergeConfig {
             auto_merge_spec_pr: true,
         }
     }
+}
+
+/// Observability configuration from `[observability]` in nemo.toml.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ObservabilityConfig {
+    /// When true, every /pod-introspect response for an active loop is
+    /// persisted to the pod_snapshots table (FR-6a). Default: false.
+    #[serde(default)]
+    pub record_introspection: bool,
 }
 
 fn default_true() -> bool {

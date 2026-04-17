@@ -113,6 +113,19 @@ impl NemoClient {
         Ok(())
     }
 
+    /// Get the raw HTTP response (status + body) without deserializing.
+    /// Used when the caller needs to inspect the status code (e.g., 410, 425).
+    pub async fn get_response(&self, path: &str) -> Result<reqwest::Response> {
+        let url = format!("{}{path}", self.base_url);
+        let mut req = self.client.get(&url);
+
+        if let Some(auth) = self.auth_header() {
+            req = req.header("authorization", auth);
+        }
+
+        Ok(req.send().await?)
+    }
+
     /// Stream SSE events from a URL. Returns raw text lines.
     pub async fn get_stream(&self, path: &str) -> Result<reqwest::Response> {
         let url = format!("{}{path}", self.base_url);

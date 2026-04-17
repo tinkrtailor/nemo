@@ -37,6 +37,43 @@ pub struct LoopSummary {
     pub updated_at: String,
 }
 
+/// GET /pod-introspect/:loop_id response.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct PodIntrospectResponse {
+    pub loop_id: uuid::Uuid,
+    pub pod_name: String,
+    pub pod_phase: String,
+    pub collected_at: String,
+    pub container_stats: Option<ContainerStats>,
+    pub processes: Vec<ProcessInfo>,
+    pub worktree: WorktreeInfo,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ContainerStats {
+    pub cpu_millicores: u64,
+    pub memory_bytes: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub ppid: u32,
+    pub user: String,
+    pub cpu_percent: f64,
+    pub cmd: String,
+    pub age_seconds: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct WorktreeInfo {
+    pub path: String,
+    pub target_dir_artifacts: Option<u64>,
+    pub target_dir_bytes: Option<u64>,
+    pub uncommitted_files: u64,
+    pub head_sha: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct CredentialsResponse {
     pub engineer: String,

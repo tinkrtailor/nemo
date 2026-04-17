@@ -17,9 +17,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use tokio::sync::{mpsc, watch};
 
-use crate::api_types::{InspectResponse, LoopSummary, RoundSummary};
+use crate::api_types::{InspectResponse, LoopSummary, PodIntrospectResponse, RoundSummary};
 use crate::client::NemoClient;
-use crate::commands::{inspect, status};
+use crate::commands::{inspect, ps, status};
 
 const BG: Color = Color::Rgb(15, 15, 14);
 const SURFACE: Color = Color::Rgb(26, 25, 24);
@@ -44,6 +44,16 @@ enum AppEvent {
     InspectError(String, String),
     LogLine(uuid::Uuid, String),
     LogStatus(uuid::Uuid, String),
+    IntrospectSnapshot(uuid::Uuid, PodIntrospectResponse),
+    IntrospectStatus(uuid::Uuid, String),
+}
+
+/// Side-panel toggle states for the 'p' key (FR-5a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidePanel {
+    Closed,
+    Inspect,
+    Introspect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +85,7 @@ enum AppAction {
     SourceChanged,
     ReconnectLogs,
     Trigger(LoopCommand),
+    PanelToggle,
 }
 
 #[derive(serde::Deserialize)]
@@ -110,6 +121,9 @@ struct App {
     inspect_status: String,
     inspect: Option<InspectResponse>,
     team_view: bool,
+    side_panel: SidePanel,
+    introspect: Option<PodIntrospectResponse>,
+    introspect_status: String,
 }
 
 impl App {
@@ -125,6 +139,9 @@ impl App {
             inspect_status: "Loading inspect data...".to_string(),
             inspect: None,
             team_view,
+            side_panel: SidePanel::Closed,
+            introspect: None,
+            introspect_status: "Press 'p' to toggle introspect pane".to_string(),
         }
     }
 
@@ -261,6 +278,14 @@ impl App {
         };
     }
 
+    fn cycle_side_panel(&mut self) {
+        self.side_panel = match self.side_panel {
+            SidePanel::Closed => SidePanel::Inspect,
+            SidePanel::Inspect => SidePanel::Introspect,
+            SidePanel::Introspect => SidePanel::Closed,
+        };
+    }
+
     fn push_log_line(&mut self, line: String) {
         if self.logs.len() == MAX_LOG_LINES {
             self.logs.pop_front();
@@ -310,6 +335,10 @@ impl App {
                 self.cycle_log_source();
                 AppAction::SourceChanged
             }
+            KeyCode::Char('p') => {
+                self.cycle_side_panel();
+                AppAction::PanelToggle
+            }
             KeyCode::Char('a') => AppAction::Trigger(LoopCommand::Approve),
             KeyCode::Char('u') => AppAction::Trigger(LoopCommand::Resume),
             KeyCode::Char('c') => AppAction::Trigger(LoopCommand::Cancel),
@@ -351,11 +380,13 @@ async fn run_app(
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let (selection_tx, selection_rx) = watch::channel(None::<LogSelection>);
     let (inspect_tx, inspect_rx) = watch::channel(None::<String>);
+    let (introspect_tx, introspect_rx) = watch::channel(None::<uuid::Uuid>);
 
     spawn_input_task(event_tx.clone());
     spawn_status_task(client.clone(), engineer.clone(), team, event_tx.clone());
     spawn_log_task(client.clone(), selection_rx, event_tx.clone());
     spawn_inspect_task(client.clone(), inspect_rx, event_tx.clone());
+    spawn_introspect_task(client.clone(), introspect_rx, event_tx.clone());
 
     let mut app = App::new(team);
 
@@ -374,12 +405,24 @@ async fn run_app(
                 AppAction::SelectionChanged => {
                     app.reset_logs();
                     app.reset_inspect();
+                    app.introspect = None;
                     let _ = selection_tx.send(app.current_log_selection());
                     let _ = inspect_tx.send(app.selected_branch());
+                    if app.side_panel == SidePanel::Introspect {
+                        let _ = introspect_tx.send(app.selected_loop_id);
+                    }
                 }
                 AppAction::ReconnectLogs | AppAction::SourceChanged => {
                     app.reset_logs();
                     let _ = selection_tx.send(app.current_log_selection());
+                }
+                AppAction::PanelToggle => {
+                    // Update introspect polling based on panel state
+                    if app.side_panel == SidePanel::Introspect {
+                        let _ = introspect_tx.send(app.selected_loop_id);
+                    } else {
+                        let _ = introspect_tx.send(None);
+                    }
                 }
                 AppAction::Trigger(command) => {
                     if let Some(loop_id) = app.selected_loop_id {
@@ -452,6 +495,17 @@ async fn run_app(
             AppEvent::LogStatus(loop_id, status_line) => {
                 if Some(loop_id) == app.selected_loop_id {
                     app.log_status = status_line;
+                }
+            }
+            AppEvent::IntrospectSnapshot(loop_id, snapshot) => {
+                if Some(loop_id) == app.selected_loop_id {
+                    app.introspect_status = format!("updated {}", snapshot.collected_at);
+                    app.introspect = Some(snapshot);
+                }
+            }
+            AppEvent::IntrospectStatus(loop_id, status_msg) => {
+                if Some(loop_id) == app.selected_loop_id {
+                    app.introspect_status = status_msg;
                 }
             }
         }
@@ -629,6 +683,81 @@ async fn poll_inspect_for_branch(
                 {
                     return;
                 }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+fn spawn_introspect_task(
+    client: NemoClient,
+    mut loop_id_rx: watch::Receiver<Option<uuid::Uuid>>,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+) {
+    tokio::spawn(async move {
+        let mut current_task: Option<tokio::task::JoinHandle<()>> = None;
+
+        loop {
+            if let Some(task) = current_task.take() {
+                task.abort();
+            }
+
+            if let Some(loop_id) = *loop_id_rx.borrow() {
+                let client = client.clone();
+                let event_tx = event_tx.clone();
+                current_task = Some(tokio::spawn(async move {
+                    poll_introspect_for_loop(client, loop_id, event_tx).await;
+                }));
+            }
+
+            if loop_id_rx.changed().await.is_err() {
+                if let Some(task) = current_task {
+                    task.abort();
+                }
+                break;
+            }
+        }
+    });
+}
+
+async fn poll_introspect_for_loop(
+    client: NemoClient,
+    loop_id: uuid::Uuid,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+) {
+    loop {
+        let loop_id_str = loop_id.to_string();
+        match ps::fetch(&client, &loop_id_str).await {
+            Ok(ps::FetchResult::Ok(snapshot)) => {
+                if event_tx
+                    .send(AppEvent::IntrospectSnapshot(loop_id, snapshot))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(ps::FetchResult::Terminal(msg)) => {
+                let _ = event_tx.send(AppEvent::IntrospectStatus(
+                    loop_id,
+                    format!("Pod gone. {msg}"),
+                ));
+                return; // FR-5c: no polling after terminal
+            }
+            Ok(ps::FetchResult::NotReady(msg)) => {
+                let _ = event_tx.send(AppEvent::IntrospectStatus(loop_id, msg));
+            }
+            Ok(ps::FetchResult::Timeout) => {
+                let _ = event_tx.send(AppEvent::IntrospectStatus(
+                    loop_id,
+                    "introspect timeout, retrying...".to_string(),
+                ));
+            }
+            Err(e) => {
+                let _ = event_tx.send(AppEvent::IntrospectStatus(
+                    loop_id,
+                    format!("introspect error: {e}"),
+                ));
             }
         }
 
@@ -1017,7 +1146,23 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         .split(content[1]);
 
     frame.render_widget(render_details(app), right[0]);
-    frame.render_widget(render_logs(app, right[1]), right[1]);
+
+    // FR-5a/FR-5d: log pane is always visible; introspect pane overlays right side
+    match app.side_panel {
+        SidePanel::Closed | SidePanel::Inspect => {
+            frame.render_widget(render_logs(app, right[1]), right[1]);
+        }
+        SidePanel::Introspect => {
+            // FR-5d: horizontal split — logs left, introspect right
+            let log_introspect = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .split(right[1]);
+            frame.render_widget(render_logs(app, log_introspect[0]), log_introspect[0]);
+            frame.render_widget(render_introspect_pane(app), log_introspect[1]);
+        }
+    }
+
     frame.render_stateful_widget(render_loop_selector(app), content[0], &mut app.list_state);
     frame.render_widget(render_footer(app), root[1]);
 }
@@ -1162,6 +1307,126 @@ fn render_logs(app: &App, area: Rect) -> Paragraph<'static> {
         .scroll((scroll, 0))
 }
 
+/// Render the introspect pane (FR-5b).
+fn render_introspect_pane(app: &App) -> Paragraph<'static> {
+    let body = if let Some(snapshot) = &app.introspect {
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("Pod ", Style::default().fg(MUTED)),
+                Span::styled(snapshot.pod_name.clone(), Style::default().fg(TEXT)),
+                Span::styled("  Phase ", Style::default().fg(MUTED)),
+                Span::styled(
+                    snapshot.pod_phase.clone(),
+                    Style::default()
+                        .fg(if snapshot.pod_phase == "Running" {
+                            GREEN
+                        } else {
+                            AMBER
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+        ];
+
+        // Stats section
+        match &snapshot.container_stats {
+            Some(stats) => {
+                let mem_mib = stats.memory_bytes / (1024 * 1024);
+                lines.push(Line::from(vec![
+                    Span::styled("CPU ", Style::default().fg(MUTED)),
+                    Span::styled(format!("{}m", stats.cpu_millicores), Style::default().fg(TEXT)),
+                    Span::styled("  Mem ", Style::default().fg(MUTED)),
+                    Span::styled(format!("{mem_mib} MiB"), Style::default().fg(TEXT)),
+                ]));
+            }
+            None => {
+                lines.push(Line::from(Span::styled(
+                    "Stats: unavailable",
+                    Style::default().fg(MUTED),
+                )));
+            }
+        }
+
+        // Worktree section
+        let wt = &snapshot.worktree;
+        let head = wt.head_sha.as_deref().map(|s| &s[..s.len().min(7)]).unwrap_or("-");
+        let target_info = match (wt.target_dir_bytes, wt.target_dir_artifacts) {
+            (Some(bytes), Some(arts)) => {
+                let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                format!("{gib:.1} GiB ({arts} arts)")
+            }
+            _ => "-".to_string(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("HEAD ", Style::default().fg(MUTED)),
+            Span::styled(head.to_string(), Style::default().fg(TEXT)),
+            Span::styled(format!("  dirty={}", wt.uncommitted_files), Style::default().fg(
+                if wt.uncommitted_files > 0 { AMBER } else { TEXT }
+            )),
+            Span::styled(format!("  target={target_info}"), Style::default().fg(MUTED)),
+        ]));
+
+        lines.push(Line::from(Span::styled("", Style::default())));
+
+        // Processes section (top 10 by CPU)
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{:<5}{:<5}{:<6}{:<6}{}",
+                "PID", "PPID", "CPU%", "AGE", "COMMAND"
+            ),
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+        )));
+        for p in snapshot.processes.iter().take(10) {
+            let age = if p.age_seconds >= 3600 {
+                format!("{}h{}m", p.age_seconds / 3600, (p.age_seconds % 3600) / 60)
+            } else if p.age_seconds >= 60 {
+                format!("{}m", p.age_seconds / 60)
+            } else {
+                format!("{}s", p.age_seconds)
+            };
+            let cpu_color = if p.cpu_percent > 10.0 { AMBER } else { TEXT };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<5}", p.pid), Style::default().fg(TEXT)),
+                Span::styled(format!("{:<5}", p.ppid), Style::default().fg(MUTED)),
+                Span::styled(format!("{:<6.1}", p.cpu_percent), Style::default().fg(cpu_color)),
+                Span::styled(format!("{:<6}", age), Style::default().fg(TEXT)),
+                Span::styled(
+                    p.cmd.chars().take(40).collect::<String>(),
+                    Style::default().fg(TEXT),
+                ),
+            ]));
+        }
+
+        if snapshot.processes.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "(no processes)",
+                Style::default().fg(MUTED),
+            )));
+        }
+
+        Text::from(lines)
+    } else {
+        Text::from(vec![Line::from(Span::styled(
+            app.introspect_status.clone(),
+            Style::default().fg(MUTED),
+        ))])
+    };
+
+    Paragraph::new(body)
+        .block(
+            Block::default()
+                .title(Span::styled(
+                    " introspect ",
+                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER).bg(SURFACE))
+                .style(Style::default().bg(SURFACE)),
+        )
+        .style(Style::default().fg(TEXT).bg(SURFACE))
+        .wrap(Wrap { trim: false })
+}
+
 fn latest_round(inspect: &InspectResponse) -> Option<&RoundSummary> {
     inspect.rounds.iter().max_by_key(|round| round.round)
 }
@@ -1299,7 +1564,9 @@ fn render_footer(app: &App) -> Paragraph<'static> {
         Span::styled("l", Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
         Span::styled(" log source  ", Style::default().fg(MUTED)),
         Span::styled("r", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-        Span::styled(" reconnect logs  ", Style::default().fg(MUTED)),
+        Span::styled(" reconnect  ", Style::default().fg(MUTED)),
+        Span::styled("p", Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
+        Span::styled(" introspect  ", Style::default().fg(MUTED)),
         Span::styled(
             "a/u/c",
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
