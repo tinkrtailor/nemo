@@ -1,0 +1,62 @@
+{
+  "round": 10,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 250,
+      "description": "commit_spec_to_branch push failure does not clean up the remote branch. If write_file_as succeeds and push_branch fails, the function returns Err and the caller deletes only the local branch. That's correct (nothing pushed). But if push_branch succeeds and then the caller's set_current_sha (line 268) fails, the caller correctly calls delete_remote_branch. However, inside commit_spec_to_branch itself, if get_branch_sha fails after write_file_as succeeds, the error propagates upward and the caller deletes the local branch but pushed_to_remote is still false (set in Ok arm only), so the remote branch is NOT cleaned up even though the spec commit exists locally. The push hasn't happened at this point so this is actually fine — get_branch_sha failure happens before push_branch. The error paths are sound.",
+      "suggestion": "No change needed — this observation confirms the error paths are correct. Disregard."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 75,
+      "description": "A spec_path that is solely whitespace (e.g., '   ') passes the traversal, absolute path, and control character checks (spaces are 0x20, not < 0x20). On the legacy path (no spec_content), this would attempt git.read_file with a whitespace-only path. On the local path, it would fail the .md extension check. This is a marginal edge case that only affects legacy callers.",
+      "suggestion": "Consider adding a trim + is_empty check for spec_path early in validation to reject whitespace-only paths for all callers."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 101,
+      "description": "The stem validation check `stem.starts_with('.')` rejects hidden files like '.hidden.md', but the test at line ~2010 asserts the error message contains 'non-hidden' while the actual error message says 'non-empty, non-hidden name before .md'. The test passes because it uses `contains(\"non-hidden\")`, but this is fragile — the error message says 'non-hidden' but the validation also catches empty and whitespace-only stems with the same error. This conflation means a user with path 'specs/.md' gets the 'non-hidden' message when the real issue is an empty stem.",
+      "suggestion": "Split the stem validation into separate error messages: one for empty/whitespace-only stems and another for hidden (dot-prefixed) stems, to give users actionable feedback."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/start.rs",
+      "line": 34,
+      "description": "The CLI reads the entire spec file into memory via std::fs::read_to_string before sending it to the server. There is no client-side size check — a 2 GB file would be read fully into memory before the server rejects it with 413. The spec says FR-3b: '1 MB per spec (enforced server-side)' and the acceptance criteria say 'rejected client-side or server-side'. The current implementation is server-side only.",
+      "suggestion": "Add a client-side check after read_to_string: if spec_content.len() > 1_048_576, error immediately with a clear message instead of uploading to the server. This also satisfies acceptance criteria #3's 'client-side' mention."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 138,
+      "description": "generate_branch_name receives &spec_content (a reference to the String). The spec_content was moved out of req.spec_content via .take() into a local variable. This variable lives until end of function scope (~line 306), holding up to 1 MB in memory even after it's no longer needed (after write_file_as at line 1042). This is the previously noted minor memory efficiency issue — acceptable given the 1 MB cap.",
+      "suggestion": "No change required — documenting as accepted."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 62,
+      "description": "Path validation for legacy callers (no spec_content) now rejects paths with backslashes, absolute paths, '..' components, '.' components, empty segments, and control characters. This is stricter than the previous behavior (no validation at all). While this is good security practice, it's a potential breaking change for NFR-1 ('existing callers keep working'). The implementation acknowledges this in comments and adds a test (test_start_legacy_non_md_path_not_rejected) showing that non-.md paths still work on the legacy path. The traversal/absolute checks are applied universally, which is a deliberate and reasonable hardening choice.",
+      "suggestion": "No change needed — the implementation correctly documents this as intentional hardening and the test coverage is adequate."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/git/mod.rs",
+      "line": 848,
+      "description": "Mock write_file uses sha2::Sha256 and hex crate for SHA generation. These dependencies (sha2, hex) must be available in the control-plane crate's dev-dependencies. The Cargo.toml changes in the diff only show cli/Cargo.toml adding tempfile. If sha2/hex are already workspace dependencies used by production code this is fine, but if they're new to the mock module, the build could fail.",
+      "suggestion": "Verify that sha2 and hex are already in control-plane/Cargo.toml dependencies (they likely are given the spec_content_hash computation in handlers.rs line 143)."
+    }
+  ]
+}
