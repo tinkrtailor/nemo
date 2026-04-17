@@ -406,12 +406,15 @@ async fn run_app(
                     app.reset_logs();
                     app.reset_inspect();
                     app.introspect = None;
-                    app.introspect_status = "Loading...".to_string();
+                    // Only show "Loading..." when actively polling; otherwise neutral message
+                    if app.side_panel == SidePanel::Introspect {
+                        app.introspect_status = "Loading...".to_string();
+                        let _ = introspect_tx.send(app.selected_loop_id);
+                    } else {
+                        app.introspect_status = "Press p to toggle introspect pane".to_string();
+                    }
                     let _ = selection_tx.send(app.current_log_selection());
                     let _ = inspect_tx.send(app.selected_branch());
-                    if app.side_panel == SidePanel::Introspect {
-                        let _ = introspect_tx.send(app.selected_loop_id);
-                    }
                 }
                 AppAction::ReconnectLogs | AppAction::SourceChanged => {
                     app.reset_logs();

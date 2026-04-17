@@ -241,7 +241,7 @@ async fn exec_introspect_script(
     let cmd = vec![
         "/bin/sh",
         "-c",
-        "timeout 2 /usr/local/bin/nautiloop-introspect 2>/dev/null || echo '{\"processes\":[],\"worktree\":{\"path\":\"/work\",\"target_dir_bytes\":null,\"target_dir_artifacts\":0,\"uncommitted_files\":0,\"head_sha\":null}}'",
+        "timeout 2 /usr/local/bin/nautiloop-introspect 2>/dev/null || echo '{\"processes\":[],\"worktree\":{\"path\":\"/work\",\"target_dir_bytes\":null,\"target_dir_artifacts\":null,\"uncommitted_files\":null,\"head_sha\":null}}'",
     ];
 
     let result = tokio::time::timeout(
@@ -337,8 +337,10 @@ async fn fetch_container_metrics(
         "/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods/{pod_name}"
     );
 
-    // kube::Client::request takes http::Request<Vec<u8>>
-    let request = axum::http::Request::get(&url)
+    // kube::Client::request takes http::Request<Vec<u8>>.
+    // Import from `http` crate directly rather than through axum's re-export
+    // to avoid breakage if axum and kube-rs diverge on http crate versions.
+    let request = http::Request::get(&url)
         .body(Vec::new())
         .ok()?;
 
@@ -761,13 +763,16 @@ mod tests {
 
     #[test]
     fn test_parse_introspect_output_partial_worktree() {
+        // Matches the fallback JSON emitted when `timeout 2` kills the script:
+        // all worktree fields are null so callers render "unavailable" instead of
+        // misleading zeros (e.g. "0 artifacts" implying empty target dir).
         let output = r#"{
             "processes": [],
             "worktree": {
                 "path": "/work",
                 "target_dir_bytes": null,
-                "target_dir_artifacts": 0,
-                "uncommitted_files": 0,
+                "target_dir_artifacts": null,
+                "uncommitted_files": null,
                 "head_sha": null
             }
         }"#;
@@ -775,6 +780,8 @@ mod tests {
         assert!(processes.is_empty());
         assert_eq!(worktree.path, "/work");
         assert_eq!(worktree.target_dir_bytes, None);
+        assert_eq!(worktree.target_dir_artifacts, None);
+        assert_eq!(worktree.uncommitted_files, 0); // null → default 0
         assert_eq!(worktree.head_sha, None);
     }
 }
