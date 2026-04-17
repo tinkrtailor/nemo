@@ -1,0 +1,78 @@
+{
+  "round": 4,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 112,
+      "description": "The outer 3s handler timeout wraps only the exec+metrics join. The preceding code — database lookup (`get_loop`), pod listing (`pods_api.list`), and pod sorting — runs OUTSIDE this timeout. A slow k8s API list or a slow Postgres query can push the total handler response time well beyond 3s. While FR-1c literally says 'pod exec', the intent is that callers never block longer than 3s. In practice, a degraded k8s API server listing pods could add 5-10s before the timeout even starts.",
+      "suggestion": "Wrap the entire handler body after the loop record lookup in a single 3s timeout, or at minimum add a separate timeout around `pods_api.list()` (e.g., 1s)."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 199,
+      "description": "The exec function nests a 3s timeout around `pods_api.exec()` AND a separate 2s timeout around the read loop. In the worst case the exec handshake takes ~3s (just under timeout) and then the read loop gets its own 2s — total ~5s inside the exec function. This exceeds the outer 3s handler timeout, which is correct (the outer timeout will fire). But it means the exec function's internal 3s timeout is redundant with the outer 3s handler timeout and can never actually trigger independently (the outer fires at the same time or earlier). The 3s exec timeout gives a false sense of an additional layer of protection.",
+      "suggestion": "Remove the inner 3s timeout on `pods_api.exec()` since the outer handler timeout already covers this, or reduce it to 1s so the total exec budget (1s handshake + 2s read) stays under 3s."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 248,
+      "description": "The metrics fetch uses `kube::api::DynamicObject` to deserialize the PodMetrics response from `metrics.k8s.io/v1beta1`. DynamicObject expects standard Kubernetes object structure with `apiVersion`, `kind`, `metadata`, and puts remaining fields in `.data`. PodMetrics responses include `timestamp`, `window`, and `containers` at the top level. Whether `containers` ends up in `.data` depends on DynamicObject's deserialization behavior — this is untested and could silently return None (making stats permanently unavailable even when metrics-server is healthy). There are no tests for this deserialization path.",
+      "suggestion": "Define a minimal typed `PodMetrics` struct with `containers: Vec<ContainerMetrics>` for type-safe deserialization, or add a unit test that verifies DynamicObject deserializes a sample PodMetrics JSON payload correctly."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 39,
+      "description": "The `target_dir_artifacts` count uses `ls -fA /work/target/debug/deps 2>/dev/null | wc -l` which counts ALL filesystem entries (files, directories, symlinks) in deps/. On a typical Rust project, deps/ contains both `.d` dependency files and compiled `.rlib`/`.rmeta` artifacts plus subdirectories. The count can be ~2x the actual number of compiled crate artifacts. While the spec says 'artifact count' is approximate, this inflates the number enough to confuse operators trying to gauge compile progress.",
+      "suggestion": "Use `find /work/target/debug/deps -maxdepth 1 -type f -name '*.rlib' -o -name '*.rmeta' 2>/dev/null | wc -l` for a more meaningful artifact count, or accept the approximation and document it."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm.rs",
+      "line": 691,
+      "description": "The `spawn_introspect_task` reads `*loop_id_rx.borrow()` on each loop iteration without calling `borrow_and_update()`. Since `borrow()` does NOT mark the value as seen in tokio's watch channel, `changed().await` at the bottom of the loop will always return immediately if any send has occurred since the watch was created (the 'seen' version never advances). After the first real send, every subsequent iteration may spin: borrow returns old/same value, changed() fires immediately because seen-version is stale. This mirrors the existing `spawn_inspect_task` pattern so it may work in practice due to the spawned polling task keeping the loop occupied, but it's technically incorrect and could cause a tight loop when the polling task exits quickly (e.g., terminal loop).",
+      "suggestion": "Use `loop_id_rx.borrow_and_update()` instead of `loop_id_rx.borrow()` to properly advance the seen-version, preventing spurious wakeups from `changed()`."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 8,
+      "description": "The `ps` command's `etime` (elapsed time) format varies by platform and duration. On some Linux systems, processes running less than 1 minute show etime as just seconds (e.g., `42`) without any colon. The jq regex only handles `D-HH:MM:SS`, `HH:MM:SS`, and `MM:SS` patterns. A bare number like `42` would fall through to `else 0`, losing the actual age for short-lived processes. In practice, most `ps` implementations on Debian/bookworm use `MM:SS` even for short durations, but this is not guaranteed.",
+      "suggestion": "Add a fourth branch: `elif test(\"^[0-9]+$\") then (. | tonumber)` to handle bare-seconds etime format."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 278,
+      "description": "parse_cpu_to_millicores truncates nanocores via integer division (e.g., `999999n` → 0 millicores). For very low CPU usage values reported in nanocores, the result will show 0m even when there's nonzero CPU activity. Similarly, `499999n` → 0m. This could make operators think a process is idle when it's actually consuming ~0.5m CPU.",
+      "suggestion": "Use rounding instead of truncation: `(nano.parse::<u64>().unwrap_or(0) + 500_000) / 1_000_000` for nanocores."
+    },
+    {
+      "severity": "low",
+      "category": "performance",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 70,
+      "description": "The handler lists ALL pods matching the job-name label, then sorts them to pick the best one. For a normal job this is 1-3 pods, but if a job has been retried many times (or a bug creates many pods), this fetches all of them. The kube API call doesn't use `limit` on ListParams.",
+      "suggestion": "Add `.limit(10)` to `ListParams` to bound the response size, or use `fieldSelector` to filter by phase=Running."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/ps.rs",
+      "line": 60,
+      "description": "The `run()` function calls `std::process::exit()` directly, which bypasses Drop impls and async runtime cleanup. The reqwest client's connection pool won't be cleaned up gracefully. While standard for CLIs, it could cause issues if upstream adds cleanup logic.",
+      "suggestion": "Return a typed exit code from `run()` and let the caller handle `std::process::exit()`, or accept as idiomatic CLI practice."
+    }
+  ]
+}
