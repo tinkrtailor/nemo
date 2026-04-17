@@ -1,0 +1,86 @@
+{
+  "round": 6,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 387,
+      "description": "FR-1b spec deviation: determine_trigger skips the judge for round 2 with non-low-severity findings and no recurring findings (line 396-398 returns None for round < 3). FR-1b states the judge is invoked when `verdict.clean == false`, which includes round 2 with high-severity findings. This means a round-2 verdict with only low-severity cosmetic nits correctly triggers the judge (Problem 1 triviality override), but a round-2 verdict with a mix of low and high findings—where the high ones are borderline—gets no judge oversight. More critically, a round-2 verdict with ONLY medium-severity findings (e.g., style/documentation) also skips the judge entirely, preventing triviality override for medium-severity nits that the judge could reasonably accept.",
+      "suggestion": "Either expand the round-2 trigger to include medium-severity findings, or document this as an intentional budget optimization with a code comment explaining the tradeoff. The spec says `verdict.clean == false` is a trigger for the judge—limiting to round >= 3 for non-low findings is a conscious deviation."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 679,
+      "description": "Harden audit path: when the judge is invoked for audit-found-issues at line 685-688, the verdict_json comes from `last_round.output` which is the last completed round. But `last_round` is computed earlier in the function scope and may be the audit round or a different stage round depending on ordering. If the last round was NOT the audit round (e.g., a prior revise round completed more recently), the judge receives the wrong verdict context. The review path (line 1091-1093) correctly uses `review_round.output` which is filtered to the review stage. The harden path uses a generic `last_round` without stage filtering.",
+      "suggestion": "Filter `last_round` to only audit-stage rounds when extracting verdict_json for the harden audit-found-issues judge invocation, similar to how the review path filters for review rounds."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 1085,
+      "description": "FR-1c states the judge is NOT invoked on `clean == true AND round == 1`. But the code at line 1085 routes ALL clean verdicts (any round) through `review_converge_clean` without ever invoking the judge. The spec says `exit_clean` in review means 'accept this implementation as converged' and FR-1a says the judge runs BEFORE any state transition. For clean verdicts at round > 1, the judge is never consulted. While clean verdicts don't need override, the spec's FR-1c exemption specifically for round 1 implies round 2+ clean verdicts should pass through the judge. This is a minor spec gap—clean verdicts don't need the judge—but the code doesn't match the spec's literal FR-1b/1c interaction.",
+      "suggestion": "Add a comment noting that clean verdicts skip the judge at all rounds (not just round 1), which is a reasonable optimization beyond what FR-1c strictly requires. The spec's exemption for round 1 was likely drafted assuming all clean verdicts are exempt; FR-1b's triggers all assume clean==false."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 234,
+      "description": "Token budget accounting is incomplete. MAX_SPEC_CHARS (10K) + MAX_ROUND_CHARS (6K) + MAX_VERDICT_CHARS (4K) = 20K chars, plus the prompt template (~2K), the JudgeInput JSON envelope overhead (loop_id, spec_path, phase, round, max_rounds), and recurring_findings (truncated to 10 entries but each entry can be large). At ~4 chars/token, 20K chars alone is ~5K tokens. Adding recurring_findings, the prompt template serialized as system, and the JSON overhead, the total easily exceeds the 8K input token budget from FR-4b. The recurring_findings truncation at 10 entries is good, but each entry's category+file+seen_in_rounds could add ~200 chars, totaling 2K more chars.",
+      "suggestion": "Reduce the individual budgets to leave more headroom: e.g., MAX_SPEC_CHARS=6K, MAX_ROUND_CHARS=4K, MAX_VERDICT_CHARS=2K, for a total of ~12K chars (~3K tokens) leaving room for the system prompt, recurring findings, and JSON overhead within the 8K token limit."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 310,
+      "description": "FR-7a one-shot exit_clean guard has a race condition in the MemoryStateStore (and potentially PgStateStore): between the `judge_decision_stats` query (line 199) and the `create_judge_decision` persistence (line 355), another concurrent tick for the same loop could also query stats, see no prior exit_clean, and both proceed to return exit_clean. With the single-threaded loop engine this is likely not an issue, but the PgStateStore has no transaction isolation to prevent it across multiple control-plane replicas.",
+      "suggestion": "For Stage 1 with a single loop engine instance this is acceptable. Document the assumption that the judge is only invoked from a single tick at a time per loop. For multi-replica scenarios, use a SELECT FOR UPDATE or advisory lock."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 698,
+      "description": "The round_summaries BTreeMap nesting assumes judge decision `d.round` matches a RoundRecord round number. In the review Continue path (driver.rs line 1160), `record.round += 1` happens AFTER the judge is invoked but the judge decision was persisted with the pre-increment round value. However, in the harden Continue path, `dispatch_revise` may also modify the round. If there's any path where the round is incremented before the judge decision is persisted (or after), the nesting lookup will miss. The code looks correct for the current paths, but the flat array fallback ensures no data is lost.",
+      "suggestion": "Add a comment documenting the invariant: judge decisions are always persisted with the round value at the time of invocation, before any increment."
+    },
+    {
+      "severity": "medium",
+      "category": "performance",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 469,
+      "description": "compute_recurring_findings deserializes issues from every prior round's output JSON on every evaluate() call, with O(current_issues * prior_issues) complexity. For a loop at round 10 with 10 issues per round, this is 100 deserialization + comparison operations. While acceptable for Stage 1, the function is called on every non-skipped judge invocation and the deserialized Issue structs are created and immediately dropped.",
+      "suggestion": "Acceptable for Stage 1 given the 10-call ceiling limits total invocations. Consider caching or pre-computing if Stage 2 increases call frequency."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 2134,
+      "description": "The redispatch_current_stage revise path reads the audit feedback file from git to check if a hint file exists. This is a git read operation on every redispatch, even when no hint was ever written. For most loops this is a wasted I/O call that will fail (and is_ok() will be false). Harmless but slightly wasteful.",
+      "suggestion": "Minor optimization: only check for the file if there's a signal that a hint was written (e.g., store a flag in the round record). Not needed for Stage 1."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 161,
+      "description": "The evaluate() method takes 9 parameters (#[allow(clippy::too_many_arguments)] is used). While functional, this is a code smell. A builder pattern or context struct would improve readability.",
+      "suggestion": "Consider accepting a struct parameter (reuse JudgeInput minus the computed fields) instead of 9 separate arguments. Low priority."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/inspect.rs",
+      "line": 68,
+      "description": "FR-6c asks for judge decisions to be shown 'inline with each round'. The implementation nests them correctly in the RoundSummary and displays them in the CLI loop. However, the flat `judge_decisions` array is also sent in the API response (InspectResponse) but is NOT rendered in the CLI output at all. The original review feedback round 4 noted this redundancy. The flat array is useful for API consumers but the CLI ignoring it is fine since the inline display is the primary UX.",
+      "suggestion": "No code change needed. The inline display satisfies FR-6c. The flat array in the API response is a bonus for programmatic consumers."
+    }
+  ]
+}
