@@ -72,9 +72,9 @@ pub async fn start(
         }
         // Check for ".." as a path component (traversal), not as a substring.
         // This allows legitimate filenames containing ".." (e.g. "v2..final.md").
-        if req.spec_path.split('/').any(|seg| seg == "..") {
+        if req.spec_path.split('/').any(|seg| seg == ".." || seg == "." || seg.is_empty()) {
             return Err(NautiloopError::BadRequest(
-                "spec_path must not contain '..' path traversal".to_string(),
+                "spec_path must not contain '..', '.', or empty path segments".to_string(),
             ));
         }
         if !req.spec_path.ends_with(".md") {
@@ -90,9 +90,9 @@ pub async fn start(
             .unwrap_or(&req.spec_path)
             .strip_suffix(".md")
             .unwrap_or("");
-        if stem.is_empty() || stem.trim().is_empty() {
+        if stem.is_empty() || stem.trim().is_empty() || stem.starts_with('.') {
             return Err(NautiloopError::BadRequest(
-                "spec_path filename must have a non-empty name before '.md'".to_string(),
+                "spec_path filename must have a non-empty, non-hidden name before '.md'".to_string(),
             ));
         }
         if req.spec_path.bytes().any(|b| b < 0x20) {
@@ -236,6 +236,13 @@ pub async fn start(
 
     // FR-2a: If spec was uploaded locally, commit it onto the agent branch as the first commit.
     // FR-3d: Use the engineer's identity for the spec commit, not the control-plane default.
+    //
+    // NOTE: The spec commit is local to the bare repo until the loop engine pushes the branch
+    // when it starts working. If the control-plane crashes between returning 201 and the loop
+    // engine picking up the Pending row, the spec content is lost (the DB row references a SHA
+    // that doesn't exist on the remote). This is an accepted durability gap: the loop engine
+    // will fail and mark the loop as Failed, and the engineer can re-submit. Adding a push here
+    // would add latency to the synchronous API path for a rare crash scenario.
     if spec_from_local {
         // Look up engineer identity from stored credentials (same as loop engine driver).
         // Failure here means the DB row exists in Pending state with a git branch but
@@ -252,17 +259,19 @@ pub async fn start(
                 return Err(e);
             }
         };
-        let mut engineer_name: Option<String> = None;
-        let mut engineer_email: Option<String> = None;
-        for c in &all_creds {
-            if c.valid {
-                if c.provider == "_name" && engineer_name.is_none() {
-                    engineer_name = Some(c.credential_ref.clone());
-                } else if c.provider == "_email" && engineer_email.is_none() {
-                    engineer_email = Some(c.credential_ref.clone());
-                }
-            }
-        }
+        // Use .find() for deterministic credential selection, consistent with loop engine
+        // (driver.rs). Sort by updated_at descending to prefer the most recently updated
+        // credential when multiple valid entries exist for the same provider.
+        let mut sorted_creds = all_creds.clone();
+        sorted_creds.sort_by_key(|c| std::cmp::Reverse(c.updated_at));
+        let engineer_name = sorted_creds
+            .iter()
+            .find(|c| c.provider == "_name" && c.valid)
+            .map(|c| c.credential_ref.clone());
+        let engineer_email = sorted_creds
+            .iter()
+            .find(|c| c.provider == "_email" && c.valid)
+            .map(|c| c.credential_ref.clone());
         if engineer_name.is_none() || engineer_email.is_none() {
             tracing::warn!(
                 loop_id = %loop_id,
@@ -1712,7 +1721,7 @@ mod tests {
         assert!(err["error"]
             .as_str()
             .unwrap()
-            .contains("non-empty name"));
+            .contains("non-empty"));
     }
 
     #[tokio::test]
@@ -1742,6 +1751,93 @@ mod tests {
             .unwrap();
         let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(err["error"].as_str().unwrap().contains("backslash"));
+    }
+
+    #[tokio::test]
+    async fn test_start_dot_path_segment_rejected() {
+        let (app, _store, _git) = test_app();
+
+        let body = serde_json::json!({
+            "spec_path": "specs/./test.md",
+            "engineer": "alice",
+            "spec_content": "# dot segment"
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(err["error"].as_str().unwrap().contains("empty path segments"));
+    }
+
+    #[tokio::test]
+    async fn test_start_empty_path_segment_rejected() {
+        let (app, _store, _git) = test_app();
+
+        let body = serde_json::json!({
+            "spec_path": "specs//test.md",
+            "engineer": "alice",
+            "spec_content": "# empty segment"
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(err["error"].as_str().unwrap().contains("empty path segments"));
+    }
+
+    #[tokio::test]
+    async fn test_start_hidden_file_stem_rejected() {
+        let (app, _store, _git) = test_app();
+
+        let body = serde_json::json!({
+            "spec_path": "specs/.hidden.md",
+            "engineer": "alice",
+            "spec_content": "# hidden file"
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(err["error"].as_str().unwrap().contains("non-hidden"));
     }
 
     #[tokio::test]

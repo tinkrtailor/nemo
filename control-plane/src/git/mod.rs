@@ -845,7 +845,8 @@ pub mod mock {
             path.hash(&mut hasher);
             content.hash(&mut hasher);
             commit_message.hash(&mut hasher);
-            let new_sha = format!("{:016x}{:016x}0000000000000000", hasher.finish(), hasher.finish());
+            let hash_val = hasher.finish() as u128;
+            let new_sha = format!("{:040x}", hash_val);
             let mut branches = self.branches.write().await;
             branches.insert(branch.to_string(), new_sha);
             drop(branches);
