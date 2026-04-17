@@ -1,0 +1,86 @@
+{
+  "round": 3,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 690,
+      "description": "Harden audit-found-issues path: when judge returns Continue, dispatch_revise is called without checking max_rounds first. If round >= max_rounds and the judge still says Continue, a revise job is dispatched that will immediately fail on the next tick's max_rounds check. This is wasteful, but more importantly it burns through the revise dispatch + job creation only to fail immediately. In contrast, the review Continue path (line 1223) correctly checks max_rounds before dispatching. The harden path at this code location (the audit evaluation) does NOT have a max_rounds guard for the judge Continue case.",
+      "suggestion": "Add a `record.round >= record.max_rounds` check in the JudgeDecision::Continue arm of the harden audit path (line 690-692), mirroring the review path at line 1223, to fail immediately instead of dispatching a doomed revise."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 188,
+      "description": "Spec content truncation uses byte indexing (`spec_content[..MAX_SPEC_CHARS]`) which will panic at runtime if the 12000th byte falls in the middle of a multi-byte UTF-8 character. Spec files may contain Unicode characters (e.g., accented names, emoji, non-ASCII). This is a potential crash in the judge invocation path.",
+      "suggestion": "Use `.char_indices()` or `.floor_char_boundary(MAX_SPEC_CHARS)` (nightly) to find a safe truncation point. A simple safe alternative: `spec_content.chars().take(MAX_SPEC_CHARS).collect::<String>()`."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 839,
+      "description": "At harden max_rounds (revise path), when the judge returns Continue or ExitFail, the code falls through to the existing max-rounds FAILED transition. But ExitFail should arguably set its own failure_reason with the judge reasoning rather than the generic 'Max harden rounds exceeded' message. The judge's reasoning is lost in the exit_fail case at max_rounds — the user sees the generic message instead of the judge's analysis of why the spec cannot be satisfied.",
+      "suggestion": "Handle JudgeDecision::ExitFail explicitly at line 839 to set the failure_reason from judge_output.reasoning before transitioning to Failed, rather than falling through to the generic message."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 1223,
+      "description": "Review phase: when judge returns Continue at max_rounds, the loop transitions to Failed with 'Max implement rounds exceeded'. Per FR-1b, the judge should have been invoked with the MaxRounds trigger and had the opportunity to return exit_escalate. But determine_trigger DOES prioritize max_rounds, so the judge was already invoked with MaxRounds trigger and chose Continue — meaning it wants to continue but can't. The spec says at max_rounds the judge should decide 'final disposition before FAILED'. If the judge says Continue at max_rounds, falling through to Failed is reasonable, but there's no second judge invocation to reconsider (unlike the harden path which has a dedicated max_rounds judge call in the revise evaluation). This asymmetry means the review path gives the judge only one shot at max_rounds.",
+      "suggestion": "Document this asymmetry or add a comment explaining that the judge already saw the MaxRounds trigger in the initial invocation so a second call is redundant."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 322,
+      "description": "determine_trigger always returns Some — it never returns None. The function signature returns Option<JudgeTrigger> but every branch returns Some. This means the judge is invoked on every non-clean verdict when enabled, including straightforward round-2 'issues found, keep iterating' cases. While spec-compliant (FR-1b lists not_clean as a trigger), this drives up cost: a loop with 10 rounds of non-clean verdicts uses all 10 judge calls on the cost ceiling, leaving none for the critical max_rounds decision.",
+      "suggestion": "Consider whether the not_clean trigger on early rounds (e.g., round < 3 with no recurring findings) should skip the judge to preserve the cost ceiling budget for later, more ambiguous decisions. Alternatively, document this as intentional behavior."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 698,
+      "description": "The round_summaries BTreeMap is keyed by round number from RoundRecord. The judge decision nesting (`round_summaries.get_mut(&d.round)`) assumes judge decision round numbers align with RoundRecord round numbers. However, a judge decision is persisted with `record.round` from the LoopRecord at the time of the decision, which may not exactly correspond to the round key in round_summaries if round increments happen between stages. A judge decision at round N may find no matching round_summary entry if the round grouping in the BTreeMap doesn't contain round N, causing the decision to only appear in the flat array but not nested.",
+      "suggestion": "Verify that LoopRecord.round at judge invocation time always matches a RoundRecord.round in the rounds table. Add a log/comment noting the flat array fallback ensures no decisions are lost."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 186,
+      "description": "The JudgeInput includes `current_verdict` which is the full verdict JSON (potentially large), plus `spec_content` (up to 12K chars) and `rounds` (up to 8K chars of serialized summaries). The `invoke_judge` method serializes the entire JudgeInput as the user message, but the budget math only accounts for spec and rounds truncation. The current_verdict field and recurring_findings are not size-limited. A verdict with many detailed issues could push the total well beyond the 8K token / ~32K char budget.",
+      "suggestion": "Add truncation or size limiting for the current_verdict field as well, or include it in the overall character budget calculation."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 2208,
+      "description": "The redispatch_current_stage path for revise checks for the audit feedback file to restore feedback_path. It uses `let audit_feedback = format!(...)` creating a local String, then passes `&audit_feedback` to `read_file`. But then sets `ctx.feedback_path = Some(audit_feedback)` which moves the String. However, the variable `audit_feedback` is a String created with `format!`, not a `&str`. The type should be compatible, but the pattern of reading a file then setting the path based on existence is fragile — if the file was written but the git operation that wrote it was rolled back, the revise agent gets a stale feedback_path.",
+      "suggestion": "This is minor but worth verifying the feedback_path lifetime and correctness in redispatch scenarios."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 332,
+      "description": "The `determine_trigger` function's `!recurring.is_empty()` check is functionally correct but the original round-1 feedback noted the previous check was `recurring.iter().any(|f| !f.seen_in_rounds.is_empty())` which was always true. The fix simplified to `!recurring.is_empty()` which is correct since compute_recurring_findings only produces findings with non-empty seen_in_rounds.",
+      "suggestion": "No change needed, this was correctly addressed."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/types/verdict.rs",
+      "line": 256,
+      "description": "JudgeDecision has both a serde-based Deserialize (with snake_case rename) and a manual parse_decision method. These must stay in sync. If someone adds a new variant to the enum, they must update both. The parse_decision method is somewhat redundant given serde already handles this.",
+      "suggestion": "Consider removing parse_decision in favor of serde deserialization, or add a test that verifies all variants round-trip through both paths."
+    }
+  ]
+}
