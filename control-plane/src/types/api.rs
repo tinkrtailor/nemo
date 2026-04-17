@@ -9,6 +9,10 @@ use super::{LoopState, SubState};
 pub struct StartRequest {
     pub spec_path: String,
     pub engineer: String,
+    /// Optional spec file content sent by the CLI (FR-1b).
+    /// When present, the server uses this instead of reading from the default branch.
+    #[serde(default)]
+    pub spec_content: Option<String>,
     #[serde(default)]
     pub harden: bool,
     #[serde(default)]

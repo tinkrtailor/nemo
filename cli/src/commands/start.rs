@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::path::Path;
 
 use crate::client::NemoClient;
 
@@ -21,9 +22,21 @@ pub struct StartArgs<'a> {
 }
 
 pub async fn run(client: &NemoClient, args: StartArgs<'_>) -> Result<()> {
+    // FR-1a: Read spec file from the engineer's local working directory.
+    let local_path = Path::new(args.spec_path);
+    let spec_content = std::fs::read_to_string(local_path).with_context(|| {
+        format!(
+            "Failed to read spec file '{}'. The file must exist locally.",
+            args.spec_path
+        )
+    })?;
+
+    let spec_bytes = spec_content.len();
+
     let mut body = serde_json::json!({
         "spec_path": args.spec_path,
         "engineer": args.engineer,
+        "spec_content": spec_content,
         "harden": args.harden,
         "harden_only": args.harden_only,
         "auto_approve": args.auto_approve,
@@ -41,6 +54,8 @@ pub async fn run(client: &NemoClient, args: StartArgs<'_>) -> Result<()> {
 
     println!("Started loop {}", resp.loop_id);
     println!("  Branch: {}", resp.branch);
+    // FR-5b: show spec source receipt
+    println!("  Spec:   {} (local, {} bytes)", args.spec_path, spec_bytes);
     println!("  State:  {}", resp.state);
 
     if args.ship_mode {
@@ -55,4 +70,24 @@ pub async fn run(client: &NemoClient, args: StartArgs<'_>) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_read_local_spec_file() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "# My Spec\nSome content").unwrap();
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(content, "# My Spec\nSome content");
+    }
+
+    #[test]
+    fn test_read_nonexistent_spec_file_fails() {
+        let result = std::fs::read_to_string("nonexistent/spec.md");
+        assert!(result.is_err());
+    }
 }

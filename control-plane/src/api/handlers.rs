@@ -52,15 +52,30 @@ pub async fn start(
     // Fetch latest from remote so spec validation and branch creation use current state
     state.git.fetch().await?;
 
-    // Validate spec exists and read content from the configured default branch.
+    // Determine spec source: local upload (FR-1b) or default branch (FR-2b).
     let default_ref = state.config.default_remote_ref();
-    let spec_content = state
-        .git
-        .read_file(&req.spec_path, &default_ref)
-        .await
-        .map_err(|_| NautiloopError::SpecNotFound {
-            path: req.spec_path.clone(),
-        })?;
+    let spec_from_local: bool;
+    let spec_content = if let Some(ref content) = req.spec_content {
+        // FR-3a: spec_content must be valid UTF-8 (guaranteed by JSON deserialization).
+        // FR-3b: enforce 1 MB size limit.
+        if content.len() > 1_048_576 {
+            return Err(NautiloopError::SpecTooLarge {
+                size: content.len(),
+            });
+        }
+        spec_from_local = true;
+        content.clone()
+    } else {
+        // FR-2b: legacy path — read from default branch.
+        spec_from_local = false;
+        state
+            .git
+            .read_file(&req.spec_path, &default_ref)
+            .await
+            .map_err(|_| NautiloopError::SpecNotFound {
+                path: req.spec_path.clone(),
+            })?
+    };
     let branch = generate_branch_name(&req.engineer, &req.spec_path, &spec_content);
 
     let loop_id = Uuid::new_v4();
@@ -157,7 +172,7 @@ pub async fn start(
 
     // DB insert succeeded — we own this branch name. Now create the git branch.
     // If git fails, mark the loop as FAILED via narrow state update (no full record overwrite).
-    let branch_sha = match state.git.create_branch(&branch, &default_ref).await {
+    let mut branch_sha = match state.git.create_branch(&branch, &default_ref).await {
         Ok(sha) => sha,
         Err(e) => {
             let _ = state
@@ -168,16 +183,45 @@ pub async fn start(
         }
     };
 
+    // FR-2a: If spec was uploaded locally, commit it onto the agent branch as the first commit.
+    if spec_from_local {
+        match state
+            .git
+            .write_file(&branch, &req.spec_path, &spec_content)
+            .await
+        {
+            Ok(()) => {
+                // Update branch_sha to the post-write tip so current_sha reflects the spec commit.
+                if let Ok(Some(new_sha)) = state.git.get_branch_sha(&branch).await {
+                    branch_sha = new_sha;
+                }
+            }
+            Err(e) => {
+                let _ = state
+                    .store
+                    .update_loop_state(loop_id, LoopState::Failed, None)
+                    .await;
+                return Err(e);
+            }
+        }
+    }
+
     // Persist the SHA via a narrow SQL update — never use update_loop() from /start
     // because the reconciler may have already advanced the record.
     state.store.set_current_sha(loop_id, &branch_sha).await?;
 
+    let spec_source = if spec_from_local {
+        "local"
+    } else {
+        "default_branch"
+    };
     tracing::info!(
         loop_id = %loop_id,
         engineer = %req.engineer,
         spec_path = %req.spec_path,
         branch = %branch,
         ship_mode = req.ship_mode,
+        spec_source = spec_source,
         "Started new loop"
     );
 
@@ -1189,5 +1233,156 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_start_with_local_spec_content() {
+        let (app, store, _git) = test_app();
+        // Do NOT add the file to mock git — it only exists locally.
+
+        let body = serde_json::json!({
+            "spec_path": "specs/local-only.md",
+            "engineer": "alice",
+            "spec_content": "# Local Spec\nDraft content here.",
+            "auto_approve": true
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: StartResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp.state, LoopState::Pending);
+        assert!(resp.branch.starts_with("agent/alice/local-only-"));
+
+        // Verify the loop was stored
+        let loops = store.get_loops_for_engineer(Some("alice"), false, true).await.unwrap();
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].spec_path, "specs/local-only.md");
+    }
+
+    #[tokio::test]
+    async fn test_start_with_local_spec_no_git_read() {
+        // When spec_content is provided, git.read_file should NOT be called.
+        // If it were called, it would fail because the file doesn't exist in mock git.
+        let (app, _store, _git) = test_app();
+
+        let body = serde_json::json!({
+            "spec_path": "specs/doesnt-exist-on-main.md",
+            "engineer": "alice",
+            "spec_content": "# Draft\n"
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        // Should succeed because spec_content bypasses the git read
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_start_spec_content_too_large() {
+        let (app, _store, _git) = test_app();
+
+        // Create content > 1 MB
+        let large_content = "x".repeat(1_048_577);
+        let body = serde_json::json!({
+            "spec_path": "specs/huge.md",
+            "engineer": "alice",
+            "spec_content": large_content
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn test_start_without_spec_content_falls_back_to_git() {
+        let (app, _store, _git) = test_app();
+        // No spec_content and no file in git → should get 404
+
+        let body = serde_json::json!({
+            "spec_path": "specs/missing.md",
+            "engineer": "alice"
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_start_local_spec_overrides_git_content() {
+        let (app, _store, git) = test_app();
+        git.add_file("specs/test.md", "# Old Content\n").await;
+
+        let body = serde_json::json!({
+            "spec_path": "specs/test.md",
+            "engineer": "alice",
+            "spec_content": "# New Local Content\n",
+            "auto_approve": true
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: StartResponse = serde_json::from_slice(&body_bytes).unwrap();
+
+        // Branch should be based on local content hash, not git content
+        let expected_branch =
+            generate_branch_name("alice", "specs/test.md", "# New Local Content\n");
+        assert_eq!(resp.branch, expected_branch);
     }
 }
