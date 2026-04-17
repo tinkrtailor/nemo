@@ -787,6 +787,17 @@ impl StateStore for PgStateStore {
         Ok(())
     }
 
+    async fn cleanup_pod_snapshots(&self, max_age_hours: u32) -> Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM pod_snapshots WHERE created_at < NOW() - make_interval(hours => $1::int)",
+        )
+        .bind(max_age_hours as i32)
+        .execute(&self.pool)
+        .await
+        .map_err(crate::error::NautiloopError::Database)?;
+        Ok(result.rows_affected())
+    }
+
     async fn health_check(&self) -> Result<()> {
         sqlx::query("SELECT 1")
             .execute(&self.pool)

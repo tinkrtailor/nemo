@@ -105,6 +105,10 @@ pub trait StateStore: Send + Sync + 'static {
     /// Release a per-loop advisory lock and return its dedicated connection to the pool.
     async fn advisory_unlock(&self, loop_id: Uuid) -> Result<()>;
 
+    /// Delete pod_snapshots older than `max_age_hours` hours (FR-6b).
+    /// Returns the number of deleted rows.
+    async fn cleanup_pod_snapshots(&self, max_age_hours: u32) -> Result<u64>;
+
     /// Health check: verify the store is reachable (e.g., SELECT 1).
     async fn health_check(&self) -> Result<()>;
 }
@@ -411,6 +415,11 @@ pub mod memory {
             let mut events = self.merge_events.write().await;
             events.push(event.clone());
             Ok(())
+        }
+
+        async fn cleanup_pod_snapshots(&self, _max_age_hours: u32) -> Result<u64> {
+            // No-op for in-memory store (no pod_snapshots table)
+            Ok(0)
         }
 
         async fn try_advisory_lock(&self, _loop_id: Uuid) -> Result<bool> {

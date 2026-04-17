@@ -99,12 +99,23 @@ pub async fn pod_introspect(
     // FR-2a: exec introspection script with 3s overall timeout (FR-1c)
     let exec_result = exec_introspect_script(kube_client, &pod_name, namespace).await;
 
+    // FR-1c: if exec timed out, return HTTP 503 so the caller retries on next poll
+    if let Err(ref e) = exec_result
+        && e.contains("timed out")
+    {
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "pod introspection timeout"})),
+        )
+            .into_response());
+    }
+
     // FR-2b: fetch container metrics (best-effort, parallel would be better but sequential is fine)
     let container_stats = fetch_container_metrics(kube_client, &pod_name, namespace).await;
 
     let collected_at = Utc::now();
 
-    // Parse exec output
+    // Parse exec output — non-timeout exec failures return partial snapshot (NFR-4)
     let (processes, worktree) = match exec_result {
         Ok(output) => parse_introspect_output(&output),
         Err(e) => {
@@ -345,6 +356,174 @@ fn default_worktree() -> WorktreeInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::AppState;
+    use crate::config::NautiloopConfig;
+    use crate::git::mock::MockGitOperations;
+    use crate::state::memory::MemoryStateStore;
+    use crate::state::StateStore;
+    use crate::types::{LoopKind, LoopRecord, LoopState};
+    use axum::body::Body;
+    use axum::http::{self, Request};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn test_app() -> (axum::Router, Arc<MemoryStateStore>) {
+        let store = Arc::new(MemoryStateStore::new());
+        let git = Arc::new(MockGitOperations::new());
+        let state = AppState {
+            store: store.clone(),
+            git: git.clone(),
+            config: Arc::new(NautiloopConfig::default()),
+            kube_client: None,
+            pool: None,
+        };
+        let router = crate::api::build_router_no_auth(state);
+        (router, store)
+    }
+
+    fn make_loop(state: LoopState) -> LoopRecord {
+        LoopRecord {
+            id: uuid::Uuid::new_v4(),
+            engineer: "alice".to_string(),
+            spec_path: "specs/test.md".to_string(),
+            spec_content_hash: "abc12345".to_string(),
+            branch: format!("agent/alice/test-{}", uuid::Uuid::new_v4()),
+            kind: LoopKind::Implement,
+            state,
+            sub_state: None,
+            round: 1,
+            max_rounds: 15,
+            harden: false,
+            harden_only: false,
+            auto_approve: true,
+            ship_mode: false,
+            cancel_requested: false,
+            approve_requested: false,
+            resume_requested: false,
+            paused_from_state: None,
+            reauth_from_state: None,
+            failed_from_state: None,
+            failure_reason: None,
+            current_sha: None,
+            opencode_session_id: None,
+            claude_session_id: None,
+            active_job_name: None,
+            retry_count: 0,
+            model_implementor: None,
+            model_reviewer: None,
+            merge_sha: None,
+            merged_at: None,
+            hardened_spec_path: None,
+            spec_pr_url: None,
+            resolved_default_branch: Some("main".to_string()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_introspect_terminal_loop_returns_410() {
+        let (app, store) = test_app();
+        let record = make_loop(LoopState::Converged);
+        store.create_loop(&record).await.unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/pod-introspect/{}", record.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), http::StatusCode::GONE);
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 1024 * 64).await.unwrap()).unwrap();
+        assert!(body["error"].as_str().unwrap().contains("nemo inspect"));
+    }
+
+    #[tokio::test]
+    async fn test_introspect_failed_loop_returns_410() {
+        let (app, store) = test_app();
+        let record = make_loop(LoopState::Failed);
+        store.create_loop(&record).await.unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/pod-introspect/{}", record.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), http::StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn test_introspect_no_job_returns_425() {
+        let (app, store) = test_app();
+        // Implementing loop with no active_job_name
+        let record = make_loop(LoopState::Implementing);
+        store.create_loop(&record).await.unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/pod-introspect/{}", record.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // 425 Too Early — pod not yet running
+        assert_eq!(response.status().as_u16(), 425);
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 1024 * 64).await.unwrap()).unwrap();
+        assert_eq!(body["error"].as_str().unwrap(), "pod not yet running");
+    }
+
+    #[tokio::test]
+    async fn test_introspect_no_kube_client_returns_500() {
+        let (app, store) = test_app();
+        let mut record = make_loop(LoopState::Implementing);
+        record.active_job_name = Some("nautiloop-job-xyz".to_string());
+        store.create_loop(&record).await.unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/pod-introspect/{}", record.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // No kube client configured → Internal Server Error
+        assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_introspect_loop_not_found_returns_404() {
+        let (app, _store) = test_app();
+        let fake_id = uuid::Uuid::new_v4();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/pod-introspect/{fake_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+    }
 
     #[test]
     fn test_parse_cpu_to_millicores() {

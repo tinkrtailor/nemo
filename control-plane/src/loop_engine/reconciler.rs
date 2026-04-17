@@ -38,12 +38,20 @@ impl Reconciler {
             "Starting reconciliation loop"
         );
 
+        // FR-6b: daily sweep of old pod_snapshots (7-day TTL = 168 hours)
+        let mut cleanup_interval = tokio::time::interval(Duration::from_secs(86400));
+        // First tick fires immediately; skip it so the first sweep happens after 24h
+        cleanup_interval.tick().await;
+
         loop {
-            // Wait for interval or wake signal or cancellation
+            // Wait for interval or wake signal or cleanup or cancellation
             tokio::select! {
                 _ = tokio::time::sleep(self.interval) => {},
                 _ = self.wake.notified() => {
                     tracing::debug!("Reconciler woken up by watcher");
+                },
+                _ = cleanup_interval.tick() => {
+                    self.sweep_old_pod_snapshots().await;
                 },
                 _ = wait_for_cancel(&cancel) => {
                     tracing::info!("Reconciler shutting down");
@@ -57,6 +65,20 @@ impl Reconciler {
             }
 
             self.reconcile_all().await;
+        }
+    }
+
+    /// FR-6b: delete pod_snapshots older than 7 days.
+    async fn sweep_old_pod_snapshots(&self) {
+        const TTL_HOURS: u32 = 168; // 7 days
+        match self.store.cleanup_pod_snapshots(TTL_HOURS).await {
+            Ok(0) => {}
+            Ok(deleted) => {
+                tracing::info!(deleted, "Swept old pod_snapshots (>7 days)");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to sweep pod_snapshots");
+            }
         }
     }
 
