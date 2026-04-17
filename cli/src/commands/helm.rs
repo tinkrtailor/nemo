@@ -704,7 +704,7 @@ fn spawn_introspect_task(
                 task.abort();
             }
 
-            if let Some(loop_id) = *loop_id_rx.borrow() {
+            if let Some(loop_id) = *loop_id_rx.borrow_and_update() {
                 let client = client.clone();
                 let event_tx = event_tx.clone();
                 current_task = Some(tokio::spawn(async move {

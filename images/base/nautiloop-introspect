@@ -27,6 +27,8 @@ ps_json=$(echo "$ps_output" | jq -Rs '
         elif test("^[0-9]+:[0-9]+$") then
           (capture("^(?<m>[0-9]+):(?<s>[0-9]+)$") |
             ((.m|tonumber)*60 + (.s|tonumber)))
+        elif test("^[0-9]+$") then
+          (. | tonumber)
         else 0
         end
       )
@@ -36,7 +38,7 @@ ps_json=$(echo "$ps_output" | jq -Rs '
 
 # Section 2: worktree info
 target_bytes=$(du -sb /work/target 2>/dev/null | awk '{print $1}' || echo "null")
-target_artifacts=$(ls -fA /work/target/debug/deps 2>/dev/null | wc -l || echo "0")
+target_artifacts=$(find /work/target/debug/deps -maxdepth 1 -type f \( -name '*.rlib' -o -name '*.rmeta' \) 2>/dev/null | wc -l || echo "0")
 head_sha=$(git -C /work rev-parse HEAD 2>/dev/null || echo "null")
 uncommitted=$(git -C /work status --porcelain 2>/dev/null | wc -l || echo "0")
 

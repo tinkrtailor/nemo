@@ -67,60 +67,71 @@ pub async fn pod_introspect(
             .into_response());
     }
 
-    // Find the running pod for this job
-    let pods_api: kube::Api<k8s_openapi::api::core::v1::Pod> =
-        kube::Api::namespaced(kube_client.clone(), namespace);
-    let lp = kube::api::ListParams::default().labels(&format!("job-name={job_name}"));
-    let pod_list = pods_api.list(&lp).await.map_err(|e| {
-        NautiloopError::Internal(format!("Failed to list pods for {job_name}: {e}"))
-    })?;
-
-    if pod_list.items.is_empty() {
-        return Ok((
-            StatusCode::from_u16(425).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
-            Json(serde_json::json!({"error": "pod not yet running"})),
-        )
-            .into_response());
-    }
-
-    // Pick the best pod (Running > Pending > rest)
-    let mut sorted_pods = pod_list.items;
-    sorted_pods.sort_by(|a, b| {
-        let phase_rank = |p: &k8s_openapi::api::core::v1::Pod| -> u8 {
-            match p.status.as_ref().and_then(|s| s.phase.as_deref()) {
-                Some("Running") => 0,
-                Some("Pending") => 1,
-                _ => 2,
-            }
-        };
-        phase_rank(a).cmp(&phase_rank(b))
-    });
-    let pod = &sorted_pods[0];
-    let pod_name = pod
-        .metadata
-        .name
-        .as_deref()
-        .unwrap_or("unknown")
-        .to_string();
-    let pod_phase = pod
-        .status
-        .as_ref()
-        .and_then(|s| s.phase.clone())
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    // FR-1c: 3s overall timeout for the handler body (exec + metrics concurrently)
+    // FR-1c: 3s overall timeout covers pod listing + exec + metrics.
+    // The intent is that callers never block longer than 3s for the k8s-dependent
+    // portion of the handler (pod list, exec, and metrics fetch).
     let handler_result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        // Find the running pod for this job
+        let pods_api: kube::Api<k8s_openapi::api::core::v1::Pod> =
+            kube::Api::namespaced(kube_client.clone(), namespace);
+        let lp = kube::api::ListParams::default()
+            .labels(&format!("job-name={job_name}"))
+            .limit(10);
+        let pod_list = pods_api.list(&lp).await.map_err(|e| {
+            NautiloopError::Internal(format!("Failed to list pods for {job_name}: {e}"))
+        })?;
+
+        if pod_list.items.is_empty() {
+            return Ok::<_, NautiloopError>(None);
+        }
+
+        // Pick the best pod (Running > Pending > rest)
+        let mut sorted_pods = pod_list.items;
+        sorted_pods.sort_by(|a, b| {
+            let phase_rank = |p: &k8s_openapi::api::core::v1::Pod| -> u8 {
+                match p.status.as_ref().and_then(|s| s.phase.as_deref()) {
+                    Some("Running") => 0,
+                    Some("Pending") => 1,
+                    _ => 2,
+                }
+            };
+            phase_rank(a).cmp(&phase_rank(b))
+        });
+        let pod = &sorted_pods[0];
+        let pod_name = pod
+            .metadata
+            .name
+            .as_deref()
+            .unwrap_or("unknown")
+            .to_string();
+        let pod_phase = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.clone())
+            .unwrap_or_else(|| "Unknown".to_string());
+
         // FR-2a + FR-2b: run exec and metrics fetch concurrently
         let (exec_result, container_stats) = tokio::join!(
             exec_introspect_script(kube_client, &pod_name, namespace),
             fetch_container_metrics(kube_client, &pod_name, namespace),
         );
-        (exec_result, container_stats)
+        Ok(Some((pod_name, pod_phase, exec_result, container_stats)))
     })
     .await;
 
-    let (exec_result, container_stats) = match handler_result {
-        Ok(results) => results,
+    let (pod_name, pod_phase, exec_result, container_stats) = match handler_result {
+        Ok(Ok(Some(results))) => results,
+        Ok(Ok(None)) => {
+            // No pods found → 425
+            return Ok((
+                StatusCode::from_u16(425).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+                Json(serde_json::json!({"error": "pod not yet running"})),
+            )
+                .into_response());
+        }
+        Ok(Err(e)) => {
+            return Err(e);
+        }
         Err(_) => {
             // FR-1c: overall 3s timeout exceeded → HTTP 503
             return Ok((
@@ -216,7 +227,8 @@ async fn exec_introspect_script(
         ..Default::default()
     };
 
-    // The script has `timeout 2` internally; we wrap the whole exec in 3s
+    // The script has `timeout 2` internally; the exec handshake gets 1s so
+    // total exec budget (1s handshake + 2s read) stays under the outer 3s handler timeout.
     let cmd = vec![
         "/bin/sh",
         "-c",
@@ -224,7 +236,7 @@ async fn exec_introspect_script(
     ];
 
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
+        std::time::Duration::from_secs(1),
         pods_api.exec(pod_name, cmd, &attach_params),
     )
     .await;
@@ -280,8 +292,29 @@ async fn exec_introspect_script(
             }
         }
         Ok(Err(e)) => Err(ExecError::Other(format!("exec failed: {e}"))),
-        Err(_) => Err(ExecError::Timeout("exec timed out after 3s".to_string())),
+        Err(_) => Err(ExecError::Timeout("exec handshake timed out after 1s".to_string())),
     }
+}
+
+/// Typed representation of the k8s metrics API PodMetrics response.
+/// Using a dedicated struct instead of DynamicObject ensures `containers`
+/// is deserialized reliably (DynamicObject puts non-standard fields in `.data`
+/// which may not capture `containers` correctly).
+#[derive(Debug, serde::Deserialize)]
+struct PodMetrics {
+    containers: Vec<ContainerMetricsEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ContainerMetricsEntry {
+    name: String,
+    usage: ContainerUsage,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ContainerUsage {
+    cpu: String,
+    memory: String,
 }
 
 /// Fetch CPU/memory metrics from the k8s metrics API (FR-2b).
@@ -300,20 +333,15 @@ async fn fetch_container_metrics(
         .body(Vec::new())
         .ok()?;
 
-    let response: Result<kube::api::DynamicObject, _> =
-        client.request(request).await;
+    let response: Result<PodMetrics, _> = client.request(request).await;
 
     match response {
-        Ok(obj) => {
-            let containers = obj.data.get("containers")?.as_array()?;
-            for container in containers {
-                if container.get("name")?.as_str()? == "agent" {
-                    let usage = container.get("usage")?;
-                    let cpu_str = usage.get("cpu")?.as_str()?;
-                    let mem_str = usage.get("memory")?.as_str()?;
+        Ok(pod_metrics) => {
+            for container in &pod_metrics.containers {
+                if container.name == "agent" {
                     return Some(ContainerStats {
-                        cpu_millicores: parse_cpu_to_millicores(cpu_str),
-                        memory_bytes: parse_memory_to_bytes(mem_str),
+                        cpu_millicores: parse_cpu_to_millicores(&container.usage.cpu),
+                        memory_bytes: parse_memory_to_bytes(&container.usage.memory),
                     });
                 }
             }
@@ -329,7 +357,8 @@ async fn fetch_container_metrics(
 /// Parse Kubernetes CPU quantity to millicores.
 pub fn parse_cpu_to_millicores(cpu: &str) -> u64 {
     if let Some(nano) = cpu.strip_suffix('n') {
-        nano.parse::<u64>().unwrap_or(0) / 1_000_000
+        // Round instead of truncate so e.g. 999999n → 1m, not 0m
+        (nano.parse::<u64>().unwrap_or(0) + 500_000) / 1_000_000
     } else if let Some(micro) = cpu.strip_suffix('u') {
         micro.parse::<u64>().unwrap_or(0) / 1_000
     } else if let Some(milli) = cpu.strip_suffix('m') {
@@ -600,6 +629,12 @@ mod tests {
         assert_eq!(parse_cpu_to_millicores("250000000n"), 250);
         assert_eq!(parse_cpu_to_millicores("100000u"), 100);
         assert_eq!(parse_cpu_to_millicores("0"), 0);
+        // Rounding: 999999n → 1m (not 0m from truncation)
+        assert_eq!(parse_cpu_to_millicores("999999n"), 1);
+        // Rounding: 499999n → 0m (below half)
+        assert_eq!(parse_cpu_to_millicores("499999n"), 0);
+        // Rounding: 500000n → 1m (exactly half rounds up)
+        assert_eq!(parse_cpu_to_millicores("500000n"), 1);
     }
 
     #[test]
