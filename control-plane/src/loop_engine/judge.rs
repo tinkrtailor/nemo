@@ -192,11 +192,12 @@ impl OrchestratorJudge {
         }
 
         // Build judge input with truncation to stay within 8K input token budget (FR-4b).
-        // Approximate 1 token ≈ 4 chars; budget ~32K chars total.
-        // Budget breakdown: spec 10K + rounds 6K + verdict 4K + recurring 2K + overhead 10K = 32K
-        const MAX_SPEC_CHARS: usize = 10_000;
-        const MAX_ROUND_CHARS: usize = 6_000;
-        const MAX_VERDICT_CHARS: usize = 4_000;
+        // Approximate 1 token ≈ 4 chars; budget ~32K chars total for 8K tokens.
+        // Budget breakdown: spec 6K + rounds 4K + verdict 2K + recurring ~2K + system prompt ~2K
+        //                 + JSON envelope overhead ~2K = ~18K chars (~4.5K tokens), well within 8K.
+        const MAX_SPEC_CHARS: usize = 6_000;
+        const MAX_ROUND_CHARS: usize = 4_000;
+        const MAX_VERDICT_CHARS: usize = 2_000;
         const MAX_RECURRING_FINDINGS: usize = 10;
 
         let truncated_spec = if spec_content.len() > MAX_SPEC_CHARS {
@@ -309,7 +310,11 @@ impl OrchestratorJudge {
             }
         };
 
-        // FR-7a: If this would be a second exit_clean, downgrade to continue
+        // FR-7a: If this would be a second exit_clean, downgrade to continue.
+        // Assumption: the judge is only invoked from a single tick at a time per loop
+        // (single loop-engine instance). For multi-replica scenarios, the prior_exit_clean
+        // check would need a SELECT FOR UPDATE or advisory lock to prevent a TOCTOU race
+        // between the stats query and the decision persistence.
         if output.decision == JudgeDecision::ExitClean && prior_exit_clean {
             tracing::warn!(
                 loop_id = %loop_id,
@@ -386,15 +391,21 @@ impl OrchestratorJudge {
             None
         } else if round == 2
             && !current_issues.is_empty()
-            && current_issues
-                .iter()
-                .all(|i| i.severity == crate::types::verdict::Severity::Low)
+            && current_issues.iter().all(|i| {
+                i.severity == crate::types::verdict::Severity::Low
+                    || i.severity == crate::types::verdict::Severity::Medium
+            })
         {
-            // Round 2 with only low-severity findings: let the judge decide
+            // Round 2 with only low/medium-severity findings: let the judge decide
             // whether to override-accept (Problem 1: triviality override).
+            // FR-1b: verdict.clean == false is a trigger; we include medium-severity
+            // here because style/documentation nits are often medium and the judge
+            // can reasonably accept them if spec requirements are met.
             Some(JudgeTrigger::NotClean)
         } else if round < 3 {
-            // Round 2 with non-low findings: skip, straightforward continue.
+            // Round 2 with high/critical findings: skip judge, straightforward continue.
+            // Budget optimization: high-severity findings at round 2 are clear "continue"
+            // cases that don't need judge overhead.
             None
         } else {
             // The caller already checked verdict.clean == false
@@ -468,6 +479,10 @@ pub fn parse_judge_response(text: &str) -> Result<JudgeOutput> {
 
 /// Detect recurring findings across rounds.
 /// A finding recurs if `(category, file, line±2)` matches across rounds.
+///
+/// Complexity: O(current_issues * prior_issues) with deserialization per round.
+/// Acceptable for Stage 1 given the 10-call ceiling limits total invocations.
+/// Consider caching or pre-computing if Stage 2 increases call frequency.
 pub fn compute_recurring_findings(
     current_issues: &[Issue],
     rounds: &[RoundRecord],
@@ -1311,5 +1326,106 @@ That's my decision."#;
             .await;
 
         assert!(result.is_none(), "Round 2 with high-severity findings should skip judge");
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_round2_medium_severity_triggers_judge() {
+        let config = OrchestratorConfig::default();
+        let store = Arc::new(crate::state::memory::MemoryStateStore::new());
+        let client = Arc::new(MockJudgeClient {
+            response: r#"{"decision": "exit_clean", "confidence": 0.85, "reasoning": "Only style/doc nits remain"}"#
+                .to_string(),
+        });
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
+
+        let issues = vec![
+            Issue {
+                severity: Severity::Medium,
+                category: None,
+                file: Some("src/lib.rs".to_string()),
+                line: Some(10),
+                description: "Style inconsistency".to_string(),
+                suggestion: "Reformat".to_string(),
+            },
+            Issue {
+                severity: Severity::Low,
+                category: None,
+                file: Some("src/lib.rs".to_string()),
+                line: Some(20),
+                description: "Missing docstring".to_string(),
+                suggestion: "Add doc".to_string(),
+            },
+        ];
+
+        // Round 2 with only low/medium-severity findings and no recurring -> should trigger judge
+        let result = judge
+            .evaluate(
+                Uuid::new_v4(),
+                "specs/test.md",
+                "test spec",
+                "review",
+                2,
+                15,
+                &serde_json::json!({"clean": false}),
+                &issues,
+                &[],
+            )
+            .await;
+
+        assert!(
+            result.is_some(),
+            "Round 2 with low/medium-severity findings should trigger judge"
+        );
+        assert_eq!(result.unwrap().decision, JudgeDecision::ExitClean);
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_round2_mixed_high_medium_skips_judge() {
+        let config = OrchestratorConfig::default();
+        let store = Arc::new(crate::state::memory::MemoryStateStore::new());
+        let client = Arc::new(MockJudgeClient {
+            response: r#"{"decision": "continue", "confidence": 0.8, "reasoning": "test"}"#
+                .to_string(),
+        });
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
+
+        let issues = vec![
+            Issue {
+                severity: Severity::Medium,
+                category: None,
+                file: Some("src/lib.rs".to_string()),
+                line: Some(10),
+                description: "Style nit".to_string(),
+                suggestion: "Fix".to_string(),
+            },
+            Issue {
+                severity: Severity::High,
+                category: None,
+                file: None,
+                line: None,
+                description: "Serious bug".to_string(),
+                suggestion: "Fix".to_string(),
+            },
+        ];
+
+        // Round 2 with mixed high+medium findings and no recurring -> should skip judge
+        let result = judge
+            .evaluate(
+                Uuid::new_v4(),
+                "specs/test.md",
+                "test spec",
+                "review",
+                2,
+                15,
+                &serde_json::json!({"clean": false}),
+                &issues,
+                &[],
+            )
+            .await;
+
+        assert!(
+            result.is_none(),
+            "Round 2 with high-severity findings mixed in should skip judge"
+        );
     }
 }

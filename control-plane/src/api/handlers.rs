@@ -695,8 +695,11 @@ pub async fn inspect(
         };
 
         // Nest decision inline with the corresponding round.
-        // Note: LoopRecord.round at judge invocation time should match a RoundRecord.round,
-        // but if it doesn't (edge case), the decision still appears in the flat
+        // Invariant: judge decisions are always persisted with the round value at the
+        // time of invocation (before any increment). In the review Continue path,
+        // record.round += 1 happens AFTER the judge decision is persisted. In the
+        // harden Continue path, dispatch_revise may also modify the round afterwards.
+        // If a round doesn't match (edge case), the decision still appears in the flat
         // judge_decisions array below, so no decisions are lost.
         if let Some(round_summary) = round_summaries.get_mut(&d.round) {
             round_summary.judge_decision = Some(summary.clone());

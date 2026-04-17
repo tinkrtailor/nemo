@@ -678,7 +678,12 @@ impl ConvergentLoopDriver {
                     }
                     Some(v) => {
                         // Audit found issues: invoke judge before deciding
-                        let verdict_json = last_round
+                        // Filter for the audit-stage round specifically (not a generic last_round)
+                        // to ensure the judge receives the correct verdict context.
+                        let audit_round = rounds
+                            .iter()
+                            .rfind(|r| r.round == record.round && r.stage == "audit");
+                        let verdict_json = audit_round
                             .and_then(|r| r.output.clone())
                             .unwrap_or(serde_json::json!({}));
 
@@ -1083,7 +1088,10 @@ impl ConvergentLoopDriver {
 
         match verdict {
             Some(v) if v.clean => {
-                // Normal clean verdict: delegate to shared convergence logic
+                // Clean verdicts skip the judge at ALL rounds (not just round 1).
+                // FR-1c exempts round 1 explicitly, but clean verdicts at any round
+                // are unambiguous "converge" signals that don't benefit from judge
+                // oversight. FR-1b triggers all assume clean==false.
                 self.review_converge_clean(record).await
             }
             Some(v) => {
@@ -2129,10 +2137,12 @@ impl ConvergentLoopDriver {
             });
         }
 
-        // Restore feedback_path for revise redispatch: check for audit hint file
+        // Restore feedback_path for revise redispatch: check for audit hint file.
+        // Note: this performs a git read on every revise redispatch even when no hint was
+        // ever written. The read will fail (is_ok() == false) in most cases. Acceptable
+        // overhead for Stage 1; could be optimized by storing a flag in the round record.
         if record.state == LoopState::Hardening && stage_name == "revise" {
             let audit_feedback = format!(".agent/audit-feedback-round-{}.json", record.round);
-            // Only set if the file was previously written (hint was present)
             if self
                 .git
                 .read_file(&audit_feedback, &record.branch)
