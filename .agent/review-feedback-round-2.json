@@ -1,0 +1,46 @@
+{
+  "round": 2,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm.rs",
+      "line": 919,
+      "description": "Pod-sourced log lines (`stream_pod_logs`) bypass `compress_nautiloop_result`. If a pod log line contains `NAUTILOOP_RESULT:` it will be rendered as raw JSON, violating FR-2a which says \"When a log line matches the prefix NAUTILOOP_RESULT:\" regardless of source. Only the persisted/SSE code paths (`format_log_json`) apply compression.",
+      "suggestion": "Apply `compress_nautiloop_result` to pod log lines before creating the `LogEntry`. Either call it inline in `stream_pod_logs` or move compression to `push_log_line` / `render_log_line` so it applies universally."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm.rs",
+      "line": 1368,
+      "description": "`paused` indicator is computed BEFORE the scroll offset is clamped to `max_offset` (lines 1370-1372). If the log buffer shrinks (e.g., source switch clears fewer lines than offset) and `log_scroll_offset > 0` but `max_scroll_offset() == 0`, the title will briefly show `[paused]` even though the view is effectively at bottom after clamping.",
+      "suggestion": "Move `let paused = !app.is_scrolled_to_bottom();` to after the clamping block (after line 1373)."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/helm.rs",
+      "line": 1140,
+      "description": "Round extraction from the `[stage/rN]` prefix uses `&line[pos + 3..]` which relies on the index `pos` being from the `strip_prefix`-ed string but applied to the original `line`. This works because `strip_prefix('[')` removes exactly 1 byte, making `pos` (in stripped) equal to `pos + 1` (in original), and `+3` skips the `[` + `/r`. However, this implicit offset arithmetic is fragile and undocumented — if the prefix format ever changes, this silently extracts wrong substrings instead of failing.",
+      "suggestion": "Use a small regex or explicit byte-offset tracking from the original `line` to make the arithmetic self-documenting. E.g., `line.find(\"/r\").map(|pos| ...)` directly on the original line."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/helm.rs",
+      "line": 1154,
+      "description": "The `implement` and `revise` stages always emit ✓ (checkmark). The spec format column says `✓ implement r{round}` but doesn't define a failure condition for implement/revise. If exit_code != 0 in the JSON, the line still shows ✓ which could mislead users into thinking the stage succeeded.",
+      "suggestion": "Consider checking `exit_code` in the JSON and showing ✗ when non-zero, even though the spec doesn't explicitly require it. At minimum, add a code comment noting this is intentional."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/helm.rs",
+      "line": 1406,
+      "description": "The `render_log_line` function has three near-identical code blocks for ✓, ✗, and plain lines that differ only in the check-mark span. This could be a single code path with the check character and color parameterized.",
+      "suggestion": "Extract the common span-building logic and pass the optional check char + color as parameters to reduce duplication."
+    }
+  ]
+}
