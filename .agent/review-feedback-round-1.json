@@ -1,0 +1,61 @@
+{
+  "round": 1,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 321,
+      "description": "Recurring findings trigger threshold is off-by-one. `determine_trigger` checks `seen_in_rounds.len() >= 2`, but `seen_in_rounds` only contains PRIOR rounds (not the current round). Per FR-1b, `same_finding_repeat(>=2)` means the finding appears in the current round AND at least 1 previous round (2 total appearances). The current code requires 2+ prior rounds (3 total appearances) before triggering RecurringFindings.",
+      "suggestion": "Change the threshold to `>= 1` since `seen_in_rounds` excludes the current round, or include the current round number in `seen_in_rounds` inside `compute_recurring_findings` and keep the `>= 2` check."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 685,
+      "description": "Judge hint is lost in the harden `Continue` path. When the judge returns `Continue` with a hint during the harden/audit evaluation, `dispatch_revise(record)` is called directly without passing the hint. Per FR-3, the hint should be written into the next round's feedback file as `orchestrator_hint`. The review path correctly injects the hint (line 1207), but the harden path does not.",
+      "suggestion": "Modify `dispatch_revise` to accept an optional hint parameter, or write the hint into a feedback/context file before calling `dispatch_revise`, mirroring how the review path injects `orchestrator_hint` into `FeedbackFile`."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 1344,
+      "description": "review_converge_clean skips ship mode auto-merge logic. When the judge returns `exit_clean` in the review phase, the code always transitions to CONVERGED, never to SHIPPED. The original clean verdict path handles ship mode (auto-merge within threshold, CI checks). While there's a comment saying this is intentional, the spec (FR-3) says `exit_clean` should 'Create PR (review)' and 'Converge' — it doesn't distinguish between judge-clean and reviewer-clean for ship mode behavior. This could surprise users who have ship mode enabled.",
+      "suggestion": "Either document this as a known limitation in the spec, or reuse the existing clean verdict ship-mode logic path when the judge returns exit_clean."
+    },
+    {
+      "severity": "medium",
+      "category": "performance",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 185,
+      "description": "Two separate DB queries are made on every judge invocation: `count_judge_decisions` (cost ceiling) and `get_judge_decisions` (exit_clean guard). The second query fetches ALL decision records for the loop just to check if any have `decision == \"exit_clean\"`. This could be optimized to a single query or a dedicated `has_exit_clean_decision` method.",
+      "suggestion": "Combine into a single query that returns both the count and whether any exit_clean decision exists, or add a `has_decision_type(loop_id, \"exit_clean\")` method to the store trait."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 778,
+      "description": "At max_rounds in the harden/revise path, the judge is invoked with empty issues `&[]`. This means `compute_recurring_findings` will always return an empty list, and the `recurring_findings` field in the judge input will be empty. The judge loses visibility into recurring findings at max_rounds, even though that signal is most valuable at that point for deciding exit_escalate vs exit_fail.",
+      "suggestion": "Extract issues from the last round's output and pass them instead of `&[]`, or compute recurring findings separately and pass them to the judge input."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/inspect.rs",
+      "description": "FR-6c requires `nemo inspect` to show `judge_decisions` inline with each round, so engineers can see why the loop made non-obvious transitions. The current implementation simply includes judge_decisions as a flat array in the JSON output, not inline with rounds. This is a presentation gap — decisions aren't correlated with their rounds visually.",
+      "suggestion": "Either nest judge decisions within their corresponding round summaries, or add round-correlated display logic to the CLI inspect command."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 130,
+      "description": "The judge prompt template is loaded from the filesystem synchronously via `std::fs::read_to_string` at construction time. In a containerized environment, the `.nautiloop/prompts/judge.md` file is relative to the working directory, which may not be the repo root. The fallback paths are reasonable, but the constructor panics via the embedded default if the file isn't found (which is fine), though the synchronous I/O could block the async runtime briefly.",
+      "suggestion": "Consider using `tokio::fs::read_to_string` for async file reading, or document that the prompt file must be available at startup."
+    }
+  ]
+}
