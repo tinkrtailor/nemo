@@ -1,0 +1,62 @@
+{
+  "round": 13,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 257,
+      "description": "Exec fallback JSON overwrites real process data on script timeout. When `timeout 2` kills the script mid-worktree, the script has already emitted line 1 with real processes to stdout. The `|| echo '{\"processes\":[],\"worktree\":{...}}'` fallback then fires (timeout exits 124), appending a second JSON object with `\"processes\":[]`. The NDJSON parser iterates all parsed values and OVERWRITES `processes` on each match (line 476: `processes = arr...`), so the real process data from line 1 is replaced by the empty array from the fallback. This defeats the entire NDJSON design — the most valuable diagnostic data (processes) is discarded precisely when the script times out on large projects.",
+      "suggestion": "Remove the `processes` key from the fallback JSON so it only provides worktree defaults: `|| echo '{\"worktree\":{\"path\":\"/work\",\"target_dir_bytes\":null,\"target_dir_artifacts\":null,\"uncommitted_files\":null,\"head_sha\":null}}'`. The parser will then keep the real processes from line 1 and use the fallback worktree from line 2."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 50,
+      "description": "du -sb /work/target recursively traverses the entire target directory tree. On large Rust projects (5-10 GB, tens of thousands of files), this commonly takes 1-3 seconds, which will cause the `timeout 2` wrapper to kill the script. While the NDJSON structure preserves processes, the worktree data (including artifact count, dirty files, HEAD sha) is all lost when this happens. The spec FR-2a mandates this command, but the practical impact means operators on large projects — exactly where introspection is most needed — will frequently get no worktree data.",
+      "suggestion": "This is a known limitation given the spec's FR-2a mandate. Document it, or consider `stat -c %s /work/target` for a faster (though less accurate) size approximation. Alternatively, increase the script's internal timeout to 3s since the outer exec budget is 2.5s anyway."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm.rs",
+      "line": 405,
+      "description": "When the user changes selection while the side panel is Closed, `introspect_status` is set to 'Press p to toggle introspect pane' (correct). But `app.introspect` is set to `None` unconditionally. If the user later opens the Introspect panel via 'p' → Inspect → 'p' → Introspect, the PanelToggle handler (line 420) correctly sends the loop_id and resets status to 'Loading...'. However, during the Inspect intermediate state, no introspect_tx send occurs, so when the user reaches Introspect mode, there's a brief 'Loading...' flash while the first poll completes. More importantly, the inspect_tx is sent when entering Inspect mode (line 430), which is good. But if the selected loop has no branch (e.g., it was just created), `app.selected_branch()` returns None and the inspect pane shows 'Loading inspect data...' indefinitely.",
+      "suggestion": "Handle the None branch case in the inspect pane rendering by showing 'No branch selected' instead of 'Loading inspect data...'."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 245,
+      "description": "The comment says 'The read timeout is 1s since the script output arrives in a single burst once the 2s script completes' — but this is incorrect. The script uses NDJSON and emits processes FIRST (immediately, before the 2s worktree collection). So stdout arrives incrementally, not as a single burst. The 1s read timeout starts when the exec handshake completes. If the script is still running (collecting worktree data), the read loop will read the processes line, then potentially time out before the worktree line arrives. This is actually fine (partial NDJSON is handled), but the comment is misleading about the timing model.",
+      "suggestion": "Update the comment to reflect that output arrives incrementally via NDJSON, and the 1s read timeout may capture only the first line (processes) if worktree collection is slow."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 54,
+      "description": "ls -U piped does not include dotfiles, which is correct for artifact counting. However, on some older busybox-based containers (common in minimal Docker images), ls -U may not be supported (only GNU coreutils supports -U). The base image uses Debian bookworm so this is fine, but worth noting for portability.",
+      "suggestion": "No action needed — the Dockerfile uses Debian bookworm which includes GNU coreutils."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 358,
+      "description": "parse_memory_to_bytes uses saturating_mul for all IEC/SI suffixes which is correct and consistent. However, the function does not handle 'e' notation (e.g., '1e9') which Kubernetes can theoretically emit. In practice, k8s metrics API always uses quantity notation (suffixed), not scientific notation, so this is not a real issue.",
+      "suggestion": "No action needed — k8s metrics API uses quantity notation."
+    },
+    {
+      "severity": "low",
+      "category": "performance",
+      "file": "cli/src/commands/ps.rs",
+      "line": 142,
+      "description": "run_watch_loop uses ANSI escape codes (\\x1b[2J\\x1b[H) for screen clearing rather than crossterm's API. While functionally correct, this is inconsistent with the spec's FR-4b requirement of 'Implemented via crossterm like helm'. The helm TUI uses ratatui/crossterm for rendering, while the watch mode uses raw ANSI. This works but is less portable.",
+      "suggestion": "Consider using crossterm::execute!(stdout, Clear(ClearType::All), MoveTo(0,0)) for consistency, or accept this as a simpler implementation for the watch mode."
+    }
+  ]
+}
