@@ -1,0 +1,29 @@
+{
+  "round": 1,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/mod.rs",
+      "line": 116,
+      "description": "Content-Type assertion checks for exact string \"application/json\" but axum 0.8 may include a charset suffix (\"application/json; charset=utf-8\") depending on response path, which would cause a brittle test failure.",
+      "suggestion": "Use a starts_with or contains check instead: `assert!(response.headers().get(\"content-type\").unwrap().to_str().unwrap().starts_with(\"application/json\"));`"
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/mod.rs",
+      "description": "No test for the unhealthy/degraded path (HTTP 503 with {\"status\":\"degraded\"}). The spec's NFR-2 only requires the healthy-path test, but the degraded path has no coverage — a regression in the error branch (e.g. wrong status string or status code) would go undetected.",
+      "suggestion": "Add a second test using a StateStore mock whose health_check() returns Err, then assert status 503 and body {\"status\":\"degraded\", \"version\": ...}."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/api/mod.rs",
+      "line": 120,
+      "description": "to_bytes(response.into_body(), usize::MAX) uses an unbounded limit. While safe in a test context, it reads oddly and could mask issues if the health response were ever unexpectedly large.",
+      "suggestion": "Use a reasonable bound like 1024 or 4096 — the expected JSON body is under 100 bytes."
+    }
+  ]
+}
