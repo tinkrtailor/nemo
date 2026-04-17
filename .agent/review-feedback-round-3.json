@@ -1,0 +1,78 @@
+{
+  "round": 3,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 39,
+      "description": "`ls -f` includes `.` and `..` entries in its output, so `ls -f /work/target/debug/deps 2>/dev/null | wc -l` inflates the artifact count by 2. The previous review suggested `ls -f` for performance (skip sorting), but this changed the semantics: plain `ls` piped does NOT include dotfiles, while `ls -f` (equivalent to `ls -aU`) does.",
+      "suggestion": "Use `ls -fA /work/target/debug/deps 2>/dev/null | wc -l` — the `-A` flag excludes `.` and `..` while `-f` still skips sorting. Or use `find /work/target/debug/deps -maxdepth 1 ! -name . -type f 2>/dev/null | wc -l`."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 112,
+      "description": "The outer 3s handler timeout wraps only the exec+metrics join, but the code preceding it (database lookup, pod listing, pod sorting) is NOT inside the timeout. A slow database or k8s API list call can push the total handler response time well beyond 3s. FR-1c says 'The endpoint MUST NOT block on pod exec longer than 3s' — the exec is bounded, but the total handler latency is not.",
+      "suggestion": "This is arguably spec-compliant since FR-1c specifically says 'pod exec' not 'handler', but worth noting. If total handler latency matters, wrap the entire handler body (after loop lookup) in a single timeout."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 139,
+      "description": "When exec returns `ExecError::Timeout`, the handler returns HTTP 503 and discards the metrics that were fetched concurrently via tokio::join!. The `container_stats` value is available (from the join) but thrown away. FR-2c says 'partial output is still parsed and fields that failed are returned as nulls' — the spec envisions returning what you can, not aborting entirely on exec timeout.",
+      "suggestion": "On exec timeout, return a partial snapshot with empty processes, default worktree, but include the `container_stats` from the metrics fetch (which likely succeeded). Only return 503 if the OUTER 3s handler timeout fires."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm.rs",
+      "line": 405,
+      "description": "When the selection changes, the introspect state is cleared (`app.introspect = None`) but `introspect_status` is not reset. The stale status message from the previous loop remains visible until the first poll completes for the new loop. For example, 'Pod gone. loop is CONVERGED...' would persist while polling a new active loop.",
+      "suggestion": "Reset `app.introspect_status` alongside `app.introspect = None` when the selection changes, e.g., set it to `\"Loading...\"` or the default message."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 303,
+      "description": "The metrics fetch constructs an `axum::http::Request` but passes it to `kube::Client::request()`. kube-rs's `Client::request<T>` expects an `http::Request<Vec<u8>>` from the `http` crate. axum re-exports `http`, so this likely compiles, but `DynamicObject` may not deserialize correctly from the metrics API response. The PodMetrics resource has `apiVersion`, `kind`, `metadata`, `timestamp`, `window`, and `containers` at the top level. `DynamicObject` puts non-standard fields in `.data` (a `serde_json::Value`). The `containers` field should end up in `data`, but `timestamp` and `window` would also be there. If kube-rs's DynamicObject deserialization is strict or if the metrics response lacks proper `apiVersion`/`kind` fields, this would silently fail and return `None`.",
+      "suggestion": "Add a unit test that verifies DynamicObject deserialization of a sample PodMetrics JSON, or define a minimal PodMetrics struct for type-safe deserialization."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 12,
+      "description": "The jq `capture()` regex expects the `cmd` group to be `.+` (one or more chars). Some `ps` output lines may have commands with leading/trailing whitespace or empty command strings for kernel threads. While `// empty` handles non-matching lines, processes with very short names preceded by unusual whitespace patterns could be silently dropped.",
+      "suggestion": "This is acceptable for the top-30-by-CPU filter since kernel threads typically have 0% CPU. No action strictly needed."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/ps.rs",
+      "line": 60,
+      "description": "The `run()` function calls `std::process::exit(0)` on success, which skips Drop implementations and async runtime cleanup. While standard CLI practice, this means the tokio runtime's pending tasks (like HTTP connection pool cleanup) won't run gracefully.",
+      "suggestion": "Return a typed exit code from `run()` and let the caller handle `std::process::exit()`, or accept this as idiomatic CLI behavior."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 164,
+      "description": "The snapshot recording uses `serde_json::to_value(&response)` where `response` has `collected_at: DateTime<Utc>`. After the `if let Ok(snapshot_json) = ...` guard, `response` is moved into `snapshot_json`. But `response` is used again on line 183: `Ok((StatusCode::OK, Json(response)))`. This would be a compile error unless `PodIntrospectResponse` implements `Clone` — which it does (derived). However, the `to_value(&response)` takes a reference so `response` is NOT moved. The `let Ok(snapshot_json) = serde_json::to_value(&response)` pattern within the `if` guard works correctly. No issue.",
+      "suggestion": "No action needed."
+    },
+    {
+      "severity": "low",
+      "category": "performance",
+      "file": "cli/src/commands/helm.rs",
+      "line": 730,
+      "description": "Inside `poll_introspect_for_loop`, `loop_id.to_string()` is called on every 2s poll iteration, allocating a new String each time. Minor but avoidable.",
+      "suggestion": "Compute `loop_id_str` once before the loop."
+    }
+  ]
+}
