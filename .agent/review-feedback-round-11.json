@@ -1,0 +1,61 @@
+{
+  "round": 11,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 405,
+      "description": "FR-7a: When a second exit_clean is downgraded to Continue and then create_judge_decision is called, the MemoryStateStore will succeed (decision is now 'continue'). However, if the DB unique constraint on exit_clean fires for a legitimate race in multi-replica deployments (the application already downgraded, but another replica's exit_clean persisted first), the error is logged as 'non-fatal' and the already-downgraded Continue decision is still returned to the driver. The driver then treats it as Continue, which is correct. But the decision is NOT persisted — creating a gap in the Stage 2 training dataset. The non-fatal log-and-continue pattern means decision persistence failures are silently dropped.",
+      "suggestion": "Consider retrying persistence once on failure, or at minimum logging at WARN with explicit mention that the decision was not recorded for Stage 2 training data."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 623,
+      "description": "Harden audit-found-issues path: when the judge returns Continue but round >= max_rounds (line 690 in diff), dispatch is correctly blocked and the loop fails. However, the next code block (revise evaluation at max_rounds, line 751+) also invokes the judge when round >= max_rounds after a revise completes. This means a single loop tick at max_rounds could invoke the judge TWICE if both the audit evaluation and the revise evaluation paths execute in the same tick — once for the audit verdict (with Continue blocked at max_rounds) and once for the revise evaluation. This double-invocation burns two calls against the cost ceiling. In practice, only one path executes per tick (audit evaluation OR revise evaluation), so this is unlikely to manifest, but the code structure makes the invariant non-obvious.",
+      "suggestion": "Add a comment documenting that only one of the audit-evaluation or revise-evaluation paths runs per tick, so double invocation cannot happen."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 1035,
+      "description": "FR-1c states the judge is NOT invoked on 'clean == true AND round == 1'. The code skips the judge for ALL clean verdicts at every round by routing them directly through review_converge_clean. While the comment at line 1088 (in diff) documents this as intentional and FR-1b triggers all assume clean==false, this is still a literal deviation from FR-1c which specifically exempts only round 1. For round 2+ clean verdicts after a previous non-clean verdict (e.g., judge returned exit_clean on round 2, implementor fixed issues, reviewer says clean on round 3), the spec may have intended the judge to validate the 'now clean' verdict wasn't premature. The deviation is safe but should be tracked.",
+      "suggestion": "No code change needed. The behavior is sound. Consider proposing a spec clarification that all clean verdicts skip the judge, not just round 1."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 234,
+      "description": "Token budget math is tight for edge cases. MAX_SPEC_CHARS(4K) + MAX_ROUND_CHARS(3K) + MAX_VERDICT_CHARS(2K) = 9K chars for truncatable fields. Plus recurring_findings (10 × ~200 = 2K), system prompt (~2K sent separately), and JSON envelope overhead (~2K) totals ~15K chars (~3.75K tokens). The MAX_INPUT_CHARS=24K progressive truncation guard (which would be ~6K tokens) provides safety. However, the current_verdict truncation only limits the issues array to 10 entries but doesn't limit the size of individual issue descriptions, which could be arbitrarily long. A verdict with 10 issues each having 500-char descriptions would add ~5K chars beyond the 2K budget.",
+      "suggestion": "Add per-issue description truncation (e.g., 200 chars each) within the current_verdict truncation logic, or include current_verdict in the overall character budget calculation before progressive truncation."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/tests/judge_integration.rs",
+      "description": "No integration test covers the judge error/timeout fallback path through the full driver tick. The spec (NFR-5) requires a 'Fallback: mock judge returns error -> driver uses heuristic; assert identical behavior to the feature-flag-off case.' The test test_review_judge_disabled_uses_heuristic tests judge_enabled=false (no judge wired), but there is no test where the judge IS wired but the model client returns an error, verifying the driver falls back to heuristic. The unit test test_evaluate_error_falls_back tests the judge module alone, not the driver integration.",
+      "suggestion": "Add an integration test with an ErrorJudgeClient wired into the driver, and verify the driver produces the same state transitions as the judge-disabled case."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 300,
+      "description": "Progressive truncation: when serialized input exceeds MAX_INPUT_CHARS, the code calls `reduced.rounds.split_off(half)` which keeps the SECOND half (newer rounds) and discards the first half. However, split_off returns the elements from `half` to the end, so `reduced.rounds` is actually set to those later elements. This is correct behavior (keeping recent rounds), but the variable name `reduced.rounds = reduced.rounds.split_off(half)` is confusing because split_off modifies self in-place to keep [0..half] and returns [half..]. The assignment overwrites the original with the split-off portion, effectively keeping [half..]. This works but is easy to misread.",
+      "suggestion": "Consider using `reduced.rounds.drain(..half)` instead for clarity, or add a comment explaining the split_off behavior."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 100,
+      "description": "Indentation inconsistency: the match arms inside the else block (lines 100-109) use different indentation from the surrounding code. The match block is indented with extra spaces compared to the if/else structure it's nested in.",
+      "suggestion": "Normalize the indentation of the match block to be consistent with the surrounding if/else."
+    }
+  ]
+}
