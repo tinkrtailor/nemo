@@ -832,3 +832,304 @@ async fn test_review_continue_at_max_rounds_includes_reasoning() {
     assert!(reason.contains("Judge wanted to continue"));
     assert!(reason.contains("Issues still need work"));
 }
+
+// ---------------------------------------------------------------------------
+// Harden revise-evaluation path tests (NFR-5 gap)
+// ---------------------------------------------------------------------------
+
+/// Set up a hardening loop where the revise stage has completed at max_rounds.
+/// This models the path in driver.rs where a revise job finishes and the driver
+/// must decide final disposition via the judge (lines 754-842).
+///
+/// The setup includes a prior audit round (so extract_issues_from_output can find it)
+/// and the current revise round as the active completed job.
+async fn setup_harden_revise_at_max_rounds(
+    store: &MemoryStateStore,
+    dispatcher: &MockJobDispatcher,
+    git: &MockGitOperations,
+    audit_verdict: serde_json::Value,
+) -> LoopRecord {
+    let max_rounds = 5;
+    let mut record = make_loop_record();
+    record.state = LoopState::Hardening;
+    record.sub_state = Some(SubState::Dispatched);
+    record.round = max_rounds;
+    record.max_rounds = max_rounds;
+    record.harden = true;
+    record.harden_only = true;
+    record.kind = LoopKind::Harden;
+    record.active_job_name = Some("revise-job".to_string());
+    store.create_loop(&record).await.unwrap();
+
+    // Create a prior completed audit round (the driver extracts issues from the last audit round)
+    let audit_round = RoundRecord {
+        id: Uuid::new_v4(),
+        loop_id: record.id,
+        round: max_rounds - 1,
+        stage: "audit".to_string(),
+        input: None,
+        output: Some(audit_verdict.clone()),
+        started_at: Some(Utc::now()),
+        completed_at: Some(Utc::now()),
+        duration_secs: Some(10),
+        job_name: Some("audit-job-prev".to_string()),
+    };
+    store.create_round(&audit_round).await.unwrap();
+
+    // Create the current revise round (open, not yet completed - driver will complete it)
+    let revise_output = serde_json::json!({
+        "revised_spec_path": "specs/test.md",
+        "summary": "Revised spec"
+    });
+    let revise_envelope = serde_json::json!({
+        "stage": "revise",
+        "data": revise_output,
+    });
+    let revise_round = RoundRecord {
+        id: Uuid::new_v4(),
+        loop_id: record.id,
+        round: max_rounds,
+        stage: "revise".to_string(),
+        input: None,
+        output: None,
+        started_at: Some(Utc::now()),
+        completed_at: None,
+        duration_secs: None,
+        job_name: Some("revise-job".to_string()),
+    };
+    store.create_round(&revise_round).await.unwrap();
+
+    // Set revise job to Succeeded
+    let job = k8s_openapi::api::batch::v1::Job {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some("revise-job".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    dispatcher.create_job(&job).await.unwrap();
+    dispatcher
+        .set_job_status("revise-job", JobStatus::Succeeded)
+        .await;
+
+    // Set revise job logs with NAUTILOOP_RESULT
+    let logs = format!(
+        "NAUTILOOP_RESULT:{}",
+        serde_json::to_string(&revise_envelope).unwrap()
+    );
+    dispatcher.set_job_logs("revise-job", &logs).await;
+
+    // Set spec file in git
+    git.add_file("specs/test.md", "# Test spec\nSome requirements")
+        .await;
+
+    record
+}
+
+/// Judge returns ExitClean after revise at max_rounds -> HARDENED (harden_only).
+#[tokio::test]
+async fn test_harden_revise_judge_exit_clean_hardens() {
+    let store = Arc::new(MemoryStateStore::new());
+    let dispatcher = Arc::new(MockJobDispatcher::new());
+    let git = Arc::new(MockGitOperations::new());
+    install_fresh_creds(&dispatcher).await;
+
+    let audit_verdict = serde_json::json!({
+        "clean": false,
+        "issues": [{
+            "severity": "low",
+            "category": "style",
+            "description": "Minor wording issue",
+            "suggestion": "Rephrase"
+        }],
+        "summary": "Minor style issues",
+        "token_usage": {"input": 100, "output": 50}
+    });
+
+    let record =
+        setup_harden_revise_at_max_rounds(&store, &dispatcher, &git, audit_verdict).await;
+
+    let judge_response = r#"{"decision": "exit_clean", "confidence": 0.90, "reasoning": "Spec is functionally complete despite minor wording"}"#;
+    let driver = build_driver(store.clone(), dispatcher, git, judge_response);
+
+    let new_state = driver.tick(record.id).await.unwrap();
+    assert_eq!(new_state, LoopState::Hardened);
+
+    let updated = store.get_loop(record.id).await.unwrap().unwrap();
+    assert_eq!(updated.state, LoopState::Hardened);
+
+    // FR-5b: backfill on terminal
+    let decisions = store.get_judge_decisions(record.id).await.unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].decision, "exit_clean");
+    assert_eq!(decisions[0].phase, "harden");
+    assert_eq!(decisions[0].trigger, "max_rounds");
+    assert_eq!(
+        decisions[0].loop_final_state.as_deref(),
+        Some("HARDENED")
+    );
+}
+
+/// Judge returns ExitEscalate after revise at max_rounds -> AWAITING_APPROVAL.
+#[tokio::test]
+async fn test_harden_revise_judge_exit_escalate() {
+    let store = Arc::new(MemoryStateStore::new());
+    let dispatcher = Arc::new(MockJobDispatcher::new());
+    let git = Arc::new(MockGitOperations::new());
+    install_fresh_creds(&dispatcher).await;
+
+    let audit_verdict = serde_json::json!({
+        "clean": false,
+        "issues": [{
+            "severity": "high",
+            "category": "completeness",
+            "description": "Missing edge case coverage",
+            "suggestion": "Needs human review"
+        }],
+        "summary": "Incomplete",
+        "token_usage": {"input": 100, "output": 50}
+    });
+
+    let record =
+        setup_harden_revise_at_max_rounds(&store, &dispatcher, &git, audit_verdict).await;
+
+    let judge_response = r#"{"decision": "exit_escalate", "confidence": 0.85, "reasoning": "Revise could not resolve completeness issues, needs human input"}"#;
+    let driver = build_driver(store.clone(), dispatcher, git, judge_response);
+
+    let new_state = driver.tick(record.id).await.unwrap();
+    assert_eq!(new_state, LoopState::AwaitingApproval);
+
+    let updated = store.get_loop(record.id).await.unwrap().unwrap();
+    let reason = updated.failure_reason.as_ref().unwrap();
+    assert!(reason.contains("Judge escalated at max rounds"));
+    assert!(reason.contains("needs human input"));
+
+    let decisions = store.get_judge_decisions(record.id).await.unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].decision, "exit_escalate");
+    assert_eq!(decisions[0].phase, "harden");
+}
+
+/// Judge returns ExitFail after revise at max_rounds -> FAILED with judge reasoning.
+#[tokio::test]
+async fn test_harden_revise_judge_exit_fail() {
+    let store = Arc::new(MemoryStateStore::new());
+    let dispatcher = Arc::new(MockJobDispatcher::new());
+    let git = Arc::new(MockGitOperations::new());
+    install_fresh_creds(&dispatcher).await;
+
+    let audit_verdict = serde_json::json!({
+        "clean": false,
+        "issues": [{
+            "severity": "critical",
+            "category": "correctness",
+            "description": "Contradictory requirements",
+            "suggestion": "Cannot be resolved"
+        }],
+        "summary": "Impossible spec",
+        "token_usage": {"input": 100, "output": 50}
+    });
+
+    let record =
+        setup_harden_revise_at_max_rounds(&store, &dispatcher, &git, audit_verdict).await;
+
+    let judge_response = r#"{"decision": "exit_fail", "confidence": 0.95, "reasoning": "Spec has irreconcilable contradictions"}"#;
+    let driver = build_driver(store.clone(), dispatcher, git, judge_response);
+
+    let new_state = driver.tick(record.id).await.unwrap();
+    assert_eq!(new_state, LoopState::Failed);
+
+    let updated = store.get_loop(record.id).await.unwrap().unwrap();
+    let reason = updated.failure_reason.as_ref().unwrap();
+    assert!(reason.contains("Judge failed at max rounds"));
+    assert!(reason.contains("irreconcilable contradictions"));
+
+    // FR-5b: backfill on terminal
+    let decisions = store.get_judge_decisions(record.id).await.unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].decision, "exit_fail");
+    assert_eq!(
+        decisions[0].loop_final_state.as_deref(),
+        Some("FAILED")
+    );
+}
+
+/// Judge returns Continue after revise at max_rounds -> FAILED (cannot dispatch more rounds).
+#[tokio::test]
+async fn test_harden_revise_judge_continue_at_max_rounds_fails() {
+    let store = Arc::new(MemoryStateStore::new());
+    let dispatcher = Arc::new(MockJobDispatcher::new());
+    let git = Arc::new(MockGitOperations::new());
+    install_fresh_creds(&dispatcher).await;
+
+    let audit_verdict = serde_json::json!({
+        "clean": false,
+        "issues": [{
+            "severity": "high",
+            "category": "correctness",
+            "description": "Logic gap in spec",
+            "suggestion": "Revise section 3"
+        }],
+        "summary": "Issues remain",
+        "token_usage": {"input": 100, "output": 50}
+    });
+
+    let record =
+        setup_harden_revise_at_max_rounds(&store, &dispatcher, &git, audit_verdict).await;
+
+    let judge_response = r#"{"decision": "continue", "confidence": 0.6, "reasoning": "Issues are fixable but we are out of rounds"}"#;
+    let driver = build_driver(store.clone(), dispatcher, git, judge_response);
+
+    let new_state = driver.tick(record.id).await.unwrap();
+    assert_eq!(new_state, LoopState::Failed);
+
+    let updated = store.get_loop(record.id).await.unwrap().unwrap();
+    let reason = updated.failure_reason.as_ref().unwrap();
+    assert!(reason.contains("Max harden rounds"));
+    assert!(reason.contains("Judge wanted to continue"));
+    assert!(reason.contains("out of rounds"));
+}
+
+/// No judge available after revise at max_rounds -> FAILED with generic message.
+#[tokio::test]
+async fn test_harden_revise_no_judge_at_max_rounds_fails() {
+    let store = Arc::new(MemoryStateStore::new());
+    let dispatcher = Arc::new(MockJobDispatcher::new());
+    let git = Arc::new(MockGitOperations::new());
+    install_fresh_creds(&dispatcher).await;
+
+    let audit_verdict = serde_json::json!({
+        "clean": false,
+        "issues": [{
+            "severity": "high",
+            "description": "Bug",
+            "suggestion": "Fix"
+        }],
+        "summary": "Issues",
+        "token_usage": {"input": 100, "output": 50}
+    });
+
+    let record =
+        setup_harden_revise_at_max_rounds(&store, &dispatcher, &git, audit_verdict).await;
+
+    // Build driver WITHOUT judge (disabled)
+    let mut config = make_config();
+    config.orchestrator.judge_enabled = false;
+    let driver = ConvergentLoopDriver::new(
+        store.clone(),
+        dispatcher,
+        git,
+        config,
+    );
+
+    let new_state = driver.tick(record.id).await.unwrap();
+    assert_eq!(new_state, LoopState::Failed);
+
+    let updated = store.get_loop(record.id).await.unwrap().unwrap();
+    let reason = updated.failure_reason.as_ref().unwrap();
+    assert!(reason.contains("Max harden rounds"));
+
+    // No judge decisions should exist
+    let decisions = store.get_judge_decisions(record.id).await.unwrap();
+    assert_eq!(decisions.len(), 0);
+}

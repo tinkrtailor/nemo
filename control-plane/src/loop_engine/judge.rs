@@ -193,10 +193,12 @@ impl OrchestratorJudge {
 
         // Build judge input with truncation to stay within 8K input token budget (FR-4b).
         // Approximate 1 token ≈ 4 chars; budget ~32K chars total for 8K tokens.
-        // Budget breakdown: spec 6K + rounds 4K + verdict 2K + recurring ~2K + system prompt ~2K
-        //                 + JSON envelope overhead ~2K = ~18K chars (~4.5K tokens), well within 8K.
-        const MAX_SPEC_CHARS: usize = 6_000;
-        const MAX_ROUND_CHARS: usize = 4_000;
+        // Budget breakdown: spec 4K + rounds 3K + verdict 2K + recurring ~2K + system prompt ~2K
+        //                 + JSON envelope overhead ~2K = ~15K chars (~3.75K tokens), well within 8K.
+        // Reduced from 6K/4K to 4K/3K to increase headroom for loops with large recurring
+        // findings descriptions and verbose round summaries.
+        const MAX_SPEC_CHARS: usize = 4_000;
+        const MAX_ROUND_CHARS: usize = 3_000;
         const MAX_VERDICT_CHARS: usize = 2_000;
         const MAX_RECURRING_FINDINGS: usize = 10;
 
@@ -369,7 +371,8 @@ impl OrchestratorJudge {
             );
         }
 
-        // Log the decision
+        // Log the decision with Grafana-friendly span attributes (FR-6b).
+        // `judge_decision_total` is a counter attribute scrapeable by Prometheus/Grafana.
         tracing::info!(
             loop_id = %loop_id,
             round,
@@ -377,6 +380,7 @@ impl OrchestratorJudge {
             decision = output.decision.as_str(),
             confidence = output.confidence,
             duration_ms,
+            judge_decision_total = 1,
             "Judge decision"
         );
 
@@ -439,6 +443,13 @@ impl OrchestratorJudge {
             //
             // Exception: low/medium-only findings at round 2+ still trigger the judge
             // for triviality override (Problem 1), since those are the ambiguous cases.
+            //
+            // Known deviation: rounds below judge_min_round with ANY high/critical
+            // finding skip the judge entirely, which means the judge cannot
+            // override-accept a borderline high-severity classification at round 2.
+            // Operators can set judge_min_round = 1 to override this behavior.
+            // A future refinement could allow the judge when high-severity count <= 1
+            // and all other findings are low/medium.
             if !current_issues.is_empty()
                 && current_issues.iter().all(|i| {
                     i.severity == crate::types::verdict::Severity::Low
