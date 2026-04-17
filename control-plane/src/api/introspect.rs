@@ -251,6 +251,9 @@ async fn exec_introspect_script(
     let cmd = vec![
         "/bin/sh",
         "-c",
+        // The script emits NDJSON (processes line first, then worktree). On
+        // timeout, partial output (processes only) is preserved. The || fallback
+        // fires only when the script is entirely absent or crashes at startup.
         "timeout 2 /usr/local/bin/nautiloop-introspect 2>/dev/null || echo '{\"processes\":[],\"worktree\":{\"path\":\"/work\",\"target_dir_bytes\":null,\"target_dir_artifacts\":null,\"uncommitted_files\":null,\"head_sha\":null}}'",
     ];
 
@@ -414,34 +417,64 @@ pub fn parse_memory_to_bytes(mem: &str) -> u64 {
     } else if let Some(ti) = mem.strip_suffix("Ti") {
         ti.parse::<u64>().unwrap_or(0).saturating_mul(1024 * 1024 * 1024 * 1024)
     } else if let Some(gi) = mem.strip_suffix("Gi") {
-        gi.parse::<u64>().unwrap_or(0) * 1024 * 1024 * 1024
+        gi.parse::<u64>().unwrap_or(0).saturating_mul(1024 * 1024 * 1024)
     } else if let Some(mi) = mem.strip_suffix("Mi") {
-        mi.parse::<u64>().unwrap_or(0) * 1024 * 1024
+        mi.parse::<u64>().unwrap_or(0).saturating_mul(1024 * 1024)
     } else if let Some(ki) = mem.strip_suffix("Ki") {
-        ki.parse::<u64>().unwrap_or(0) * 1024
+        ki.parse::<u64>().unwrap_or(0).saturating_mul(1024)
     } else if let Some(g) = mem.strip_suffix('G') {
-        g.parse::<u64>().unwrap_or(0) * 1_000_000_000
+        g.parse::<u64>().unwrap_or(0).saturating_mul(1_000_000_000)
     } else if let Some(m) = mem.strip_suffix('M') {
-        m.parse::<u64>().unwrap_or(0) * 1_000_000
+        m.parse::<u64>().unwrap_or(0).saturating_mul(1_000_000)
     } else if let Some(k) = mem.strip_suffix('k') {
-        k.parse::<u64>().unwrap_or(0) * 1000
+        k.parse::<u64>().unwrap_or(0).saturating_mul(1000)
     } else {
         mem.parse::<u64>().unwrap_or(0)
     }
 }
 
-/// Parse the introspection script JSON output into processes and worktree.
+/// Parse the introspection script NDJSON output into processes and worktree.
+///
+/// The script emits two JSON lines (NDJSON):
+///   Line 1: `{"processes": [...]}`
+///   Line 2: `{"worktree": {...}}`
+///
+/// On timeout, only line 1 may be present — processes are preserved even when
+/// worktree collection is killed mid-flight (FR-2c). We also support the legacy
+/// single-object format (one JSON object with both keys) for backward
+/// compatibility with older agent images and the exec fallback.
 pub fn parse_introspect_output(output: &str) -> (Vec<ProcessInfo>, WorktreeInfo) {
-    let parsed: serde_json::Value = match serde_json::from_str(output.trim()) {
-        Ok(v) => v,
-        Err(_) => return (Vec::new(), default_worktree()),
-    };
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return (Vec::new(), default_worktree());
+    }
 
-    let processes = parsed
-        .get("processes")
-        .and_then(|p| p.as_array())
-        .map(|arr| {
-            arr.iter()
+    // Collect all parsed JSON values. Try the whole output as a single object
+    // first (legacy format / exec fallback), then fall back to line-by-line
+    // NDJSON parsing.
+    let values: Vec<serde_json::Value> =
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            vec![v]
+        } else {
+            trimmed
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        return None;
+                    }
+                    serde_json::from_str(line).ok()
+                })
+                .collect()
+        };
+
+    let mut processes = Vec::new();
+    let mut worktree = default_worktree();
+
+    for parsed in &values {
+        if let Some(arr) = parsed.get("processes").and_then(|p| p.as_array()) {
+            processes = arr
+                .iter()
                 .filter_map(|v| {
                     Some(ProcessInfo {
                         pid: v.get("pid")?.as_u64()? as u32,
@@ -452,31 +485,30 @@ pub fn parse_introspect_output(output: &str) -> (Vec<ProcessInfo>, WorktreeInfo)
                         age_seconds: v.get("age_seconds")?.as_u64()?,
                     })
                 })
-                .collect()
-        })
-        .unwrap_or_default();
+                .collect();
+        }
 
-    let worktree = parsed
-        .get("worktree")
-        .map(|w| WorktreeInfo {
-            path: w
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("/work")
-                .to_string(),
-            target_dir_artifacts: w
-                .get("target_dir_artifacts")
-                .and_then(|v| v.as_u64()),
-            target_dir_bytes: w.get("target_dir_bytes").and_then(|v| v.as_u64()),
-            uncommitted_files: w
-                .get("uncommitted_files")
-                .and_then(|v| v.as_u64()),
-            head_sha: w
-                .get("head_sha")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-        })
-        .unwrap_or_else(default_worktree);
+        if let Some(w) = parsed.get("worktree") {
+            worktree = WorktreeInfo {
+                path: w
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("/work")
+                    .to_string(),
+                target_dir_artifacts: w
+                    .get("target_dir_artifacts")
+                    .and_then(|v| v.as_u64()),
+                target_dir_bytes: w.get("target_dir_bytes").and_then(|v| v.as_u64()),
+                uncommitted_files: w
+                    .get("uncommitted_files")
+                    .and_then(|v| v.as_u64()),
+                head_sha: w
+                    .get("head_sha")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            };
+        }
+    }
 
     (processes, worktree)
 }
@@ -745,11 +777,47 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_introspect_output_valid() {
+    fn test_parse_introspect_output_ndjson() {
+        // NDJSON format: two lines, processes first, then worktree.
+        let output = concat!(
+            r#"{"processes":[{"pid":12,"ppid":1,"user":"agent","cpu_percent":3.2,"cmd":"claude","age_seconds":1320},{"pid":126,"ppid":124,"user":"agent","cpu_percent":0.0,"cmd":"cargo-clippy clippy --workspace -- -D warnings","age_seconds":900}]}"#,
+            "\n",
+            r#"{"worktree":{"path":"/work","target_dir_bytes":3221225472,"target_dir_artifacts":1069,"uncommitted_files":2,"head_sha":"42bffd9"}}"#,
+        );
+
+        let (processes, worktree) = parse_introspect_output(output);
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].pid, 12);
+        assert_eq!(processes[0].cmd, "claude");
+        assert_eq!(processes[1].pid, 126);
+        assert_eq!(worktree.target_dir_artifacts, Some(1069));
+        assert_eq!(worktree.target_dir_bytes, Some(3221225472));
+        assert_eq!(worktree.uncommitted_files, Some(2));
+        assert_eq!(worktree.head_sha.as_deref(), Some("42bffd9"));
+    }
+
+    #[test]
+    fn test_parse_introspect_output_ndjson_processes_only() {
+        // Simulates a timeout that killed the script after process collection
+        // but before worktree emission (FR-2c). Processes must be preserved.
+        let output = r#"{"processes":[{"pid":12,"ppid":1,"user":"agent","cpu_percent":3.2,"cmd":"claude","age_seconds":1320}]}"#;
+
+        let (processes, worktree) = parse_introspect_output(output);
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].pid, 12);
+        assert_eq!(processes[0].cmd, "claude");
+        // Worktree falls back to defaults since no worktree line was emitted.
+        assert_eq!(worktree.path, "/work");
+        assert_eq!(worktree.target_dir_bytes, None);
+        assert_eq!(worktree.head_sha, None);
+    }
+
+    #[test]
+    fn test_parse_introspect_output_legacy_single_object() {
+        // Legacy format: single JSON object with both sections (backward compat).
         let output = r#"{
             "processes": [
-                {"pid": 12, "ppid": 1, "user": "agent", "cpu_percent": 3.2, "cmd": "claude", "age_seconds": 1320},
-                {"pid": 126, "ppid": 124, "user": "agent", "cpu_percent": 0.0, "cmd": "cargo-clippy clippy --workspace -- -D warnings", "age_seconds": 900}
+                {"pid": 12, "ppid": 1, "user": "agent", "cpu_percent": 3.2, "cmd": "claude", "age_seconds": 1320}
             ],
             "worktree": {
                 "path": "/work",
@@ -761,14 +829,10 @@ mod tests {
         }"#;
 
         let (processes, worktree) = parse_introspect_output(output);
-        assert_eq!(processes.len(), 2);
+        assert_eq!(processes.len(), 1);
         assert_eq!(processes[0].pid, 12);
-        assert_eq!(processes[0].cmd, "claude");
-        assert_eq!(processes[1].pid, 126);
         assert_eq!(worktree.target_dir_artifacts, Some(1069));
-        assert_eq!(worktree.target_dir_bytes, Some(3221225472));
         assert_eq!(worktree.uncommitted_files, Some(2));
-        assert_eq!(worktree.head_sha.as_deref(), Some("42bffd9"));
     }
 
     #[test]
@@ -787,19 +851,10 @@ mod tests {
 
     #[test]
     fn test_parse_introspect_output_partial_worktree() {
-        // Matches the fallback JSON emitted when `timeout 2` kills the script:
+        // Matches the fallback JSON emitted when the script is absent:
         // all worktree fields are null so callers render "unavailable" instead of
         // misleading zeros (e.g. "0 artifacts" implying empty target dir).
-        let output = r#"{
-            "processes": [],
-            "worktree": {
-                "path": "/work",
-                "target_dir_bytes": null,
-                "target_dir_artifacts": null,
-                "uncommitted_files": null,
-                "head_sha": null
-            }
-        }"#;
+        let output = r#"{"processes":[],"worktree":{"path":"/work","target_dir_bytes":null,"target_dir_artifacts":null,"uncommitted_files":null,"head_sha":null}}"#;
         let (processes, worktree) = parse_introspect_output(output);
         assert!(processes.is_empty());
         assert_eq!(worktree.path, "/work");

@@ -82,13 +82,9 @@ pub async fn run_watch(client: &NemoClient, loop_id: &str) -> Result<()> {
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     };
 
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-
     // Install a panic hook that restores the terminal before printing the
-    // panic message. Without this, a panic during watch mode leaves the
-    // terminal in raw mode, requiring the user to run `reset`.
+    // panic message. Installed BEFORE entering raw mode so that panics during
+    // terminal setup are also handled correctly.
     // Use Arc so the original hook is shared (not consumed) by the closure,
     // allowing us to restore it on normal exit.
     let original_hook = std::sync::Arc::new(std::panic::take_hook());
@@ -98,6 +94,10 @@ pub async fn run_watch(client: &NemoClient, loop_id: &str) -> Result<()> {
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         hook_for_panic(info);
     }));
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
 
     let result = run_watch_loop(client, loop_id).await;
 

@@ -1,16 +1,16 @@
 #!/bin/sh
 # nautiloop-introspect — collect agent container runtime state (FR-2d).
-# Output: single JSON object with "processes" and "worktree" sections.
+# Output: two NDJSON lines — processes first, then worktree.
 # Designed to run in < 2s. Read-only: ps, du, git-status. No writes.
 # No set -e: each section must fail independently so partial output is still
 # collected (FR-2c). The control-plane parser handles missing/null fields.
 #
-# Processes are collected FIRST (most valuable diagnostic signal), then
-# worktree info (slower on large projects). Both are emitted together in
-# the final heredoc — a mid-script timeout loses all output. The exec
-# wrapper's || fallback handles this case by emitting a null-fields JSON.
+# Processes are collected and EMITTED FIRST (most valuable diagnostic signal).
+# Worktree info follows as a second JSON line. If a timeout kills the script
+# mid-worktree, the already-emitted process data is preserved in the exec
+# output buffer — the control-plane parser handles partial NDJSON gracefully.
 
-# Section 1: processes (top 30 by CPU) — fastest section, emitted first
+# Section 1: processes (top 30 by CPU) — collected and emitted immediately
 ps_output=$(ps -eo pid,ppid,user,pcpu,etime,args --sort=-pcpu --no-headers 2>/dev/null | head -30 || echo "")
 ps_json=$(echo "$ps_output" | jq -Rs '
   [split("\n") | .[] | select(length > 0) |
@@ -41,10 +41,14 @@ ps_json=$(echo "$ps_output" | jq -Rs '
   ]
 ') || ps_json='[]'
 
+# Emit processes immediately so they survive a mid-worktree timeout (FR-2c).
+printf '{"processes":%s}\n' "$ps_json"
+
 # Section 2: worktree info (can be slow on large projects)
 # du -sb summarizes total size in bytes (FR-2a). On large target dirs this
-# can take >1s, which is why processes are collected first.
-target_bytes=$(du -sb /work/target 2>/dev/null | awk '{print $1}' || echo "null")
+# can take >1s, which is why processes are emitted before this section.
+target_bytes=$(du -sb /work/target 2>/dev/null | awk '{print $1}')
+target_bytes=${target_bytes:-null}
 # Use ls -U to skip sorting — unnecessary overhead on large dep dirs.
 if [ -d /work/target/debug/deps ]; then
   target_artifacts=$(ls -U /work/target/debug/deps 2>/dev/null | wc -l)
@@ -69,7 +73,7 @@ else
 fi
 
 # Quote strings, handle nulls
-if [ "$target_bytes" = "" ] || [ "$target_bytes" = "null" ]; then
+if [ "$target_bytes" = "" ]; then
   target_bytes="null"
 fi
 # Use jq for safe JSON string escaping of head_sha
@@ -79,16 +83,9 @@ else
   head_sha_json="null"
 fi
 
-# Build final JSON
-cat <<ENDJSON
-{
-  "processes": $ps_json,
-  "worktree": {
-    "path": "/work",
-    "target_dir_bytes": $target_bytes,
-    "target_dir_artifacts": $(echo "$target_artifacts" | tr -d ' '),
-    "uncommitted_files": $uncommitted,
-    "head_sha": $head_sha_json
-  }
-}
-ENDJSON
+# Emit worktree as second NDJSON line
+printf '{"worktree":{"path":"/work","target_dir_bytes":%s,"target_dir_artifacts":%s,"uncommitted_files":%s,"head_sha":%s}}\n' \
+  "$target_bytes" \
+  "$(echo "$target_artifacts" | tr -d ' ')" \
+  "$uncommitted" \
+  "$head_sha_json"
