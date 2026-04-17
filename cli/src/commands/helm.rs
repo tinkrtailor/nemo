@@ -1092,6 +1092,12 @@ fn emit_or_skip_replayed_line(
     }
 
     emitted_lines.push(entry.line.clone());
+    // Cap emitted_lines to prevent unbounded growth during long sessions with reconnections
+    if emitted_lines.len() > 2 * MAX_LOG_LINES {
+        emitted_lines.drain(..emitted_lines.len() - MAX_LOG_LINES);
+        // Reset replay_index since we've shifted the dedup buffer
+        *replay_index = emitted_lines.len();
+    }
     event_tx
         .send(AppEvent::LogLine(loop_id, entry))
         .map_err(|_| anyhow::anyhow!("helm event channel closed"))
@@ -1149,7 +1155,7 @@ fn compress_nautiloop_result(line: &str) -> String {
             let bracket_section = &line[bracket_start..];
             bracket_section.find(']').and_then(|bracket_end| {
                 let inside = &bracket_section[1..bracket_end];
-                inside.find("/r").map(|pos| &inside[pos + 2..])
+                inside.rfind("/r").map(|pos| &inside[pos + 2..])
             })
         })
         .unwrap_or("?");
@@ -1381,7 +1387,7 @@ fn render_logs(app: &mut App, area: Rect) -> Paragraph<'static> {
     } else {
         app.logs
             .iter()
-            .map(|entry| render_log_line(entry))
+            .map(render_log_line)
             .collect()
     };
 
