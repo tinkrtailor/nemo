@@ -190,7 +190,6 @@ pub struct PodIntrospectResponse {
     pub pod_name: String,
     pub pod_phase: String,
     pub collected_at: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub container_stats: Option<ContainerStats>,
     pub processes: Vec<ProcessInfo>,
     pub worktree: WorktreeInfo,
@@ -215,12 +214,9 @@ pub struct ProcessInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeInfo {
     pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub target_dir_artifacts: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub target_dir_bytes: Option<u64>,
     pub uncommitted_files: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub head_sha: Option<String>,
 }
 

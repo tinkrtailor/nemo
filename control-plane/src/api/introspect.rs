@@ -96,10 +96,30 @@ pub async fn pod_introspect(
         .and_then(|s| s.phase.clone())
         .unwrap_or_else(|| "Unknown".to_string());
 
-    // FR-2a: exec introspection script with 3s overall timeout (FR-1c)
-    let exec_result = exec_introspect_script(kube_client, &pod_name, namespace).await;
+    // FR-1c: 3s overall timeout for the handler body (exec + metrics concurrently)
+    let handler_result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        // FR-2a + FR-2b: run exec and metrics fetch concurrently
+        let (exec_result, container_stats) = tokio::join!(
+            exec_introspect_script(kube_client, &pod_name, namespace),
+            fetch_container_metrics(kube_client, &pod_name, namespace),
+        );
+        (exec_result, container_stats)
+    })
+    .await;
 
-    // FR-1c: if exec timed out, return HTTP 503 so the caller retries on next poll
+    let (exec_result, container_stats) = match handler_result {
+        Ok(results) => results,
+        Err(_) => {
+            // FR-1c: overall 3s timeout exceeded → HTTP 503
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "pod introspection timeout"})),
+            )
+                .into_response());
+        }
+    };
+
+    // FR-1c: if exec itself timed out (within the 3s window), return 503
     if let Err(ref e) = exec_result
         && e.contains("timed out")
     {
@@ -109,9 +129,6 @@ pub async fn pod_introspect(
         )
             .into_response());
     }
-
-    // FR-2b: fetch container metrics (best-effort, parallel would be better but sequential is fine)
-    let container_stats = fetch_container_metrics(kube_client, &pod_name, namespace).await;
 
     let collected_at = Utc::now();
 
@@ -193,23 +210,30 @@ async fn exec_introspect_script(
 
     match result {
         Ok(Ok(mut attached)) => {
-            let mut output = String::new();
-            if let Some(mut stdout) = attached.stdout() {
-                let mut buf = vec![0u8; 65536];
-                loop {
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
-                        stdout.read(&mut buf),
-                    )
-                    .await
-                    {
-                        Ok(Ok(0)) => break,
-                        Ok(Ok(n)) => output.push_str(&String::from_utf8_lossy(&buf[..n])),
-                        Ok(Err(_)) | Err(_) => break,
+            // Wrap the entire read loop in a 2s timeout (FR-2c script budget).
+            // This prevents slow-dripping execs from exceeding the overall 3s handler budget.
+            let read_result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                async {
+                    let mut output = String::new();
+                    if let Some(mut stdout) = attached.stdout() {
+                        let mut buf = vec![0u8; 65536];
+                        loop {
+                            match stdout.read(&mut buf).await {
+                                Ok(0) => break,
+                                Ok(n) => output.push_str(&String::from_utf8_lossy(&buf[..n])),
+                                Err(_) => break,
+                            }
+                        }
                     }
-                }
+                    output
+                },
+            )
+            .await;
+            match read_result {
+                Ok(output) => Ok(output),
+                Err(_) => Err("exec read timed out after 2s".to_string()),
             }
-            Ok(output)
         }
         Ok(Err(e)) => Err(format!("exec failed: {e}")),
         Err(_) => Err("exec timed out after 3s".to_string()),

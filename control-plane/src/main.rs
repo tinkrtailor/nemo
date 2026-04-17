@@ -152,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
             let reconciler = Reconciler::new(
                 driver,
                 store.clone(),
+                config_arc.clone(),
                 Duration::from_secs(config.cluster.reconcile_interval_secs),
                 wake.clone(),
             );

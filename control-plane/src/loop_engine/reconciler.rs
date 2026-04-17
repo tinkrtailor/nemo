@@ -3,6 +3,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use super::ConvergentLoopDriver;
+use crate::config::NautiloopConfig;
 use crate::state::StateStore;
 
 /// The reconciliation loop that drives all active loops.
@@ -12,6 +13,7 @@ use crate::state::StateStore;
 pub struct Reconciler {
     driver: Arc<ConvergentLoopDriver>,
     store: Arc<dyn StateStore>,
+    config: Arc<NautiloopConfig>,
     interval: Duration,
     wake: Arc<Notify>,
 }
@@ -20,12 +22,14 @@ impl Reconciler {
     pub fn new(
         driver: Arc<ConvergentLoopDriver>,
         store: Arc<dyn StateStore>,
+        config: Arc<NautiloopConfig>,
         interval: Duration,
         wake: Arc<Notify>,
     ) -> Self {
         Self {
             driver,
             store,
+            config,
             interval,
             wake,
         }
@@ -69,7 +73,11 @@ impl Reconciler {
     }
 
     /// FR-6b: delete pod_snapshots older than 7 days.
+    /// Only runs when record_introspection is enabled to avoid wasting queries.
     async fn sweep_old_pod_snapshots(&self) {
+        if !self.config.observability.record_introspection {
+            return;
+        }
         const TTL_HOURS: u32 = 168; // 7 days
         match self.store.cleanup_pod_snapshots(TTL_HOURS).await {
             Ok(0) => {}
@@ -203,6 +211,7 @@ mod tests {
         let reconciler = Reconciler::new(
             driver,
             store.clone(),
+            Arc::new(NautiloopConfig::default()),
             Duration::from_millis(50),
             wake.clone(),
         );

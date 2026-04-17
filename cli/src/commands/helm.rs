@@ -1147,10 +1147,19 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
 
     frame.render_widget(render_details(app), right[0]);
 
-    // FR-5a/FR-5d: log pane is always visible; introspect pane overlays right side
+    // FR-5a/FR-5d: log pane is always visible; side pane overlays right side
     match app.side_panel {
-        SidePanel::Closed | SidePanel::Inspect => {
+        SidePanel::Closed => {
             frame.render_widget(render_logs(app, right[1]), right[1]);
+        }
+        SidePanel::Inspect => {
+            // FR-5a: inspect pane shows existing rounds view
+            let log_inspect = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .split(right[1]);
+            frame.render_widget(render_logs(app, log_inspect[0]), log_inspect[0]);
+            frame.render_widget(render_inspect_pane(app), log_inspect[1]);
         }
         SidePanel::Introspect => {
             // FR-5d: horizontal split — logs left, introspect right
@@ -1305,6 +1314,62 @@ fn render_logs(app: &App, area: Rect) -> Paragraph<'static> {
         .style(Style::default().fg(TEXT).bg(BG))
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0))
+}
+
+/// Render the inspect pane showing rounds/stage data (FR-5a).
+fn render_inspect_pane(app: &App) -> Paragraph<'static> {
+    let body = if let Some(inspect) = &app.inspect {
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("Branch ", Style::default().fg(MUTED)),
+                Span::styled(inspect.branch.clone(), Style::default().fg(TEXT)),
+                Span::styled(
+                    format!("  {} round{}", inspect.rounds.len(), if inspect.rounds.len() == 1 { "" } else { "s" }),
+                    Style::default().fg(MUTED),
+                ),
+            ]),
+            Line::from(Span::styled("", Style::default())),
+        ];
+
+        for round in inspect.rounds.iter().rev() {
+            lines.push(Line::from(Span::styled(
+                format!("Round {}", round.round),
+                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            )));
+            let summaries = round_stage_summaries(round);
+            for (label, summary) in summaries {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {label:>7} "),
+                        Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(summary, Style::default().fg(TEXT)),
+                ]));
+            }
+            lines.push(Line::from(Span::styled("", Style::default())));
+        }
+
+        Text::from(lines)
+    } else {
+        Text::from(vec![Line::from(Span::styled(
+            app.inspect_status.clone(),
+            Style::default().fg(MUTED),
+        ))])
+    };
+
+    Paragraph::new(body)
+        .block(
+            Block::default()
+                .title(Span::styled(
+                    " inspect ",
+                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER).bg(SURFACE))
+                .style(Style::default().bg(SURFACE)),
+        )
+        .style(Style::default().fg(TEXT).bg(SURFACE))
+        .wrap(Wrap { trim: false })
 }
 
 /// Render the introspect pane (FR-5b).

@@ -8,7 +8,7 @@ set -e
 ps_output=$(ps -eo pid,ppid,user,pcpu,etime,args --sort=-pcpu --no-headers 2>/dev/null | head -30 || echo "")
 ps_json=$(echo "$ps_output" | jq -Rs '
   [split("\n") | .[] | select(length > 0) |
-    capture("^\\s*(?<pid>[0-9]+)\\s+(?<ppid>[0-9]+)\\s+(?<user>\\S+)\\s+(?<cpu>[0-9.]+)\\s+(?<etime>\\S+)\\s+(?<cmd>.+)$") |
+    (capture("^\\s*(?<pid>[0-9]+)\\s+(?<ppid>[0-9]+)\\s+(?<user>\\S+)\\s+(?<cpu>[0-9.]+)\\s+(?<etime>\\S+)\\s+(?<cmd>.+)$") // empty) |
     {
       pid: (.pid | tonumber),
       ppid: (.ppid | tonumber),
