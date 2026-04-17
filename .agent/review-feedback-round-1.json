@@ -1,0 +1,62 @@
+{
+  "round": 1,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 189,
+      "description": "FR-3d violation: spec commit is attributed to 'nautiloop-control-plane' instead of the engineer. The spec requires: 'The spec commit inherits the engineer's identity (the same name/email already used for implement/revise commits). The first commit on the agent branch is attributed to the engineer, not nautiloop-bot.' But write_file_in_worktree (git/mod.rs:162-165) hardcodes user.name=nautiloop-control-plane and user.email=nautiloop@nautiloop.dev.",
+      "suggestion": "Either extend write_file to accept author identity, or add a new write_file_as method that accepts engineer name/email. The start handler should pass the engineer's identity so the commit is attributed correctly."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 189,
+      "description": "FR-2a commit message mismatch: spec requires commit message 'chore(spec): add {spec_path}' but write_file_in_worktree (git/mod.rs:168) uses 'chore(agent): add {path}'. The scope should be 'spec' not 'agent' for the initial spec commit on the agent branch.",
+      "suggestion": "Either parameterize the commit message in write_file, or add a dedicated method for writing the initial spec commit with the correct message format."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 196,
+      "description": "Silent failure on get_branch_sha: if write_file succeeds but get_branch_sha returns Err or Ok(None), the code silently keeps the pre-spec-commit SHA via 'if let Ok(Some(new_sha))'. This means current_sha stored in the DB points to the branch-creation commit, not the spec commit. The loop engine will start from the wrong SHA and may not see the spec file, or may overwrite it.",
+      "suggestion": "Treat get_branch_sha failure after a successful write_file as an error. At minimum log a warning. Ideally, return an error or retry, since the SHA must reflect the spec commit per FR-2a: 'The first round's current_sha is the SHA of this spec commit, not the default-branch tip.'"
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 58,
+      "description": "Empty spec_content (Some(\"\")) is accepted and treated as valid local spec content. An empty string passes the size check and bypasses the git read_file fallback, resulting in an empty spec file committed to the agent branch. The spec says 'Spec templates fit in a few KB' — an empty spec is clearly invalid input.",
+      "suggestion": "Add a check: if content.is_empty() { return Err(NautiloopError::BadRequest(\"spec_content must not be empty\".into())); }"
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 55,
+      "description": "FR-3c: The spec claims 'spec_path MUST match the existing path validation (already applied elsewhere — no .. traversal, no absolute paths, must end in .md). No new validation needed; FR-2a just reuses the existing check.' But no such path validation exists anywhere in the codebase. When spec_content is provided, the spec_path is used directly in write_file to create files on the agent branch — a path like '../../.git/config' or '/etc/cron.d/pwn' could write outside the intended directory (though git worktree limits the blast radius to the repo).",
+      "suggestion": "Add spec_path validation: reject paths containing '..', reject absolute paths (starting with '/'), and require '.md' extension. This protects against path traversal in the git worktree."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/start.rs",
+      "line": 57,
+      "description": "FR-5b specifies output format 'Spec:   specs/foo.md (local, 1,234 bytes)' with comma-formatted byte count. The implementation uses '{}' format which prints raw numbers without commas (e.g., '1234' instead of '1,234').",
+      "suggestion": "Use a thousands-separator formatting function for the byte count to match the spec's example output."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/start.rs",
+      "line": 71,
+      "description": "CLI unit tests (test_read_local_spec_file, test_read_nonexistent_spec_file_fails) only test std::fs::read_to_string behavior — they don't test any application logic. They don't exercise the actual run() function, the JSON body construction, or the error context message. NFR-4 asks for CLI tests that verify 'reading a local file and populating spec_content; fail fast when the file doesn't exist.'",
+      "suggestion": "Add tests that invoke the actual run() function (or at least the body construction logic) to verify spec_content is populated correctly and error messages include the expected context."
+    }
+  ]
+}
