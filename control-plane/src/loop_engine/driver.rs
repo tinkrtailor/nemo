@@ -606,63 +606,10 @@ impl ConvergentLoopDriver {
 
                 match verdict {
                     Some(v) if v.clean => {
-                        // Audit passed
+                        // Audit passed — delegate to shared convergence method
+                        // (eliminates duplication with judge exit_clean path)
                         if record.harden_only {
-                            // Clean up .agent/ artifacts before PR creation
-                            if let Err(e) = self.git.remove_path(&record.branch, ".agent").await {
-                                tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
-                            }
-
-                            // Harden only: create spec PR, merge it, terminal HARDENED (FR-23)
-                            let pr_title = format!(
-                                "chore(spec): harden {} for {}",
-                                record.spec_path, record.engineer,
-                            );
-                            let pr_body = format!(
-                                "Spec hardening completed in {} round(s).\n\nSpec: {}\nBranch: {}",
-                                record.round, record.spec_path, record.branch,
-                            );
-                            let pr_url = self
-                                .git
-                                .create_pr(
-                                    &record.branch,
-                                    &pr_title,
-                                    &pr_body,
-                                    &self.default_branch_for(record),
-                                )
-                                .await?;
-                            record.spec_pr_url = Some(pr_url);
-
-                            if self.config.harden.auto_merge_spec_pr {
-                                let merge_sha = self
-                                    .git
-                                    .merge_pr(
-                                        &record.branch,
-                                        &self.config.harden.merge_strategy,
-                                        &self.default_branch_for(record),
-                                    )
-                                    .await?;
-                                record.merge_sha = Some(merge_sha);
-                                record.merged_at = Some(chrono::Utc::now());
-
-                                record.state = LoopState::Hardened;
-                                record.sub_state = None;
-                                record.active_job_name = None;
-                                record.hardened_spec_path = Some(record.spec_path.clone());
-                                self.store.update_loop(record).await?;
-                                tracing::info!(loop_id = %record.id, "Harden loop HARDENED (spec PR merged)");
-                                Ok(LoopState::Hardened)
-                            } else {
-                                // PR created but not auto-merged: still HARDENED
-                                // (hardening converged, PR is the deliverable)
-                                record.state = LoopState::Hardened;
-                                record.sub_state = None;
-                                record.active_job_name = None;
-                                record.hardened_spec_path = Some(record.spec_path.clone());
-                                self.store.update_loop(record).await?;
-                                tracing::info!(loop_id = %record.id, "Harden loop HARDENED (spec PR created, human merge required)");
-                                Ok(LoopState::Hardened)
-                            }
+                            self.harden_converge_clean(record).await
                         } else if record.auto_approve {
                             // Auto-approve: go to implementing
                             self.start_implementing(record).await
@@ -1252,28 +1199,33 @@ impl ConvergentLoopDriver {
 
     /// Converge the harden loop as clean (shared by audit clean path and judge exit_clean).
     async fn harden_converge_clean(&self, record: &mut LoopRecord) -> Result<LoopState> {
-        if let Err(e) = self.git.remove_path(&record.branch, ".agent").await {
-            tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
-        }
+        // Idempotency guard: only create PR if not already created (mirrors review_converge_clean).
+        // Protects against duplicate PRs if a tick retries after successful create_pr but before
+        // the final store.update_loop persists the Hardened state (e.g., DB timeout).
+        if record.spec_pr_url.is_none() {
+            if let Err(e) = self.git.remove_path(&record.branch, ".agent").await {
+                tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
+            }
 
-        let pr_title = format!(
-            "chore(spec): harden {} for {}",
-            record.spec_path, record.engineer,
-        );
-        let pr_body = format!(
-            "Spec hardening completed in {} round(s).\n\nSpec: {}\nBranch: {}",
-            record.round, record.spec_path, record.branch,
-        );
-        let pr_url = self
-            .git
-            .create_pr(
-                &record.branch,
-                &pr_title,
-                &pr_body,
-                &self.default_branch_for(record),
-            )
-            .await?;
-        record.spec_pr_url = Some(pr_url);
+            let pr_title = format!(
+                "chore(spec): harden {} for {}",
+                record.spec_path, record.engineer,
+            );
+            let pr_body = format!(
+                "Spec hardening completed in {} round(s).\n\nSpec: {}\nBranch: {}",
+                record.round, record.spec_path, record.branch,
+            );
+            let pr_url = self
+                .git
+                .create_pr(
+                    &record.branch,
+                    &pr_title,
+                    &pr_body,
+                    &self.default_branch_for(record),
+                )
+                .await?;
+            record.spec_pr_url = Some(pr_url);
+        }
 
         if self.config.harden.auto_merge_spec_pr {
             let merge_sha = self

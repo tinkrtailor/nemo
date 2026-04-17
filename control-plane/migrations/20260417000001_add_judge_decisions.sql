@@ -21,3 +21,10 @@ CREATE TABLE judge_decisions (
 );
 
 CREATE INDEX idx_judge_decisions_loop ON judge_decisions (loop_id, round);
+
+-- FR-7a safety net: DB-level constraint to enforce at most one exit_clean per loop.
+-- The application layer checks this via judge_decision_stats, but in a future multi-replica
+-- deployment the TOCTOU window between the stats query and insert could allow two concurrent
+-- ticks to both issue exit_clean. This partial unique index prevents that at the DB level.
+CREATE UNIQUE INDEX idx_judge_decisions_one_exit_clean_per_loop
+    ON judge_decisions (loop_id) WHERE decision = 'exit_clean';

@@ -263,6 +263,47 @@ impl OrchestratorJudge {
             recurring_findings: truncated_recurring,
         };
 
+        // FR-4b total-size guard: verify serialized input stays within ~8K token budget.
+        // Approximate 1 token ≈ 4 chars; 8K tokens ≈ 32K chars. We use 28K as the threshold
+        // to leave headroom for the system prompt (~2K chars). If exceeded, progressively
+        // reduce round history and spec content until it fits.
+        const MAX_INPUT_CHARS: usize = 28_000;
+        let input = {
+            let serialized = serde_json::to_string(&input).unwrap_or_default();
+            if serialized.len() > MAX_INPUT_CHARS {
+                tracing::warn!(
+                    loop_id = %loop_id,
+                    serialized_len = serialized.len(),
+                    "Judge input exceeds token budget ({MAX_INPUT_CHARS} chars), applying progressive truncation"
+                );
+                // Progressive truncation: reduce rounds first, then spec
+                let mut reduced = input;
+                // Step 1: halve round history
+                let half = reduced.rounds.len() / 2;
+                if half > 0 {
+                    reduced.rounds = reduced.rounds.split_off(half);
+                }
+                let check = serde_json::to_string(&reduced).unwrap_or_default();
+                if check.len() > MAX_INPUT_CHARS {
+                    // Step 2: aggressively truncate spec to 2K chars
+                    let safe_end = reduced
+                        .spec_content
+                        .char_indices()
+                        .take_while(|(i, _)| *i < 2_000)
+                        .last()
+                        .map(|(i, c)| i + c.len_utf8())
+                        .unwrap_or(0);
+                    reduced.spec_content = reduced.spec_content[..safe_end].to_string();
+                    reduced
+                        .spec_content
+                        .push_str("\n\n[... spec aggressively truncated for token budget ...]");
+                }
+                reduced
+            } else {
+                input
+            }
+        };
+
         let input_json = match serde_json::to_value(&input) {
             Ok(v) => v,
             Err(e) => {
@@ -311,9 +352,9 @@ impl OrchestratorJudge {
         };
 
         // FR-7a: If this would be a second exit_clean, downgrade to continue.
-        // Assumption: the judge is only invoked from a single tick at a time per loop
-        // (single loop-engine instance). For multi-replica scenarios, the prior_exit_clean
-        // check would need a SELECT FOR UPDATE or advisory lock to prevent a TOCTOU race
+        // Application-layer guard for single-instance deployments. For multi-replica
+        // scenarios, a partial unique index on (loop_id) WHERE decision = 'exit_clean'
+        // in the migration provides a DB-level safety net against the TOCTOU window
         // between the stats query and the decision persistence.
         if output.decision == JudgeDecision::ExitClean && prior_exit_clean {
             tracing::warn!(
@@ -403,9 +444,15 @@ impl OrchestratorJudge {
             // can reasonably accept them if spec requirements are met.
             Some(JudgeTrigger::NotClean)
         } else if round < 3 {
-            // Round 2 with high/critical findings: skip judge, straightforward continue.
-            // Budget optimization: high-severity findings at round 2 are clear "continue"
-            // cases that don't need judge overhead.
+            // Intentional spec deviation (FR-1b): Round 2 with high/critical findings
+            // skips the judge as a budget optimization. Per FR-1b, `verdict.clean == false`
+            // alone is a trigger, but high-severity issues at round 2 are near-certain
+            // "continue" cases. The tradeoff: the judge cannot override-accept a round-2
+            // verdict where the reviewer over-classified severity. This is acceptable because
+            // (a) round-2 over-classification is rare, (b) the judge will see it at round 3,
+            // and (c) we preserve budget for the ambiguous later rounds where the judge adds
+            // more value. Operators wanting earlier judge intervention can adjust round-skip
+            // logic here.
             None
         } else {
             // The caller already checked verdict.clean == false
