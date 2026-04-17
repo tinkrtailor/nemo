@@ -688,6 +688,19 @@ impl ConvergentLoopDriver {
                         {
                             match judge_output.decision {
                                 JudgeDecision::Continue => {
+                                    // Guard: if at max_rounds, fail immediately instead
+                                    // of dispatching a doomed revise job
+                                    if record.round >= record.max_rounds {
+                                        record.state = LoopState::Failed;
+                                        record.sub_state = None;
+                                        record.failure_reason = Some(format!(
+                                            "Max harden rounds ({}) exceeded (judge chose continue at limit)",
+                                            record.max_rounds
+                                        ));
+                                        record.active_job_name = None;
+                                        self.store.update_loop(record).await?;
+                                        return Ok(LoopState::Failed);
+                                    }
                                     // Continue with revise, injecting hint if present
                                     self.dispatch_revise(record, judge_output.hint).await
                                 }
@@ -836,8 +849,22 @@ impl ConvergentLoopDriver {
                                 self.store.update_loop(record).await?;
                                 return Ok(LoopState::AwaitingApproval);
                             }
-                            // continue or exit_fail: fall through to existing max-rounds failure
-                            _ => {}
+                            JudgeDecision::ExitFail => {
+                                // Use judge reasoning instead of generic message
+                                record.state = LoopState::Failed;
+                                record.sub_state = None;
+                                record.failure_reason = Some(format!(
+                                    "Judge failed at max rounds: {}",
+                                    judge_output.reasoning
+                                ));
+                                record.active_job_name = None;
+                                self.store.update_loop(record).await?;
+                                return Ok(LoopState::Failed);
+                            }
+                            JudgeDecision::Continue => {
+                                // At max_rounds, continue is not possible; fall through
+                                // to generic max-rounds failure below
+                            }
                         }
                     }
 
@@ -1219,7 +1246,14 @@ impl ConvergentLoopDriver {
                         }
                         JudgeDecision::Continue => {
                             // Fall through to normal feedback dispatch,
-                            // but inject the hint if present
+                            // but inject the hint if present.
+                            // Note: if round >= max_rounds, the judge was already
+                            // invoked with the MaxRounds trigger (determine_trigger
+                            // prioritizes it) and chose Continue — meaning it wants
+                            // to continue but can't. We fail here rather than making
+                            // a redundant second judge call (unlike the harden path
+                            // which has a separate max_rounds code path with its own
+                            // judge invocation for the revise evaluation).
                             if record.round >= record.max_rounds {
                                 record.state = LoopState::Failed;
                                 record.sub_state = None;

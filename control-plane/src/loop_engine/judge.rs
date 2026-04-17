@@ -183,9 +183,17 @@ impl OrchestratorJudge {
         // prompt template + current_verdict + recurring_findings + overhead.
         const MAX_SPEC_CHARS: usize = 12_000;
         const MAX_ROUND_CHARS: usize = 8_000;
+        const MAX_VERDICT_CHARS: usize = 4_000;
 
         let truncated_spec = if spec_content.len() > MAX_SPEC_CHARS {
-            let mut truncated = spec_content[..MAX_SPEC_CHARS].to_string();
+            // Use char boundary to avoid panic on multi-byte UTF-8 characters
+            let safe_end = spec_content
+                .char_indices()
+                .take_while(|(i, _)| *i < MAX_SPEC_CHARS)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0);
+            let mut truncated = spec_content[..safe_end].to_string();
             truncated.push_str("\n\n[... spec truncated for token budget ...]");
             truncated
         } else {
@@ -206,6 +214,21 @@ impl OrchestratorJudge {
 
         let truncated_rounds = truncate_round_summaries(round_summaries, MAX_ROUND_CHARS);
 
+        // Truncate current_verdict if it's too large (e.g., many detailed issues)
+        let truncated_verdict = {
+            let verdict_str = serde_json::to_string(current_verdict).unwrap_or_default();
+            if verdict_str.len() > MAX_VERDICT_CHARS {
+                // Parse back a truncated version: keep top-level fields but limit issues array
+                let mut v = current_verdict.clone();
+                if let Some(issues) = v.get_mut("issues").and_then(|i| i.as_array_mut()) {
+                    issues.truncate(10); // Keep at most 10 issues
+                }
+                v
+            } else {
+                current_verdict.clone()
+            }
+        };
+
         let input = JudgeInput {
             loop_id,
             spec_path: spec_path.to_string(),
@@ -214,7 +237,7 @@ impl OrchestratorJudge {
             round,
             max_rounds,
             rounds: truncated_rounds,
-            current_verdict: current_verdict.clone(),
+            current_verdict: truncated_verdict,
             recurring_findings: recurring,
         };
 
@@ -320,6 +343,13 @@ impl OrchestratorJudge {
     }
 
     /// Determine which trigger applies, if any.
+    ///
+    /// Note: This intentionally always returns `Some` when called, because the caller
+    /// has already verified `verdict.clean == false`. Every non-clean verdict triggers
+    /// the judge per FR-1b (`not_clean` is a valid trigger). This means early rounds
+    /// with straightforward issues will use a judge call from the cost ceiling budget.
+    /// The cost ceiling (NFR-1, max 10 calls) prevents runaway spend; the judge on
+    /// early rounds can still add value by detecting triviality or reviewer drift.
     fn determine_trigger(
         &self,
         round: i32,
@@ -754,6 +784,51 @@ That's my decision."#;
             Some(JudgeDecision::ExitClean)
         );
         assert_eq!(JudgeDecision::parse_decision("invalid"), None);
+    }
+
+    #[test]
+    fn test_judge_decision_serde_parse_roundtrip() {
+        // Verify all variants roundtrip through both serde and parse_decision
+        let variants = [
+            JudgeDecision::Continue,
+            JudgeDecision::ExitClean,
+            JudgeDecision::ExitEscalate,
+            JudgeDecision::ExitFail,
+        ];
+        for variant in &variants {
+            // as_str -> parse_decision roundtrip
+            let s = variant.as_str();
+            let parsed = JudgeDecision::parse_decision(s);
+            assert_eq!(parsed.as_ref(), Some(variant), "parse_decision roundtrip failed for {s}");
+
+            // serde roundtrip: serialize to JSON string, deserialize back
+            let json_val = serde_json::to_value(variant).unwrap();
+            let deserialized: JudgeDecision = serde_json::from_value(json_val.clone()).unwrap();
+            assert_eq!(&deserialized, variant, "serde roundtrip failed for {s}");
+
+            // Verify serde string matches as_str
+            assert_eq!(json_val.as_str().unwrap(), s, "serde string doesn't match as_str for {s}");
+        }
+    }
+
+    #[test]
+    fn test_spec_truncation_unicode_safety() {
+        // Verify that spec truncation doesn't panic on multi-byte UTF-8
+        let spec = "a".repeat(11_999) + "é"; // é is 2 bytes in UTF-8
+        assert!(spec.len() > 12_000); // exceeds MAX_SPEC_CHARS in bytes
+
+        // Simulate the truncation logic
+        let max_chars: usize = 12_000;
+        let safe_end = spec
+            .char_indices()
+            .take_while(|(i, _)| *i < max_chars)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        let truncated = &spec[..safe_end];
+        // Should not panic and should be valid UTF-8
+        assert!(truncated.len() <= max_chars + 4); // at most one extra char width
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
     }
 
     #[test]

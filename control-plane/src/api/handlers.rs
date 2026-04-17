@@ -694,7 +694,10 @@ pub async fn inspect(
             duration_ms: d.duration_ms,
         };
 
-        // Nest decision inline with the corresponding round
+        // Nest decision inline with the corresponding round.
+        // Note: LoopRecord.round at judge invocation time should match a RoundRecord.round,
+        // but if it doesn't (edge case), the decision still appears in the flat
+        // judge_decisions array below, so no decisions are lost.
         if let Some(round_summary) = round_summaries.get_mut(&d.round) {
             round_summary.judge_decision = Some(summary.clone());
         }
