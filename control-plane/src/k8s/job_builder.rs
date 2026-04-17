@@ -71,7 +71,7 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
     let is_test = matches!(parsed_stage, Some(Stage::Test));
 
     // FR-27: Environment variables on the agent container
-    let agent_env = build_agent_env_vars(ctx, stage, is_test);
+    let agent_env = build_agent_env_vars(ctx, stage, is_test, is_implement_or_revise);
 
     // Build volumes (FR-25, FR-26, FR-30)
     let mut volumes = build_volumes(
@@ -276,7 +276,12 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
 }
 
 /// Build all environment variables for the agent container (FR-27, FR-8, FR-9, FR-10, FR-11).
-fn build_agent_env_vars(ctx: &LoopContext, stage: &StageConfig, is_test: bool) -> Vec<EnvVar> {
+fn build_agent_env_vars(
+    ctx: &LoopContext,
+    stage: &StageConfig,
+    is_test: bool,
+    is_implement_or_revise: bool,
+) -> Vec<EnvVar> {
     let mut env = vec![
         // FR-27: Core env vars
         env_var("STAGE", &stage.name),
@@ -392,6 +397,19 @@ fn build_agent_env_vars(ctx: &LoopContext, stage: &StageConfig, is_test: bool) -
         }
     }
 
+    // Spec #130: sccache env for implement/revise so rustc invocations hit the
+    // shared compiler cache at /cache/sccache (PVC mount). Claude will pick
+    // RUSTC_WRAPPER up through cargo automatically. SCCACHE_CACHE_SIZE caps
+    // on-disk cache; LRU eviction by sccache itself. SCCACHE_IDLE_TIMEOUT=0
+    // keeps the daemon alive for the duration of the pod (otherwise it exits
+    // after 10 minutes and cold-starts for each new invocation).
+    if is_implement_or_revise {
+        env.push(env_var("RUSTC_WRAPPER", "sccache"));
+        env.push(env_var("SCCACHE_DIR", "/cache/sccache"));
+        env.push(env_var("SCCACHE_CACHE_SIZE", "15G"));
+        env.push(env_var("SCCACHE_IDLE_TIMEOUT", "0"));
+    }
+
     // Credentials are NOT injected as env vars — they go through the sidecar only.
     // This prevents untrusted agent code from reading secrets directly.
 
@@ -423,6 +441,17 @@ fn build_volumes(
             name: "sessions".to_string(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
                 claim_name: sessions_pvc.to_string(),
+                read_only: Some(false),
+            }),
+            ..Default::default()
+        },
+        // Spec #130: Shared sccache compiler cache (RWO PVC, safe for concurrent
+        // agent pods via sccache's internal file locking). Mounted only on
+        // implement/revise stages via build_agent_mounts.
+        Volume {
+            name: "cargo-cache".to_string(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: "nautiloop-cargo-cache".to_string(),
                 read_only: Some(false),
             }),
             ..Default::default()
@@ -544,6 +573,17 @@ fn build_agent_mounts(
             ..Default::default()
         },
     ];
+
+    // Spec #130: Mount shared sccache cache for IMPLEMENT/REVISE only.
+    // Review/audit are read-only stages that don't invoke cargo. Test is
+    // per-service and handled by the repo's nemo.toml test commands.
+    if is_implement_or_revise {
+        mounts.push(VolumeMount {
+            name: "cargo-cache".to_string(),
+            mount_path: "/cache/sccache".to_string(),
+            ..Default::default()
+        });
+    }
 
     // FR-25b: Mount Claude credentials for IMPLEMENT/REVISE/REVIEW/AUDIT stages.
     // Mounted at /secrets/claude-creds/ (read-only), NOT at ~/.claude directly.
@@ -1241,7 +1281,7 @@ mod tests {
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let volumes = job.spec.unwrap().template.spec.unwrap().volumes.unwrap();
-        // worktree, sessions, output, shared, tmpdir, home, model-credentials, ssh-key, ssh-known-hosts, claude-session (implement stage)
-        assert_eq!(volumes.len(), 10);
+        // worktree, sessions, cargo-cache, output, shared, tmpdir, home, model-credentials, ssh-key, ssh-known-hosts, claude-session (implement stage)
+        assert_eq!(volumes.len(), 11);
     }
 }

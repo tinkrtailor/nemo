@@ -155,6 +155,12 @@ database_url = "postgres://nautiloop:${POSTGRES_PASSWORD}@nautiloop-postgres:543
 implementor = "${NAUTILOOP_IMPL_MODEL:-claude-opus-4-6}"
 reviewer = "${NAUTILOOP_REVIEW_MODEL:-claude-opus-4-6}"
 
+[timeouts]
+# Cold Rust compile of the nautiloop workspace can exceed the 30m default
+# when target/ is empty. Bump to 60m so the initial run completes; subsequent
+# rounds reuse the warm target cache and are much faster.
+implement_secs = 3600
+
 [harden]
 auto_merge_spec_pr = false
 TOML

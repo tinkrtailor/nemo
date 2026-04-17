@@ -131,6 +131,12 @@ variable "postgres_volume_size" {
   default     = 20
 }
 
+variable "cargo_cache_volume_size" {
+  description = "Size of the shared sccache compiler cache volume in Gi (spec #130). Larger than sccache max-size for headroom."
+  type        = number
+  default     = 50
+}
+
 variable "kubeconfig_output_path" {
   description = "Path to write the generated kubeconfig. If null, writes to <module>/.state/kubeconfig.yaml."
   type        = string

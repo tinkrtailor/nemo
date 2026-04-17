@@ -97,6 +97,29 @@ RUN if [ "$INCLUDE_RUST" = "true" ]; then \
         rustc --version; cargo --version; cargo clippy --version; \
     fi
 
+# Spec #130: Install sccache (Rust compilation cache) alongside the Rust toolchain.
+# sccache is compiled independently by upstream as a musl binary, so it's portable.
+# With RUSTC_WRAPPER=sccache + SCCACHE_DIR=/cache/sccache, rustc outputs are cached
+# across agent pods via a shared PVC, killing the cold-compile wall (~25min → ~2min).
+ARG SCCACHE_VERSION=v0.10.0
+ARG SCCACHE_SHA256_AMD64=cf3370c249a717164a4f4e6a2b3e0da7fa41e40770cba2d4cf95f2fde6aeef4b
+ARG SCCACHE_SHA256_ARM64=f1d62a17ea091d0f34e7ee0cfed2b5d67d2c29ccd33acbad80a0af83e7b27e8f
+RUN if [ "$INCLUDE_RUST" = "true" ]; then \
+        set -eux; \
+        case "$(uname -m)" in \
+          x86_64)  arch=x86_64-unknown-linux-musl;  expected="$SCCACHE_SHA256_AMD64" ;; \
+          aarch64) arch=aarch64-unknown-linux-musl; expected="$SCCACHE_SHA256_ARM64" ;; \
+          *)       echo "Unsupported arch for sccache: $(uname -m)" >&2; exit 1 ;; \
+        esac; \
+        curl -fsSL -o /tmp/sccache.tar.gz \
+          "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${arch}.tar.gz"; \
+        tar -xzf /tmp/sccache.tar.gz -C /tmp; \
+        mv "/tmp/sccache-${SCCACHE_VERSION}-${arch}/sccache" /usr/local/bin/sccache; \
+        chmod +x /usr/local/bin/sccache; \
+        rm -rf /tmp/sccache.tar.gz "/tmp/sccache-${SCCACHE_VERSION}-${arch}"; \
+        /usr/local/bin/sccache --version; \
+    fi
+
 # FR-4: Entrypoint script
 COPY images/base/nautiloop-agent-entry /usr/local/bin/nautiloop-agent-entry
 RUN chmod +x /usr/local/bin/nautiloop-agent-entry
