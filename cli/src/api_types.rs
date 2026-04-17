@@ -34,6 +34,9 @@ pub struct RoundSummary {
     pub review: Option<serde_json::Value>,
     pub audit: Option<serde_json::Value>,
     pub revise: Option<serde_json::Value>,
+    /// Judge decision for this round, if the judge was invoked (FR-6c).
+    #[serde(default)]
+    pub judge_decision: Option<JudgeDecisionSummary>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

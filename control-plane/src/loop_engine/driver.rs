@@ -683,8 +683,8 @@ impl ConvergentLoopDriver {
                         {
                             match judge_output.decision {
                                 JudgeDecision::Continue => {
-                                    // Continue with revise as normal
-                                    self.dispatch_revise(record).await
+                                    // Continue with revise, injecting hint if present
+                                    self.dispatch_revise(record, judge_output.hint).await
                                 }
                                 JudgeDecision::ExitClean => {
                                     // Override: treat as clean, same as v.clean == true path
@@ -728,7 +728,7 @@ impl ConvergentLoopDriver {
                             }
                         } else {
                             // No judge (disabled/error/timeout): use heuristic
-                            self.dispatch_revise(record).await
+                            self.dispatch_revise(record, None).await
                         }
                     }
                     None => {
@@ -774,8 +774,18 @@ impl ConvergentLoopDriver {
                         .and_then(|r| r.output.clone())
                         .unwrap_or(serde_json::json!({}));
 
+                    // Extract issues from last round output for recurring-findings detection
+                    let last_round_issues =
+                        crate::loop_engine::judge::extract_issues_from_output(&verdict_json);
+
                     if let Some(judge_output) = self
-                        .invoke_judge_for_stage(record, "harden", &verdict_json, &[], &rounds)
+                        .invoke_judge_for_stage(
+                            record,
+                            "harden",
+                            &verdict_json,
+                            &last_round_issues,
+                            &rounds,
+                        )
                         .await
                     {
                         match judge_output.decision {
@@ -1367,9 +1377,99 @@ impl ConvergentLoopDriver {
             self.store.update_loop(record).await?;
         }
 
-        // Standard CONVERGED (no ship mode logic for judge exit_clean
-        // to keep it simple; ship mode auto-merge only triggers on
-        // genuine reviewer clean verdicts)
+        // Support ship mode for judge exit_clean, same as reviewer clean path
+        if record.ship_mode {
+            let threshold = self.config.ship.max_rounds_for_auto_merge as i32;
+            if record.round <= threshold {
+                if self.config.ship.require_passing_ci {
+                    match self.git.ci_status(&record.branch).await {
+                        Ok(Some(true)) => {
+                            // CI passed, proceed to merge
+                        }
+                        Ok(Some(false)) => {
+                            record.state = LoopState::Converged;
+                            record.sub_state = None;
+                            record.active_job_name = None;
+                            record.failure_reason = Some(
+                                "CI checks failed. PR created but not merged.".to_string(),
+                            );
+                            self.store.update_loop(record).await?;
+                            tracing::warn!(
+                                loop_id = %record.id,
+                                "Ship mode (judge exit_clean): CI failed, converging without merge"
+                            );
+                            return Ok(LoopState::Converged);
+                        }
+                        Ok(None) => {
+                            // CI still pending: return current state, check again next tick
+                            tracing::debug!(
+                                loop_id = %record.id,
+                                "Ship mode (judge exit_clean): CI pending, will check on next tick"
+                            );
+                            return Ok(record.state);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                loop_id = %record.id,
+                                error = %e,
+                                "CI check error, will retry next tick"
+                            );
+                            return Ok(record.state);
+                        }
+                    }
+                }
+
+                let merge_sha = self
+                    .git
+                    .merge_pr(
+                        &record.branch,
+                        &self.config.ship.merge_strategy,
+                        &self.default_branch_for(record),
+                    )
+                    .await?;
+
+                record.state = LoopState::Shipped;
+                record.sub_state = None;
+                record.active_job_name = None;
+                record.merge_sha = Some(merge_sha.clone());
+                record.merged_at = Some(chrono::Utc::now());
+                self.store.update_loop(record).await?;
+
+                let merge_event = crate::types::MergeEvent {
+                    id: Uuid::new_v4(),
+                    loop_id: record.id,
+                    merge_sha,
+                    merge_strategy: self.config.ship.merge_strategy.clone(),
+                    ci_status: "passed".to_string(),
+                    created_at: chrono::Utc::now(),
+                };
+                let _ = self.store.create_merge_event(&merge_event).await;
+
+                tracing::info!(
+                    loop_id = %record.id,
+                    round = record.round,
+                    "Loop SHIPPED (judge exit_clean, auto-merge within threshold)"
+                );
+                return Ok(LoopState::Shipped);
+            } else {
+                record.state = LoopState::Converged;
+                record.sub_state = None;
+                record.active_job_name = None;
+                record.failure_reason = Some(format!(
+                    "Converged in {} rounds (above auto-merge threshold of {}). PR created for human review.",
+                    record.round, threshold
+                ));
+                self.store.update_loop(record).await?;
+                tracing::info!(
+                    loop_id = %record.id,
+                    round = record.round,
+                    threshold,
+                    "Loop CONVERGED (judge exit_clean, above ship threshold)"
+                );
+                return Ok(LoopState::Converged);
+            }
+        }
+
         record.state = LoopState::Converged;
         record.sub_state = None;
         record.active_job_name = None;
@@ -1864,9 +1964,42 @@ impl ConvergentLoopDriver {
     }
 
     /// Dispatch a revise job (harden loop).
-    async fn dispatch_revise(&self, record: &mut LoopRecord) -> Result<LoopState> {
+    /// If `hint` is provided, writes an audit feedback file with the orchestrator hint
+    /// so the revise agent can read it (FR-3: hint injection for harden/Continue path).
+    async fn dispatch_revise(
+        &self,
+        record: &mut LoopRecord,
+        hint: Option<String>,
+    ) -> Result<LoopState> {
         record.sub_state = Some(SubState::Dispatched);
         record.retry_count = 0;
+
+        // Write audit feedback file with hint if present
+        let feedback_path = if hint.is_some() {
+            let path = format!(".agent/audit-feedback-round-{}.json", record.round);
+            let feedback = FeedbackFile {
+                round: record.round as u32,
+                source: FeedbackSource::Audit,
+                issues: None,
+                failures: None,
+                orchestrator_hint: hint,
+            };
+            let feedback_json = serde_json::to_string_pretty(&feedback).map_err(|e| {
+                crate::error::NautiloopError::Internal(format!(
+                    "Failed to serialize audit feedback: {e}"
+                ))
+            })?;
+            self.git
+                .write_file(&record.branch, &path, &feedback_json)
+                .await?;
+            // Refresh current_sha after commit so divergence detection doesn't false-pause
+            if let Some(new_sha) = self.git.get_branch_sha(&record.branch).await? {
+                record.current_sha = Some(new_sha);
+            }
+            Some(path)
+        } else {
+            None
+        };
 
         // #98: Claude credential preflight. If it blocks, write a
         // sentinel `revise` round record ONLY in that case so that
@@ -1890,6 +2023,7 @@ impl ConvergentLoopDriver {
         let stage_config = self.revise_stage_config(record);
         let mut ctx = self.build_context(record).await?;
         ctx.session_id = Self::session_id_for_stage(record, "revise");
+        ctx.feedback_path = feedback_path;
         let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "revise", &job).await?;
 
@@ -2049,6 +2183,20 @@ impl ConvergentLoopDriver {
                 Some("test") => format!(".agent/test-feedback-round-{prior_round}.json"),
                 _ => format!(".agent/review-feedback-round-{prior_round}.json"),
             });
+        }
+
+        // Restore feedback_path for revise redispatch: check for audit hint file
+        if record.state == LoopState::Hardening && stage_name == "revise" {
+            let audit_feedback = format!(".agent/audit-feedback-round-{}.json", record.round);
+            // Only set if the file was previously written (hint was present)
+            if self
+                .git
+                .read_file(&audit_feedback, &record.branch)
+                .await
+                .is_ok()
+            {
+                ctx.feedback_path = Some(audit_feedback);
+            }
         }
 
         let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());

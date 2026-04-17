@@ -156,7 +156,8 @@ async fn main() -> anyhow::Result<()> {
                         config.orchestrator.clone(),
                         store.clone(),
                         judge_client,
-                    ),
+                    )
+                    .await,
                 );
                 driver = driver.with_judge(judge);
             }

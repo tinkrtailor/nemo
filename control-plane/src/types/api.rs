@@ -155,6 +155,9 @@ pub struct RoundSummary {
     pub audit: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revise: Option<serde_json::Value>,
+    /// Judge decision for this round, if the judge was invoked (FR-6c).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_decision: Option<JudgeDecisionSummary>,
 }
 
 /// POST /credentials request body.

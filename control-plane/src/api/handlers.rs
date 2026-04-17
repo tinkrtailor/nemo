@@ -661,6 +661,7 @@ pub async fn inspect(
                 review: None,
                 audit: None,
                 revise: None,
+                judge_decision: None,
             });
 
         match r.stage.as_str() {
@@ -673,14 +674,16 @@ pub async fn inspect(
         }
     }
 
-    // Fetch judge decisions for this loop (FR-6c)
-    let judge_decisions = state
+    // Fetch judge decisions and nest them inline with their rounds (FR-6c)
+    let judge_decision_records = state
         .store
         .get_judge_decisions(record.id)
         .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|d| JudgeDecisionSummary {
+        .unwrap_or_default();
+
+    let mut judge_decisions: Vec<JudgeDecisionSummary> = Vec::new();
+    for d in judge_decision_records {
+        let summary = JudgeDecisionSummary {
             round: d.round,
             phase: d.phase,
             trigger: d.trigger,
@@ -689,8 +692,14 @@ pub async fn inspect(
             reasoning: d.reasoning,
             hint: d.hint,
             duration_ms: d.duration_ms,
-        })
-        .collect();
+        };
+
+        // Nest decision inline with the corresponding round
+        if let Some(round_summary) = round_summaries.get_mut(&d.round) {
+            round_summary.judge_decision = Some(summary.clone());
+        }
+        judge_decisions.push(summary);
+    }
 
     Ok(Json(InspectResponse {
         loop_id: record.id,

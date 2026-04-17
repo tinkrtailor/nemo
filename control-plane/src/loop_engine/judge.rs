@@ -112,12 +112,12 @@ pub struct OrchestratorJudge {
 }
 
 impl OrchestratorJudge {
-    pub fn new(
+    pub async fn new(
         config: OrchestratorConfig,
         store: Arc<dyn StateStore>,
         model_client: Arc<dyn JudgeModelClient>,
     ) -> Self {
-        let prompt_template = load_judge_prompt();
+        let prompt_template = load_judge_prompt().await;
         Self {
             config,
             store,
@@ -154,18 +154,19 @@ impl OrchestratorJudge {
             None => return None,
         };
 
-        // Cost ceiling: check if we've exceeded max judge calls for this loop
-        let call_count = match self.store.count_judge_decisions(loop_id).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(
-                    loop_id = %loop_id,
-                    error = %e,
-                    "Failed to count judge decisions, falling back to heuristic"
-                );
-                return None;
-            }
-        };
+        // Combined query: cost ceiling + one-shot exit_clean guard (FR-7a)
+        let (call_count, prior_exit_clean) =
+            match self.store.judge_decision_stats(loop_id).await {
+                Ok(stats) => stats,
+                Err(e) => {
+                    tracing::warn!(
+                        loop_id = %loop_id,
+                        error = %e,
+                        "Failed to query judge decision stats, falling back to heuristic"
+                    );
+                    return None;
+                }
+            };
 
         if call_count >= self.config.max_judge_calls_per_loop as i64 {
             tracing::warn!(
@@ -176,13 +177,6 @@ impl OrchestratorJudge {
             );
             return None;
         }
-
-        // Check one-shot exit_clean guard (FR-7a): if we already issued exit_clean
-        // for this loop, don't allow another
-        let prior_exit_clean = match self.store.get_judge_decisions(loop_id).await {
-            Ok(decisions) => decisions.iter().any(|d| d.decision == "exit_clean"),
-            Err(_) => false,
-        };
 
         // Build judge input
         let round_summaries: Vec<JudgeRoundSummary> = rounds
@@ -318,7 +312,7 @@ impl OrchestratorJudge {
         // Priority: max_rounds > recurring_findings > not_clean
         if round >= max_rounds {
             Some(JudgeTrigger::MaxRounds)
-        } else if recurring.iter().any(|f| f.seen_in_rounds.len() >= 2) {
+        } else if recurring.iter().any(|f| !f.seen_in_rounds.is_empty()) {
             Some(JudgeTrigger::RecurringFindings)
         } else {
             // The caller already checked verdict.clean == false
@@ -470,7 +464,7 @@ fn lines_within_tolerance(a: Option<u32>, b: Option<u32>, tolerance: u32) -> boo
 
 /// Extract issues from a round output value.
 /// Handles both ReviewResultData envelope and direct verdict shapes.
-fn extract_issues_from_output(output: &serde_json::Value) -> Vec<Issue> {
+pub fn extract_issues_from_output(output: &serde_json::Value) -> Vec<Issue> {
     // Try ReviewResultData envelope: { verdict: { issues: [...] } }
     if let Some(verdict) = output.get("verdict")
         && let Some(issues) = verdict.get("issues").and_then(|i| i.as_array())
@@ -493,14 +487,14 @@ fn extract_issues_from_output(output: &serde_json::Value) -> Vec<Issue> {
 }
 
 /// Load the judge prompt template from the .nautiloop/prompts directory.
-fn load_judge_prompt() -> String {
+async fn load_judge_prompt() -> String {
     let paths = [
         ".nautiloop/prompts/judge.md",
         "/etc/nautiloop/prompts/judge.md",
     ];
 
     for path in &paths {
-        if let Ok(content) = std::fs::read_to_string(path) {
+        if let Ok(content) = tokio::fs::read_to_string(path).await {
             return content;
         }
     }
@@ -786,7 +780,7 @@ That's my decision."#;
         let client = Arc::new(MockJudgeClient {
             response: String::new(),
         });
-        let judge = OrchestratorJudge::new(config, store, client);
+        let judge = OrchestratorJudge::new(config, store, client).await;
 
         let result = judge
             .evaluate(
@@ -811,7 +805,7 @@ That's my decision."#;
         let client = Arc::new(MockJudgeClient {
             response: r#"{"decision": "continue", "confidence": 0.8, "reasoning": "Keep going", "hint": "Focus on tests"}"#.to_string(),
         });
-        let judge = OrchestratorJudge::new(config, store.clone(), client);
+        let judge = OrchestratorJudge::new(config, store.clone(), client).await;
 
         let issues = vec![Issue {
             severity: Severity::High,
@@ -847,7 +841,7 @@ That's my decision."#;
         let config = OrchestratorConfig::default();
         let store = Arc::new(crate::state::memory::MemoryStateStore::new());
         let client = Arc::new(ErrorJudgeClient);
-        let judge = OrchestratorJudge::new(config, store, client);
+        let judge = OrchestratorJudge::new(config, store, client).await;
 
         let result = judge
             .evaluate(
@@ -908,7 +902,7 @@ That's my decision."#;
             response: r#"{"decision": "continue", "confidence": 0.8, "reasoning": "test"}"#
                 .to_string(),
         });
-        let judge = OrchestratorJudge::new(config, store, client);
+        let judge = OrchestratorJudge::new(config, store, client).await;
 
         let result = judge
             .evaluate(
@@ -964,7 +958,7 @@ That's my decision."#;
             response: r#"{"decision": "exit_clean", "confidence": 0.9, "reasoning": "Still looks good"}"#
                 .to_string(),
         });
-        let judge = OrchestratorJudge::new(config, store, client);
+        let judge = OrchestratorJudge::new(config, store, client).await;
 
         let result = judge
             .evaluate(

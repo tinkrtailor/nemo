@@ -106,6 +106,9 @@ pub trait StateStore: Send + Sync + 'static {
     /// Count judge decisions for a loop (for cost ceiling enforcement).
     async fn count_judge_decisions(&self, loop_id: Uuid) -> Result<i64>;
 
+    /// Combined query: returns (count, has_exit_clean) for cost ceiling + one-shot guard.
+    async fn judge_decision_stats(&self, loop_id: Uuid) -> Result<(i64, bool)>;
+
     /// Back-fill loop_final_state and loop_terminated_at on all judge_decisions
     /// rows for a loop when it reaches a terminal state (FR-5b).
     async fn backfill_judge_outcomes(
@@ -451,6 +454,14 @@ pub mod memory {
         async fn count_judge_decisions(&self, loop_id: Uuid) -> Result<i64> {
             let decisions = self.judge_decisions.read().await;
             Ok(decisions.iter().filter(|d| d.loop_id == loop_id).count() as i64)
+        }
+
+        async fn judge_decision_stats(&self, loop_id: Uuid) -> Result<(i64, bool)> {
+            let decisions = self.judge_decisions.read().await;
+            let filtered: Vec<_> = decisions.iter().filter(|d| d.loop_id == loop_id).collect();
+            let count = filtered.len() as i64;
+            let has_exit_clean = filtered.iter().any(|d| d.decision == "exit_clean");
+            Ok((count, has_exit_clean))
         }
 
         async fn backfill_judge_outcomes(

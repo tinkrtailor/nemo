@@ -816,6 +816,21 @@ impl StateStore for PgStateStore {
         Ok(row.0)
     }
 
+    async fn judge_decision_stats(&self, loop_id: Uuid) -> Result<(i64, bool)> {
+        let row: (i64, bool) = sqlx::query_as(
+            r#"
+            SELECT
+                COUNT(*)::bigint,
+                COALESCE(bool_or(decision = 'exit_clean'), false)
+            FROM judge_decisions WHERE loop_id = $1
+            "#,
+        )
+        .bind(loop_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((row.0, row.1))
+    }
+
     async fn backfill_judge_outcomes(
         &self,
         loop_id: Uuid,
