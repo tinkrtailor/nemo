@@ -1,0 +1,54 @@
+{
+  "round": 6,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/git/mod.rs",
+      "line": 848,
+      "description": "Mock write_file_as generates a 48-character hex SHA (`{:016x}{:016x}0000000000000000` = 16+16+16 = 48 chars) instead of a 40-character git SHA-1. Additionally, `hasher.finish()` is called twice on the same hasher without mutation, so both halves are identical — the SHA is `{X}{X}0000000000000000` rather than truly distinct. While this doesn't break current tests (equality comparisons still work), any future test that validates SHA format or length will fail. More importantly, if any production code checks SHA length (e.g., for sanity validation), mocks would diverge from reality.",
+      "suggestion": "Use `format!(\"{:040x}\", hasher.finish() as u128)` or truncate to 40 chars: `format!(\"{:016x}{:016x}00000000\", hasher.finish(), !hasher.finish())` to produce a 40-char mock SHA."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 237,
+      "description": "The spec commit (write_file_as) and the branch are local-only at this point — they are never pushed to the remote between POST /start returning 201 and the loop engine eventually running. If the control-plane process crashes after returning 201 but before the loop engine pushes, the spec content that the engineer uploaded is lost despite the success response. The DB row says Pending with a SHA that doesn't exist on any remote. The loop engine will fail trying to work with the branch. FR-2a says 'call git.write_file(agent_branch, spec_path, spec_content) to commit the spec onto the agent branch' — this implies the spec should be durably available on the branch, not just in a local worktree/bare repo.",
+      "suggestion": "Add a `git push -u origin {branch}` after the spec commit succeeds and before returning 201, or document that the spec commit is local-only until the loop engine pushes (accepting the durability gap)."
+    },
+    {
+      "severity": "medium",
+      "category": "security",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 62,
+      "description": "Path validation does not reject empty path segments (e.g., `specs//test.md` or `specs/./test.md`). While these aren't security-critical (git would normalize them), a path like `specs/./test.md` passes all checks but creates a confusing file path on the agent branch. More subtly, a spec_path of `specs/ .md` (space before .md) passes validation since the stem is ` ` which is non-empty and has non-empty trim... wait, actually `stem.trim().is_empty()` would catch a whitespace-only stem. This is fine. However, a path segment that is `.` (current dir) is not checked.",
+      "suggestion": "Consider adding a check for `.` as a path component: `req.spec_path.split('/').any(|seg| seg == \".\" || seg.is_empty())`."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 86,
+      "description": "The stem extraction logic uses `rsplit('/').next().unwrap_or(&req.spec_path).strip_suffix(\".md\")`. For a path like `specs/.md.md`, the filename is `.md.md`, strip_suffix(\".md\") yields `.md` which is non-empty and passes validation. A file whose actual meaningful stem is just `.md` (a hidden file in Unix convention) is arguably not a valid spec name.",
+      "suggestion": "After strip_suffix, additionally reject stems that start with '.' to prevent hidden-file-like spec names, or document as an accepted edge case."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/start.rs",
+      "line": 70,
+      "description": "The `is_multiple_of()` method on integers was stabilized in Rust 1.87. While the current toolchain (1.95) supports it, no MSRV is declared in Cargo.toml. If the project is ever built on an older toolchain, this will fail to compile. Using `% 3 == 0` is universally portable with zero cost.",
+      "suggestion": "Replace `(bytes.len() - i).is_multiple_of(3)` with `(bytes.len() - i) % 3 == 0` for broader compatibility."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 271,
+      "description": "The credential lookup iterates `all_creds` with a linear scan that could match invalid credentials before valid ones depending on DB ordering. The loop takes the first valid `_name` and first valid `_email`, but if the DB returns rows in non-deterministic order and there are multiple valid `_name` entries (e.g., from duplicate upserts), the chosen name could vary across calls.",
+      "suggestion": "Consider sorting by `updated_at` descending before iterating, or using `find()` with an explicit ordering predicate, to ensure deterministic credential selection."
+    }
+  ]
+}
