@@ -199,7 +199,6 @@ impl OrchestratorJudge {
         // findings descriptions and verbose round summaries.
         const MAX_SPEC_CHARS: usize = 4_000;
         const MAX_ROUND_CHARS: usize = 3_000;
-        const MAX_VERDICT_CHARS: usize = 2_000;
         const MAX_RECURRING_FINDINGS: usize = 10;
 
         let truncated_spec = if spec_content.len() > MAX_SPEC_CHARS {
@@ -231,19 +230,26 @@ impl OrchestratorJudge {
 
         let truncated_rounds = truncate_round_summaries(round_summaries, MAX_ROUND_CHARS);
 
-        // Truncate current_verdict if it's too large (e.g., many detailed issues)
+        // Truncate current_verdict if it's too large (e.g., many detailed issues).
+        // Cap both the number of issues and per-issue description length to keep
+        // the verdict within the MAX_VERDICT_CHARS budget.
+        const MAX_ISSUE_DESC_CHARS: usize = 200;
         let truncated_verdict = {
-            let verdict_str = serde_json::to_string(current_verdict).unwrap_or_default();
-            if verdict_str.len() > MAX_VERDICT_CHARS {
-                // Parse back a truncated version: keep top-level fields but limit issues array
-                let mut v = current_verdict.clone();
-                if let Some(issues) = v.get_mut("issues").and_then(|i| i.as_array_mut()) {
-                    issues.truncate(10); // Keep at most 10 issues
+            let mut v = current_verdict.clone();
+            if let Some(issues) = v.get_mut("issues").and_then(|i| i.as_array_mut()) {
+                issues.truncate(10); // Keep at most 10 issues
+                for issue in issues.iter_mut() {
+                    if let Some(desc) = issue.get_mut("description").and_then(|d| d.as_str().map(|s| s.to_string()))
+                        && desc.len() > MAX_ISSUE_DESC_CHARS
+                    {
+                        let truncated = &desc[..desc.floor_char_boundary(MAX_ISSUE_DESC_CHARS)];
+                        issue["description"] = serde_json::Value::String(
+                            format!("{}...", truncated),
+                        );
+                    }
                 }
-                v
-            } else {
-                current_verdict.clone()
             }
+            v
         };
 
         // Truncate recurring_findings to stay within budget
@@ -280,10 +286,12 @@ impl OrchestratorJudge {
                 );
                 // Progressive truncation: reduce rounds first, then spec
                 let mut reduced = input;
-                // Step 1: halve round history
+                // Step 1: keep only the most recent half of rounds (newer rounds
+                // are more relevant to the decision). `drain(..half)` removes the
+                // older first half in-place, leaving recent rounds.
                 let half = reduced.rounds.len() / 2;
                 if half > 0 {
-                    reduced.rounds = reduced.rounds.split_off(half);
+                    reduced.rounds.drain(..half);
                 }
                 let check = serde_json::to_string(&reduced).unwrap_or_default();
                 if check.len() > MAX_INPUT_CHARS {
@@ -405,8 +413,11 @@ impl OrchestratorJudge {
         if let Err(e) = self.store.create_judge_decision(&record).await {
             tracing::warn!(
                 loop_id = %loop_id,
+                round = round,
+                decision = %output.decision.as_str(),
                 error = %e,
-                "Failed to persist judge decision (non-fatal)"
+                "Failed to persist judge decision — this decision will be missing from the \
+                 Stage 2 training dataset. Decision was still applied to the loop."
             );
         }
 

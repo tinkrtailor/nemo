@@ -37,6 +37,18 @@ impl JudgeModelClient for MockJudgeClient {
     }
 }
 
+/// A model client that always returns an error, simulating judge failure.
+struct ErrorJudgeClient;
+
+#[async_trait::async_trait]
+impl JudgeModelClient for ErrorJudgeClient {
+    async fn call(&self, _model: &str, _system: &str, _user: &str) -> Result<String> {
+        Err(nautiloop_control_plane::error::NautiloopError::Internal(
+            "simulated model client failure".to_string(),
+        ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared test helpers
 // ---------------------------------------------------------------------------
@@ -617,6 +629,99 @@ async fn test_review_judge_disabled_max_rounds_fails() {
     let updated = store.get_loop(record.id).await.unwrap().unwrap();
     assert!(updated.failure_reason.as_ref().unwrap().contains("Max implement rounds"));
     assert!(updated.failure_reason.as_ref().unwrap().contains("judge unavailable"));
+}
+
+/// Judge model client returns error -> driver falls back to heuristic (review path).
+/// NFR-5: "mock judge returns error -> driver uses heuristic; assert identical behavior
+/// to the feature-flag-off case."
+#[tokio::test]
+async fn test_review_judge_error_falls_back_to_heuristic() {
+    let store = Arc::new(MemoryStateStore::new());
+    let dispatcher = Arc::new(MockJobDispatcher::new());
+    let git = Arc::new(MockGitOperations::new());
+    install_fresh_creds(&dispatcher).await;
+
+    let verdict = serde_json::json!({
+        "clean": false,
+        "issues": [{
+            "severity": "high",
+            "description": "Bug found",
+            "suggestion": "Fix it"
+        }],
+        "summary": "Issues found",
+        "token_usage": {"input": 100, "output": 50}
+    });
+
+    let record = setup_reviewing_loop(&store, &dispatcher, &git, 3, verdict).await;
+
+    // Build driver WITH judge, but model client always errors
+    let config = make_config();
+    let model_client: Arc<dyn JudgeModelClient> = Arc::new(ErrorJudgeClient);
+    let judge = Arc::new(OrchestratorJudge::new(
+        config.orchestrator.clone(),
+        store.clone(),
+        model_client,
+        "test prompt".to_string(),
+    ));
+    let driver =
+        ConvergentLoopDriver::new(store.clone(), dispatcher, git, config).with_judge(judge);
+
+    let new_state = driver.tick(record.id).await.unwrap();
+    // Heuristic fallback: clean=false, round < max_rounds -> dispatch implement
+    assert_eq!(new_state, LoopState::Implementing);
+
+    // No judge decisions should be recorded (model call failed before persistence)
+    let decisions = store.get_judge_decisions(record.id).await.unwrap();
+    assert!(decisions.is_empty());
+}
+
+/// Judge model client returns error at max_rounds -> heuristic FAILED.
+#[tokio::test]
+async fn test_review_judge_error_at_max_rounds_falls_back_to_fail() {
+    let store = Arc::new(MemoryStateStore::new());
+    let dispatcher = Arc::new(MockJobDispatcher::new());
+    let git = Arc::new(MockGitOperations::new());
+    install_fresh_creds(&dispatcher).await;
+
+    let verdict = serde_json::json!({
+        "clean": false,
+        "issues": [{
+            "severity": "high",
+            "description": "Bug found",
+            "suggestion": "Fix it"
+        }],
+        "summary": "Issues found",
+        "token_usage": {"input": 100, "output": 50}
+    });
+
+    let record = setup_reviewing_loop(&store, &dispatcher, &git, 15, verdict).await;
+
+    let config = make_config();
+    let model_client: Arc<dyn JudgeModelClient> = Arc::new(ErrorJudgeClient);
+    let judge = Arc::new(OrchestratorJudge::new(
+        config.orchestrator.clone(),
+        store.clone(),
+        model_client,
+        "test prompt".to_string(),
+    ));
+    let driver =
+        ConvergentLoopDriver::new(store.clone(), dispatcher, git, config).with_judge(judge);
+
+    let new_state = driver.tick(record.id).await.unwrap();
+    // Heuristic fallback at max_rounds: FAILED
+    assert_eq!(new_state, LoopState::Failed);
+
+    let updated = store.get_loop(record.id).await.unwrap().unwrap();
+    assert!(
+        updated.failure_reason.as_ref().unwrap().contains("Max implement rounds"),
+        "Should contain max rounds message, got: {:?}",
+        updated.failure_reason
+    );
+    assert!(
+        updated.failure_reason.as_ref().unwrap().contains("judge unavailable"),
+        "Should indicate judge was unavailable, got: {:?}",
+        updated.failure_reason
+    );
 }
 
 // ---------------------------------------------------------------------------

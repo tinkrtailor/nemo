@@ -97,15 +97,15 @@ impl ConvergentLoopDriver {
             self.handle_cancel(&record).await
         } else {
             match record.state {
-            LoopState::Pending => self.handle_pending(&record).await,
-            LoopState::Hardening => self.handle_active_stage(&record).await,
-            LoopState::AwaitingApproval => self.handle_awaiting_approval(&record).await,
-            LoopState::Implementing => self.handle_active_stage(&record).await,
-            LoopState::Testing => self.handle_active_stage(&record).await,
-            LoopState::Reviewing => self.handle_active_stage(&record).await,
-            LoopState::Paused => self.handle_paused(&record).await,
-            LoopState::AwaitingReauth => self.handle_awaiting_reauth(&record).await,
-                // Terminal states handled above; this arm is unreachable but required for exhaustiveness
+                LoopState::Pending => self.handle_pending(&record).await,
+                LoopState::Hardening => self.handle_active_stage(&record).await,
+                LoopState::AwaitingApproval => self.handle_awaiting_approval(&record).await,
+                LoopState::Implementing => self.handle_active_stage(&record).await,
+                LoopState::Testing => self.handle_active_stage(&record).await,
+                LoopState::Reviewing => self.handle_active_stage(&record).await,
+                LoopState::Paused => self.handle_paused(&record).await,
+                LoopState::AwaitingReauth => self.handle_awaiting_reauth(&record).await,
+                // Terminal states handled above; unreachable but required for exhaustiveness
                 _ => Ok(record.state),
             }
         }?;
@@ -624,7 +624,14 @@ impl ConvergentLoopDriver {
                         }
                     }
                     Some(v) => {
-                        // Audit found issues: invoke judge before deciding
+                        // Audit found issues: invoke judge before deciding.
+                        //
+                        // Invariant: only ONE of the audit-evaluation or revise-evaluation
+                        // paths runs per tick. A tick processes a single completed job; the
+                        // audit evaluation runs when the audit job completes, and the revise
+                        // evaluation runs when the revise job completes. They cannot both
+                        // fire in the same tick, so double judge invocation cannot occur.
+                        //
                         // Filter for the audit-stage round specifically (not a generic last_round)
                         // to ensure the judge receives the correct verdict context.
                         let audit_round = rounds
