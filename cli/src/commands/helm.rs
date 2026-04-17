@@ -390,8 +390,14 @@ impl App {
 
     fn handle_log_pane_input(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.scroll_up(1),
-            KeyCode::Down | KeyCode::Char('j') => self.scroll_down(1),
+            // FR-1a: k/↑ and j/↓ only scroll when already scrolled (not at bottom)
+            KeyCode::Up | KeyCode::Char('k') if !self.is_scrolled_to_bottom() => {
+                self.scroll_up(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if !self.is_scrolled_to_bottom() => {
+                self.scroll_down(1);
+            }
+            // PgUp/Home are the entry points to scroll mode
             KeyCode::PageUp => self.scroll_up(self.log_pane_height.max(1)),
             KeyCode::PageDown => self.scroll_down(self.log_pane_height.max(1)),
             KeyCode::Home => self.scroll_to_top(),
@@ -1162,7 +1168,7 @@ fn compress_nautiloop_result(line: &str) -> String {
                 .and_then(|d| d.get("all_passed"))
                 .and_then(|b| b.as_bool())
                 .unwrap_or(false);
-            let check = if all_passed && ci_status == "passed" {
+            let check = if all_passed {
                 "\u{2713}"
             } else {
                 "\u{2717}"
@@ -1208,12 +1214,7 @@ fn compress_nautiloop_result(line: &str) -> String {
 fn format_token_count(n: u64) -> String {
     if n >= 1_000 {
         let thousands = n / 1_000;
-        let remainder = (n % 1_000) / 100;
-        if remainder > 0 {
-            format!("{thousands},{:03}", n % 1_000)
-        } else {
-            format!("{thousands},000")
-        }
+        format!("{thousands},{:03}", n % 1_000)
     } else {
         n.to_string()
     }
@@ -1399,7 +1400,6 @@ fn render_logs(app: &mut App, area: Rect) -> Paragraph<'static> {
                 .style(Style::default().bg(BG)),
         )
         .style(Style::default().fg(TEXT).bg(BG))
-        .wrap(Wrap { trim: false })
         .scroll((scroll, 0))
 }
 
@@ -1973,5 +1973,56 @@ mod tests {
         let line = "[implement/r1] Starting implement with claude...";
         let result = compress_nautiloop_result(line);
         assert_eq!(result, line);
+    }
+
+    #[test]
+    fn format_token_count_handles_zero_hundreds() {
+        // Regression: 1001 was returning "1,000" instead of "1,001"
+        assert_eq!(format_token_count(1001), "1,001");
+        assert_eq!(format_token_count(1010), "1,010");
+        assert_eq!(format_token_count(1100), "1,100");
+        assert_eq!(format_token_count(1000), "1,000");
+        assert_eq!(format_token_count(999), "999");
+        assert_eq!(format_token_count(10_042), "10,042");
+    }
+
+    #[test]
+    fn up_k_does_not_enter_scroll_mode_from_bottom() {
+        let mut app = App::new(false);
+        app.focus = Focus::LogPane;
+        app.log_pane_height = 10;
+
+        for i in 0..30 {
+            app.push_log_line(LogEntry {
+                timestamp: Utc::now(),
+                line: format!("line {i}"),
+            });
+        }
+
+        // At bottom, pressing Up should NOT enter scroll mode
+        assert!(app.is_scrolled_to_bottom());
+        app.handle_log_pane_input(KeyEvent::from(KeyCode::Up));
+        assert!(app.is_scrolled_to_bottom());
+
+        // PgUp should enter scroll mode (scrolls up by pane height)
+        app.handle_log_pane_input(KeyEvent::from(KeyCode::PageUp));
+        assert!(!app.is_scrolled_to_bottom());
+        assert_eq!(app.log_scroll_offset, 10);
+
+        // Now Up/k should work for fine navigation
+        app.handle_log_pane_input(KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.log_scroll_offset, 11);
+
+        // Down/j should scroll back down
+        app.handle_log_pane_input(KeyEvent::from(KeyCode::Down));
+        assert_eq!(app.log_scroll_offset, 10);
+    }
+
+    #[test]
+    fn test_stage_uses_all_passed_alone() {
+        // ci_status is "success" (not "passed") but all_passed is true => should show ✓
+        let line = r#"[test/r1] NAUTILOOP_RESULT:{"stage":"test","data":{"all_passed":true,"ci_status":"success","services":[]}}"#;
+        let result = compress_nautiloop_result(line);
+        assert!(result.starts_with('\u{2713}'), "expected checkmark for all_passed=true with ci_status=success, got: {result}");
     }
 }
