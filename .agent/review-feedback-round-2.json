@@ -1,0 +1,94 @@
+{
+  "round": 2,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 1197,
+      "description": "Review phase: judge Continue at max_rounds silently fails instead of giving the judge a chance to escalate. When `round >= max_rounds` and the judge returns `Continue`, the code immediately transitions to `Failed`. But per FR-1b, the judge should be invoked specifically WITH the `max_rounds` trigger so it can return `exit_escalate` or `exit_clean`. The issue is that the judge is invoked once (with current issues as trigger), and if it says Continue at max_rounds, there's no second chance. In the harden phase (line 771-822), there's a separate dedicated judge invocation at max_rounds. The review phase lacks this — it relies on the single invocation in the `Some(v)` branch, which may trigger as `not_clean` or `recurring_findings` rather than `max_rounds` (because `determine_trigger` is called before the max_rounds check in the Continue handler). However, `determine_trigger` does prioritize max_rounds first, so this is actually handled correctly IF round >= max_rounds at the point of the first invocation. The real asymmetry is: in harden, the max_rounds judge invocation happens in a *separate* code path (after revise completes), while in review, max_rounds is checked *within* the judge's Continue handler. This means the judge sees the max_rounds trigger correctly in review too. Downgrading — this is actually correct but the code structure is confusing and fragile.",
+      "suggestion": "Consider restructuring the review max_rounds path to have a dedicated judge invocation like the harden path does, for consistency and clarity. Currently it works because determine_trigger checks max_rounds first, but this is non-obvious."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 315,
+      "description": "determine_trigger always returns Some — it never returns None. The `not_clean` fallback means every call to `evaluate()` where `judge_enabled=true` will invoke the LLM, even for verdicts that are clean=false on round 1 (where FR-1c says to skip). The comment says 'FR-1c: Skip judge on clean verdicts at round 1 (handled by caller)', but FR-1c actually says skip on `clean == true AND round == 1`. The callers only invoke the judge in the `Some(v)` / `clean == false` branch, so FR-1c is satisfied. However, FR-1b says the judge is invoked when ANY of three conditions holds — but `not_clean` alone on round 2 with no recurring findings means the judge is called even for a straightforward 'issues found, keep iterating' case. This is correct per spec but will drive up costs since every non-clean verdict triggers a judge call.",
+      "suggestion": "This is spec-compliant but worth noting: the cost ceiling (NFR-1, 10 calls max) should be sufficient protection. No code change needed, but consider whether invoking the judge on every not_clean verdict is the intended behavior or if it should be limited to cases with actual ambiguity."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 773,
+      "description": "At harden max_rounds (revise path), `verdict_json` is extracted from `last_round.output` which is the *revise* stage output, not the *audit* stage output. The revise stage output contains the revised spec, not audit findings. So `extract_issues_from_output(&verdict_json)` on line 778-779 will likely return an empty issues list because revise output doesn't have an `issues` array. This means recurring_findings will always be empty at harden max_rounds, and the judge loses the churn signal exactly when it matters most. The round-1 review feedback already flagged a variant of this issue.",
+      "suggestion": "Extract issues from the last AUDIT round's output rather than the last (revise) round's output. Iterate backwards through `rounds` to find the most recent audit stage and extract issues from there."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 95,
+      "description": "The terminal-state backfill (FR-5b) at lines 108-122 uses `new_state` returned from the match block. However, several paths within the match arms call `self.store.update_loop(record)` which sets `record.state` to the new terminal state. The `new_state` variable captures what each handler returns — but some handlers (e.g. `handle_cancel`) may return `Ok(LoopState::Cancelled)` without the backfill running if `was_terminal` was already true from a prior tick. This is correct because the `!was_terminal` guard prevents double-backfill. However, there's a subtle issue: if the loop is already terminal on entry (e.g., Converged), `was_terminal=true`, and the early return at line 84 fires, the backfill never runs. But backfill should have run on the *previous* tick that transitioned to terminal. This is fine as long as backfill runs synchronously in the same tick as the transition.",
+      "suggestion": "Verify that the backfill runs in the same tick as the terminal transition. The current placement looks correct — it runs after the match block returns the new state. No change needed, but add a comment explaining the invariant."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 687,
+      "description": "In the harden audit-found-issues path (line 687), when judge returns Continue, `dispatch_revise(record, judge_output.hint)` is called. This correctly passes the hint. However, when the judge is NOT invoked (disabled/error/timeout fallback at line 731), `dispatch_revise(record, None)` is called. But this fallback path still needs to check `record.round >= record.max_rounds` before dispatching revise — the original code may have had this check. Looking at the code flow: this `Some(v)` branch is for audit-found-issues, and max_rounds was previously checked elsewhere. If the round is already at max_rounds when the fallback triggers, it dispatches a revise that will then hit the max_rounds check on the next tick. This is wasteful but not incorrect.",
+      "suggestion": "Consider adding a max_rounds guard before the fallback `dispatch_revise(record, None)` call to avoid dispatching a revise that will immediately fail on the next tick."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/inspect.rs",
+      "line": 23,
+      "description": "FR-6c requires `nemo inspect` to show judge_decisions inline with each round. The CLI simply dumps the full JSON response (`serde_json::to_string_pretty`). While the server-side now nests `judge_decision` inside each `RoundSummary`, the CLI doesn't do any special formatting to highlight judge decisions. The spec says 'engineers can see why the loop made non-obvious transitions', which the raw JSON output technically satisfies but provides poor UX.",
+      "suggestion": "Add formatted output for judge decisions in the CLI inspect command, at minimum highlighting rounds where the judge was invoked and what decision it made. The current JSON dump works but doesn't meet the spirit of FR-6c."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 200,
+      "description": "The `JudgeInput` struct includes `current_verdict` as a field, but the `invoke_judge` method serializes the entire `JudgeInput` (which contains `spec_content` — potentially very large) as the user message. Per FR-4b, the token budget is 8K input. A large spec could easily exceed this, causing the model call to fail or get truncated. There's no truncation or size-limiting logic.",
+      "suggestion": "Add truncation logic for `spec_content` and `rounds` (which contain full verdict JSON from every round) to stay within the 8K input token budget. Consider summarizing older rounds or truncating the spec to key sections."
+    },
+    {
+      "severity": "medium",
+      "category": "performance",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 150,
+      "description": "`compute_recurring_findings` is called on every `evaluate()` invocation, iterating through all prior rounds and their issues with O(current_issues * prior_issues) complexity. For loops with many rounds and many issues per round, this could be slow. More importantly, it deserializes issues from every round's output JSON on every call.",
+      "suggestion": "Consider caching recurring findings computation or passing pre-computed results from the caller. For Stage 1 this is acceptable but worth noting for future optimization."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 315,
+      "description": "The `determine_trigger` function checks `recurring.iter().any(|f| !f.seen_in_rounds.is_empty())` which is always true for any RecurringFinding returned by `compute_recurring_findings`, since that function only pushes findings with non-empty `seen_in_rounds`. The check is redundant but harmless.",
+      "suggestion": "Simplify to `!recurring.is_empty()` for clarity."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 127,
+      "description": "OrchestratorJudge::new is async solely for the `load_judge_prompt().await` call which reads a file from disk. In production, this runs once at startup, so it's fine. But the async constructor pattern makes it slightly harder to use in sync test contexts.",
+      "suggestion": "Minor style concern, no change needed for Stage 1."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 698,
+      "description": "The nesting logic `round_summaries.get_mut(&d.round)` looks up by the judge decision's round number. If a judge decision's round number doesn't correspond to any round in `round_summaries` (e.g., due to data inconsistency), the decision is still included in the flat `judge_decisions` array but not nested. This is fine as a fallback but could lead to orphaned decisions in the output.",
+      "suggestion": "No change needed — the flat array ensures no data is lost."
+    }
+  ]
+}
