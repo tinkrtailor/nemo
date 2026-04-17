@@ -95,6 +95,11 @@ pub async fn start(
                 "spec_path filename must have a non-empty, non-hidden name before '.md'".to_string(),
             ));
         }
+        if stem.ends_with(".md") {
+            return Err(NautiloopError::BadRequest(
+                "spec_path filename must not have a double '.md' extension".to_string(),
+            ));
+        }
         if req.spec_path.bytes().any(|b| b < 0x20) {
             return Err(NautiloopError::BadRequest(
                 "spec_path must not contain control characters".to_string(),
@@ -236,13 +241,8 @@ pub async fn start(
 
     // FR-2a: If spec was uploaded locally, commit it onto the agent branch as the first commit.
     // FR-3d: Use the engineer's identity for the spec commit, not the control-plane default.
-    //
-    // NOTE: The spec commit is local to the bare repo until the loop engine pushes the branch
-    // when it starts working. If the control-plane crashes between returning 201 and the loop
-    // engine picking up the Pending row, the spec content is lost (the DB row references a SHA
-    // that doesn't exist on the remote). This is an accepted durability gap: the loop engine
-    // will fail and mark the loop as Failed, and the engineer can re-submit. Adding a push here
-    // would add latency to the synchronous API path for a rare crash scenario.
+    // After committing, push the branch to the remote so the spec content is durable before
+    // returning 201 to the client.
     if spec_from_local {
         // Look up engineer identity from stored credentials (same as loop engine driver).
         // Failure here means the DB row exists in Pending state with a git branch but
@@ -316,6 +316,22 @@ pub async fn start(
                 match state.git.get_branch_sha(&branch).await {
                     Ok(Some(new_sha)) => {
                         branch_sha = new_sha;
+                        // Push the branch to the remote so the spec content is durable
+                        // before returning 201 to the client (round-8 feedback).
+                        if let Err(e) = state.git.push_branch(&branch).await {
+                            tracing::error!(
+                                loop_id = %loop_id,
+                                branch = %branch,
+                                error = %e,
+                                "Failed to push agent branch after spec commit"
+                            );
+                            let _ = state.git.delete_branch(&branch).await;
+                            let _ = state
+                                .store
+                                .update_loop_state(loop_id, LoopState::Failed, None)
+                                .await;
+                            return Err(e);
+                        }
                     }
                     Ok(None) => {
                         tracing::error!(
@@ -1848,6 +1864,36 @@ mod tests {
             .unwrap();
         let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(err["error"].as_str().unwrap().contains("non-hidden"));
+    }
+
+    #[tokio::test]
+    async fn test_start_double_md_extension_rejected() {
+        // "test.md.md" should be rejected — the stem ends in ".md".
+        let (app, _store, _git) = test_app();
+
+        let body = serde_json::json!({
+            "spec_path": "specs/test.md.md",
+            "engineer": "alice",
+            "spec_content": "# double extension"
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(err["error"].as_str().unwrap().contains("double"));
     }
 
     #[tokio::test]

@@ -67,7 +67,8 @@ fn format_thousands(n: usize) -> String {
     let bytes = s.as_bytes();
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     for (i, &b) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
+        #[allow(clippy::manual_is_multiple_of)]
+        if i > 0 && (bytes.len() - i) % 3 == 0 {
             result.push(',');
         }
         result.push(b as char);

@@ -75,6 +75,10 @@ pub trait GitOperations: Send + Sync + 'static {
     /// List files changed on a branch relative to the default branch.
     /// Used by the TEST stage to determine affected services (FR-42a).
     async fn changed_files(&self, branch: &str, default_branch: &str) -> Result<Vec<String>>;
+
+    /// Push a branch to the remote. Used after the initial spec commit so the
+    /// agent branch exists on the remote before returning 201.
+    async fn push_branch(&self, branch: &str) -> Result<()>;
 }
 
 /// Real git operations on a bare repository.
@@ -715,6 +719,17 @@ pub mod bare {
                 Err(_) => Ok(vec![]), // Can't determine diff — caller tests all services
             }
         }
+
+        async fn push_branch(&self, branch: &str) -> Result<()> {
+            self.run_git(&["push", "-u", "origin", branch])
+                .await
+                .map_err(|e| {
+                    crate::error::NautiloopError::Git(format!(
+                        "Failed to push {branch} to origin: {e}"
+                    ))
+                })?;
+            Ok(())
+        }
     }
 }
 
@@ -861,6 +876,8 @@ pub mod mock {
             path.hash(&mut hasher);
             content.hash(&mut hasher);
             commit_message.hash(&mut hasher);
+            author_name.hash(&mut hasher);
+            author_email.hash(&mut hasher);
             let hash_val = hasher.finish() as u128;
             let new_sha = format!("{:040x}", hash_val);
             let mut branches = self.branches.write().await;
@@ -928,6 +945,10 @@ pub mod mock {
 
         async fn changed_files(&self, _branch: &str, _default_branch: &str) -> Result<Vec<String>> {
             Ok(vec![])
+        }
+
+        async fn push_branch(&self, _branch: &str) -> Result<()> {
+            Ok(())
         }
     }
 }
