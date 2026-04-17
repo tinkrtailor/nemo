@@ -90,12 +90,13 @@ impl ConvergentLoopDriver {
             return Ok(record.state);
         }
 
-        // Check for cancel request (highest priority for non-terminal states)
-        if record.cancel_requested {
-            return self.handle_cancel(&record).await;
-        }
-
-        let new_state = match record.state {
+        // Check for cancel request (highest priority for non-terminal states).
+        // Route through the same new_state path so the single backfill block
+        // below handles all terminal transitions uniformly.
+        let new_state = if record.cancel_requested {
+            self.handle_cancel(&record).await
+        } else {
+            match record.state {
             LoopState::Pending => self.handle_pending(&record).await,
             LoopState::Hardening => self.handle_active_stage(&record).await,
             LoopState::AwaitingApproval => self.handle_awaiting_approval(&record).await,
@@ -104,8 +105,9 @@ impl ConvergentLoopDriver {
             LoopState::Reviewing => self.handle_active_stage(&record).await,
             LoopState::Paused => self.handle_paused(&record).await,
             LoopState::AwaitingReauth => self.handle_awaiting_reauth(&record).await,
-            // Terminal states handled above; this arm is unreachable but required for exhaustiveness
-            _ => Ok(record.state),
+                // Terminal states handled above; this arm is unreachable but required for exhaustiveness
+                _ => Ok(record.state),
+            }
         }?;
 
         // FR-5b: When a loop reaches a terminal state, back-fill loop_final_state
@@ -1139,8 +1141,8 @@ impl ConvergentLoopDriver {
                                 record.state = LoopState::Failed;
                                 record.sub_state = None;
                                 record.failure_reason = Some(format!(
-                                    "Max implement rounds ({}) exceeded",
-                                    record.max_rounds
+                                    "Max implement rounds ({}) exceeded. Judge wanted to continue: {}",
+                                    record.max_rounds, judge_output.reasoning
                                 ));
                                 record.active_job_name = None;
                                 self.store.update_loop(record).await?;
@@ -1689,21 +1691,8 @@ impl ConvergentLoopDriver {
         updated.active_job_name = None;
         self.store.update_loop(&updated).await?;
 
-        // FR-5b: Back-fill judge decision outcomes for cancelled loops.
-        // Cancelled is a terminal state, so judge_decisions rows need
-        // loop_final_state populated for the Stage 2 training dataset.
-        let now = chrono::Utc::now();
-        if let Err(e) = self
-            .store
-            .backfill_judge_outcomes(record.id, "Cancelled", now)
-            .await
-        {
-            tracing::warn!(
-                loop_id = %record.id,
-                error = %e,
-                "Failed to backfill judge decision outcomes on cancel (non-fatal)"
-            );
-        }
+        // FR-5b backfill is handled by the unified backfill block in tick(),
+        // which runs for all terminal transitions including cancel.
 
         self.store
             .set_loop_flag(record.id, crate::state::LoopFlag::Cancel, false)

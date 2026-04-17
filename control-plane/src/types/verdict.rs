@@ -259,15 +259,6 @@ impl JudgeDecision {
         }
     }
 
-    pub fn parse_decision(s: &str) -> Option<Self> {
-        match s {
-            "continue" => Some(Self::Continue),
-            "exit_clean" => Some(Self::ExitClean),
-            "exit_escalate" => Some(Self::ExitEscalate),
-            "exit_fail" => Some(Self::ExitFail),
-            _ => None,
-        }
-    }
 }
 
 impl std::fmt::Display for JudgeDecision {

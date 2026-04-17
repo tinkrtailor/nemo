@@ -152,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
                     nautiloop_control_plane::loop_engine::judge::SidecarJudgeClient::new(),
                 );
                 let judge = Arc::new(
-                    nautiloop_control_plane::loop_engine::judge::OrchestratorJudge::new(
+                    nautiloop_control_plane::loop_engine::judge::OrchestratorJudge::load(
                         config.orchestrator.clone(),
                         store.clone(),
                         judge_client,

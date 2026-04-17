@@ -112,18 +112,31 @@ pub struct OrchestratorJudge {
 }
 
 impl OrchestratorJudge {
-    pub async fn new(
+    /// Create a new judge with the given prompt template.
+    /// Prefer `load()` for production use (loads prompt from disk with fallback).
+    pub fn new(
         config: OrchestratorConfig,
         store: Arc<dyn StateStore>,
         model_client: Arc<dyn JudgeModelClient>,
+        prompt_template: String,
     ) -> Self {
-        let prompt_template = load_judge_prompt().await;
         Self {
             config,
             store,
             model_client,
             prompt_template,
         }
+    }
+
+    /// Async factory: loads the judge prompt from disk (with embedded fallback)
+    /// and constructs the judge. Use this in production.
+    pub async fn load(
+        config: OrchestratorConfig,
+        store: Arc<dyn StateStore>,
+        model_client: Arc<dyn JudgeModelClient>,
+    ) -> Self {
+        let prompt_template = load_judge_prompt().await;
+        Self::new(config, store, model_client, prompt_template)
     }
 
     /// Evaluate whether the judge should be invoked and, if so, invoke it.
@@ -148,7 +161,7 @@ impl OrchestratorJudge {
 
         // Determine trigger(s)
         let recurring = compute_recurring_findings(current_issues, rounds);
-        let trigger = self.determine_trigger(round, max_rounds, &recurring);
+        let trigger = self.determine_trigger(round, max_rounds, &recurring, current_issues);
         let trigger = match trigger {
             Some(t) => t,
             None => return None,
@@ -352,26 +365,36 @@ impl OrchestratorJudge {
 
     /// Determine which trigger applies, if any.
     ///
-    /// Returns `None` on early rounds (< 3) with no recurring findings, preserving
-    /// the judge budget for ambiguous max_rounds and churn cases where the judge
-    /// provides the most value. The cost ceiling (NFR-1, max 10 calls) prevents
-    /// runaway spend, but skipping early trivial rounds avoids exhausting the budget
-    /// before the critical decisions arrive.
+    /// Skips the judge on round 1 without recurring findings to preserve budget
+    /// for ambiguous later rounds. Round 2+ is eligible if all findings are
+    /// low-severity (the judge can override-accept trivial nits per Problem 1).
     fn determine_trigger(
         &self,
         round: i32,
         max_rounds: i32,
         recurring: &[RecurringFinding],
+        current_issues: &[Issue],
     ) -> Option<JudgeTrigger> {
         // Priority: max_rounds > recurring_findings > not_clean (with early-round skip)
         if round >= max_rounds {
             Some(JudgeTrigger::MaxRounds)
         } else if !recurring.is_empty() {
             Some(JudgeTrigger::RecurringFindings)
+        } else if round <= 1 {
+            // Skip judge on round 1 without recurring findings.
+            // First-round issues are straightforward; preserves budget.
+            None
+        } else if round == 2
+            && !current_issues.is_empty()
+            && current_issues
+                .iter()
+                .all(|i| i.severity == crate::types::verdict::Severity::Low)
+        {
+            // Round 2 with only low-severity findings: let the judge decide
+            // whether to override-accept (Problem 1: triviality override).
+            Some(JudgeTrigger::NotClean)
         } else if round < 3 {
-            // Skip judge on early rounds without recurring findings.
-            // Straightforward issues in rounds 1-2 don't need judge intervention;
-            // preserves budget for the ambiguous later rounds.
+            // Round 2 with non-low findings: skip, straightforward continue.
             None
         } else {
             // The caller already checked verdict.clean == false
@@ -786,21 +809,8 @@ That's my decision."#;
     }
 
     #[test]
-    fn test_judge_decision_from_str() {
-        assert_eq!(
-            JudgeDecision::parse_decision("continue"),
-            Some(JudgeDecision::Continue)
-        );
-        assert_eq!(
-            JudgeDecision::parse_decision("exit_clean"),
-            Some(JudgeDecision::ExitClean)
-        );
-        assert_eq!(JudgeDecision::parse_decision("invalid"), None);
-    }
-
-    #[test]
-    fn test_judge_decision_serde_parse_roundtrip() {
-        // Verify all variants roundtrip through both serde and parse_decision
+    fn test_judge_decision_serde_roundtrip() {
+        // Verify all variants roundtrip through serde and match as_str
         let variants = [
             JudgeDecision::Continue,
             JudgeDecision::ExitClean,
@@ -808,10 +818,7 @@ That's my decision."#;
             JudgeDecision::ExitFail,
         ];
         for variant in &variants {
-            // as_str -> parse_decision roundtrip
             let s = variant.as_str();
-            let parsed = JudgeDecision::parse_decision(s);
-            assert_eq!(parsed.as_ref(), Some(variant), "parse_decision roundtrip failed for {s}");
 
             // serde roundtrip: serialize to JSON string, deserialize back
             let json_val = serde_json::to_value(variant).unwrap();
@@ -916,7 +923,7 @@ That's my decision."#;
         let client = Arc::new(MockJudgeClient {
             response: String::new(),
         });
-        let judge = OrchestratorJudge::new(config, store, client).await;
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
 
         let result = judge
             .evaluate(
@@ -941,7 +948,7 @@ That's my decision."#;
         let client = Arc::new(MockJudgeClient {
             response: r#"{"decision": "continue", "confidence": 0.8, "reasoning": "Keep going", "hint": "Focus on tests"}"#.to_string(),
         });
-        let judge = OrchestratorJudge::new(config, store.clone(), client).await;
+        let judge = OrchestratorJudge::new(config, store.clone(), client, "test prompt".to_string());
 
         let issues = vec![Issue {
             severity: Severity::High,
@@ -977,7 +984,7 @@ That's my decision."#;
         let config = OrchestratorConfig::default();
         let store = Arc::new(crate::state::memory::MemoryStateStore::new());
         let client = Arc::new(ErrorJudgeClient);
-        let judge = OrchestratorJudge::new(config, store, client).await;
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
 
         let result = judge
             .evaluate(
@@ -1038,7 +1045,7 @@ That's my decision."#;
             response: r#"{"decision": "continue", "confidence": 0.8, "reasoning": "test"}"#
                 .to_string(),
         });
-        let judge = OrchestratorJudge::new(config, store, client).await;
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
 
         let result = judge
             .evaluate(
@@ -1094,7 +1101,7 @@ That's my decision."#;
             response: r#"{"decision": "exit_clean", "confidence": 0.9, "reasoning": "Still looks good"}"#
                 .to_string(),
         });
-        let judge = OrchestratorJudge::new(config, store, client).await;
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
 
         let result = judge
             .evaluate(
@@ -1132,7 +1139,7 @@ That's my decision."#;
             response: r#"{"decision": "continue", "confidence": 0.8, "reasoning": "test"}"#
                 .to_string(),
         });
-        let judge = OrchestratorJudge::new(config, store, client).await;
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
 
         // Round 1, no recurring findings -> should skip judge
         let result = judge
@@ -1167,7 +1174,7 @@ That's my decision."#;
             response: r#"{"decision": "exit_escalate", "confidence": 0.9, "reasoning": "Churn on round 2"}"#
                 .to_string(),
         });
-        let judge = OrchestratorJudge::new(config, store, client).await;
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
 
         let issues = vec![Issue {
             severity: Severity::High,
@@ -1219,5 +1226,90 @@ That's my decision."#;
 
         assert!(result.is_some(), "Early round WITH recurring findings should trigger judge");
         assert_eq!(result.unwrap().decision, JudgeDecision::ExitEscalate);
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_round2_low_severity_triggers_judge() {
+        let config = OrchestratorConfig::default();
+        let store = Arc::new(crate::state::memory::MemoryStateStore::new());
+        let client = Arc::new(MockJudgeClient {
+            response: r#"{"decision": "exit_clean", "confidence": 0.95, "reasoning": "Only cosmetic nits remain"}"#
+                .to_string(),
+        });
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
+
+        let issues = vec![
+            Issue {
+                severity: Severity::Low,
+                category: None,
+                file: Some("src/lib.rs".to_string()),
+                line: Some(10),
+                description: "Missing docstring".to_string(),
+                suggestion: "Add doc".to_string(),
+            },
+            Issue {
+                severity: Severity::Low,
+                category: None,
+                file: Some("src/lib.rs".to_string()),
+                line: Some(20),
+                description: "Cosmetic nit".to_string(),
+                suggestion: "Rename".to_string(),
+            },
+        ];
+
+        // Round 2 with only low-severity findings and no recurring -> should trigger judge
+        let result = judge
+            .evaluate(
+                Uuid::new_v4(),
+                "specs/test.md",
+                "test spec",
+                "review",
+                2,
+                15,
+                &serde_json::json!({"clean": false}),
+                &issues,
+                &[],
+            )
+            .await;
+
+        assert!(result.is_some(), "Round 2 with all-low-severity findings should trigger judge");
+        assert_eq!(result.unwrap().decision, JudgeDecision::ExitClean);
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_round2_high_severity_skips_judge() {
+        let config = OrchestratorConfig::default();
+        let store = Arc::new(crate::state::memory::MemoryStateStore::new());
+        let client = Arc::new(MockJudgeClient {
+            response: r#"{"decision": "continue", "confidence": 0.8, "reasoning": "test"}"#
+                .to_string(),
+        });
+        let judge = OrchestratorJudge::new(config, store, client, "test prompt".to_string());
+
+        let issues = vec![Issue {
+            severity: Severity::High,
+            category: None,
+            file: None,
+            line: None,
+            description: "Serious bug".to_string(),
+            suggestion: "Fix".to_string(),
+        }];
+
+        // Round 2 with high-severity findings and no recurring -> should skip judge
+        let result = judge
+            .evaluate(
+                Uuid::new_v4(),
+                "specs/test.md",
+                "test spec",
+                "review",
+                2,
+                15,
+                &serde_json::json!({"clean": false}),
+                &issues,
+                &[],
+            )
+            .await;
+
+        assert!(result.is_none(), "Round 2 with high-severity findings should skip judge");
     }
 }
