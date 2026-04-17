@@ -306,15 +306,24 @@ impl App {
     }
 
     fn scroll_up(&mut self, lines: usize) {
+        if self.log_pane_height == 0 {
+            return;
+        }
         let max = self.max_scroll_offset();
         self.log_scroll_offset = (self.log_scroll_offset + lines).min(max);
     }
 
     fn scroll_down(&mut self, lines: usize) {
+        if self.log_pane_height == 0 {
+            return;
+        }
         self.log_scroll_offset = self.log_scroll_offset.saturating_sub(lines);
     }
 
     fn scroll_to_top(&mut self) {
+        if self.log_pane_height == 0 {
+            return;
+        }
         self.log_scroll_offset = self.max_scroll_offset();
     }
 
@@ -1133,11 +1142,16 @@ fn compress_nautiloop_result(line: &str) -> String {
         .and_then(|s| s.as_str())
         .unwrap_or("unknown");
 
-    // Extract round from the prefix "[stage/rN] " if present
+    // Extract round from the prefix "[stage/rN]" anchored within the first bracket pair
     let round_str = line
-        .find("/r")
-        .map(|pos| &line[pos + 2..]) // skip "/r"
-        .and_then(|after| after.find(']').map(|end| &after[..end]))
+        .find('[')
+        .and_then(|bracket_start| {
+            let bracket_section = &line[bracket_start..];
+            bracket_section.find(']').and_then(|bracket_end| {
+                let inside = &bracket_section[1..bracket_end];
+                inside.find("/r").map(|pos| &inside[pos + 2..])
+            })
+        })
         .unwrap_or("?");
 
     match stage {
@@ -1215,12 +1229,15 @@ fn compress_nautiloop_result(line: &str) -> String {
 }
 
 fn format_token_count(n: u64) -> String {
-    if n >= 1_000 {
-        let thousands = n / 1_000;
-        format!("{thousands},{:03}", n % 1_000)
-    } else {
-        n.to_string()
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
     }
+    result.chars().rev().collect()
 }
 
 fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
@@ -1377,7 +1394,10 @@ fn render_logs(app: &mut App, area: Rect) -> Paragraph<'static> {
 
     // scroll position: bottom-anchored with offset
     let total = lines.len();
-    let scroll = total.saturating_sub(inner_height).saturating_sub(app.log_scroll_offset) as u16;
+    let scroll = total
+        .saturating_sub(inner_height)
+        .saturating_sub(app.log_scroll_offset)
+        .min(u16::MAX as usize) as u16;
 
     let title = if paused {
         format!(" logs {} [paused] ", app.log_source.label())
@@ -1980,6 +2000,9 @@ mod tests {
         assert_eq!(format_token_count(1000), "1,000");
         assert_eq!(format_token_count(999), "999");
         assert_eq!(format_token_count(10_042), "10,042");
+        assert_eq!(format_token_count(1_000_000), "1,000,000");
+        assert_eq!(format_token_count(1_234_567), "1,234,567");
+        assert_eq!(format_token_count(100_000), "100,000");
     }
 
     #[test]
@@ -2012,6 +2035,28 @@ mod tests {
         // Down/j should scroll back down
         app.handle_log_pane_input(KeyEvent::from(KeyCode::Down));
         assert_eq!(app.log_scroll_offset, 10);
+    }
+
+    #[test]
+    fn scroll_noop_before_first_render() {
+        // log_pane_height is 0 before first render; scroll ops must be no-ops
+        let mut app = App::new(false);
+        app.focus = Focus::LogPane;
+        // log_pane_height defaults to 0
+
+        for i in 0..20 {
+            app.push_log_line(LogEntry {
+                timestamp: Utc::now(),
+                line: format!("line {i}"),
+            });
+        }
+
+        // scroll_up, scroll_down, scroll_to_top should all be no-ops
+        app.scroll_up(5);
+        assert_eq!(app.log_scroll_offset, 0);
+        app.scroll_to_top();
+        assert_eq!(app.log_scroll_offset, 0);
+        assert!(app.is_scrolled_to_bottom());
     }
 
     #[test]
