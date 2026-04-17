@@ -1,0 +1,78 @@
+{
+  "round": 9,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 42,
+      "description": "`du -sb /work/target` recursively traverses the entire target directory tree. On large Rust projects (5-10 GB, tens of thousands of files), this can take 1-3 seconds by itself. Combined with `git status --porcelain` (line 52, also potentially slow on large repos) and the jq pipeline, the script will routinely approach or exceed the 2s `timeout` wrapper. When the script is killed by timeout, the exec fallback emits a JSON with all-null worktree fields — meaning operators get no data precisely when the project is large enough to need it. The spec FR-2a specifies this exact command, but the operational impact is significant.",
+      "suggestion": "Use `du -sb --max-depth=0 /work/target` (same output, but no performance difference since -s already summarizes), or accept this is a known limitation. Consider splitting the script so ps output is emitted first and worktree info second, so a timeout still yields process data."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 52,
+      "description": "When `git status --porcelain` fails (e.g., not a git repo) and the `|| echo \"0\"` fallback fires, `uncommitted` becomes `\"0\"` (string). But when `git status --porcelain` succeeds but the repo is clean, `wc -l` outputs `0` (also string). Both produce the same value. However, when the git command fails entirely (corrupt repo, missing .git), the script reports `uncommitted_files: 0` — implying a clean worktree when the real answer is 'unknown'. The exec-level fallback correctly uses `null` but this script-level fallback silently masks errors as clean state.",
+      "suggestion": "Change the fallback to `|| echo \"null\"` and handle accordingly in the JSON builder section, or accept this minor semantic inaccuracy."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 156,
+      "description": "When exec times out (ExecError::Timeout), the handler returns a 200 with empty processes and default worktree, but DOES include `container_stats` from the concurrent metrics fetch — this is good partial degradation per FR-2c. However, the default_worktree() returns all None fields, and the CLI renders these as 'dirty=? files' and 'target: -'. The user sees a 200 OK response that looks mostly empty — they can't distinguish 'exec timed out, data unavailable' from 'the pod is genuinely idle with no processes'. There's no indication in the response that this is a degraded/partial result.",
+      "suggestion": "Add an optional `degraded: bool` or `warnings: Vec<String>` field to PodIntrospectResponse so callers can surface 'exec timed out, showing partial data' to operators. Or document this as expected behavior."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/ps.rs",
+      "line": 113,
+      "description": "In `run_watch_loop`, when `crossterm::event::poll()` returns true but `crossterm::event::read()` returns an `Err`, the current code silently ignores it via the `_ => {}` catch-all in the match. However, `poll()` returning `Ok(true)` followed by `read()` returning `Err` is unusual and could indicate a terminal I/O problem. If this happens repeatedly, the loop will spin: poll returns true (event pending), read fails, poll returns true again — tight loop burning CPU until the next 2s sleep. The sleep at the bottom of the loop mitigates this but only after the fetch completes.",
+      "suggestion": "Add a small delay (e.g., 100ms) or counter when read() fails to prevent tight spinning on persistent I/O errors."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm.rs",
+      "line": 1153,
+      "description": "FR-5a specifies pressing 'p' cycles: closed → inspect → introspect → closed. The SidePanel::Inspect renders `render_inspect_pane(app)` which shows round/stage data from `app.inspect`. But `app.inspect` is populated by `spawn_inspect_task` which only polls when the inspect watch channel receives a branch name. The inspect channel is sent a value in `SelectionChanged` but NOT when toggling to the Inspect panel via 'p'. So if the user selects a loop (inspect starts loading), then presses 'p' to enter Inspect mode, inspect data may already be available. But if the user presses 'p' before any selection change occurs, the inspect data is never fetched because the channel was never sent. This is a minor edge case since selection typically triggers before panel toggle.",
+      "suggestion": "Send the current branch to inspect_tx when toggling to SidePanel::Inspect, similar to how introspect_tx is sent the loop_id when toggling to SidePanel::Introspect."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 61,
+      "description": "The `head_sha` is interpolated into JSON via shell string interpolation: `head_sha_json=\"\\\"$head_sha\\\"\"`. While git SHA hashes are always hex strings (safe for JSON), if `git rev-parse HEAD` produces unexpected output on a broken repo (e.g., error text despite the `|| echo \"null\"` fallback being unreachable due to 2>/dev/null hiding stderr but stdout still being valid), the resulting JSON could be malformed. This is extremely unlikely but not impossible.",
+      "suggestion": "Use jq for escaping: `head_sha_json=$(printf '%s' \"$head_sha\" | jq -Rs '.')` or accept the risk since git SHAs are always hex."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 73,
+      "description": "The 3s handler timeout wraps pod listing + exec + metrics but the database lookup (`get_loop` on line 24), terminal check, job_name validation, and kube_client check all run OUTSIDE the timeout. A slow Postgres query or network partition to the database could push total handler response time well beyond 3s. FR-1c says 'The endpoint MUST NOT block on pod exec longer than 3s' which is technically satisfied since the exec is bounded, but the total handler latency is unbounded.",
+      "suggestion": "Acceptable as-is since FR-1c specifically constrains 'pod exec' time. Consider adding a database query timeout for defense-in-depth."
+    },
+    {
+      "severity": "low",
+      "category": "performance",
+      "file": "images/base/nautiloop-introspect",
+      "line": 46,
+      "description": "`ls /work/target/debug/deps` sorts entries by default. On large Rust projects with thousands of deps entries, this sort is unnecessary work that eats into the 2s budget. Using `ls -U` would skip sorting.",
+      "suggestion": "Use `ls -U /work/target/debug/deps 2>/dev/null | wc -l` to skip sorting without changing which entries are counted."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 247,
+      "description": "The exec handshake timeout is 2s and the read timeout is 1s. In the worst case the handshake takes just under 2s, then the read gets a full 1s — total 3s inside exec_introspect_script. This exactly matches the outer 3s handler timeout. There's a race: the outer timeout and the inner read timeout could fire at approximately the same time. If the outer fires first, the response is HTTP 503 (all data discarded). If the inner fires first, it returns ExecError::Timeout and the handler returns a partial 200 with metrics. The behavior depends on scheduling timing.",
+      "suggestion": "Reduce the exec handshake timeout to 1.5s and read timeout to 1s (total 2.5s) to ensure the inner timeout always fires before the outer 3s, giving a deterministic partial-result path instead of a non-deterministic 503-vs-partial race."
+    }
+  ]
+}
