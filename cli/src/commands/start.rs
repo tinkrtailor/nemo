@@ -129,10 +129,21 @@ mod tests {
 
     #[test]
     fn test_read_nonexistent_spec_file_fails_with_context() {
-        let result = std::fs::read_to_string("nonexistent/spec.md");
+        let spec_path = "nonexistent/spec.md";
+        let local_path = Path::new(spec_path);
+        let result: std::result::Result<String, anyhow::Error> =
+            std::fs::read_to_string(local_path).with_context(|| {
+                format!(
+                    "Failed to read spec file '{}'. The file must exist locally.",
+                    spec_path
+                )
+            });
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        let err_msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            err_msg.contains("The file must exist locally"),
+            "Expected context message, got: {err_msg}"
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@ pub struct InspectQuery {
 /// POST /start - Submit a spec for processing.
 pub async fn start(
     State(state): State<AppState>,
-    Json(req): Json<StartRequest>,
+    Json(mut req): Json<StartRequest>,
 ) -> Result<impl IntoResponse, NautiloopError> {
     // Validate engineer name: must be non-empty, lowercase alphanumeric + hyphens.
     // Lowercase enforced to prevent normalization collisions in K8s Secret names.
@@ -53,9 +53,16 @@ pub async fn start(
     state.git.fetch().await?;
 
     // FR-3c: validate spec_path — no traversal, no absolute paths, must end in .md.
-    if req.spec_path.contains("..") || req.spec_path.starts_with('/') {
+    if req.spec_path.starts_with('/') {
         return Err(NautiloopError::BadRequest(
-            "spec_path must not contain '..' or start with '/'".to_string(),
+            "spec_path must not start with '/'".to_string(),
+        ));
+    }
+    // Check for ".." as a path component (traversal), not as a substring.
+    // This allows legitimate filenames containing ".." (e.g. "v2..final.md").
+    if req.spec_path.split('/').any(|seg| seg == "..") {
+        return Err(NautiloopError::BadRequest(
+            "spec_path must not contain '..' path traversal".to_string(),
         ));
     }
     if !req.spec_path.ends_with(".md") {
@@ -63,11 +70,28 @@ pub async fn start(
             "spec_path must end with '.md'".to_string(),
         ));
     }
+    // Reject paths with empty stem (e.g. ".md", "  .md") or control characters.
+    let stem = req
+        .spec_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&req.spec_path)
+        .trim_end_matches(".md");
+    if stem.is_empty() || stem.trim().is_empty() {
+        return Err(NautiloopError::BadRequest(
+            "spec_path filename must have a non-empty name before '.md'".to_string(),
+        ));
+    }
+    if req.spec_path.bytes().any(|b| b < 0x20) {
+        return Err(NautiloopError::BadRequest(
+            "spec_path must not contain control characters".to_string(),
+        ));
+    }
 
     // Determine spec source: local upload (FR-1b) or default branch (FR-2b).
     let default_ref = state.config.default_remote_ref();
     let spec_from_local: bool;
-    let spec_content = if let Some(ref content) = req.spec_content {
+    let spec_content = if let Some(content) = req.spec_content.take() {
         // Reject empty spec content — an empty spec is clearly invalid input.
         if content.is_empty() {
             return Err(NautiloopError::BadRequest(
@@ -75,14 +99,14 @@ pub async fn start(
             ));
         }
         // FR-3a: spec_content must be valid UTF-8 (guaranteed by JSON deserialization).
-        // FR-3b: enforce 1 MB size limit.
+        // FR-3b: enforce 1 MB size limit (byte count, not char count).
         if content.len() > 1_048_576 {
             return Err(NautiloopError::SpecTooLarge {
                 size: content.len(),
             });
         }
         spec_from_local = true;
-        content.clone()
+        content
     } else {
         // FR-2b: legacy path — read from default branch.
         spec_from_local = false;
@@ -205,7 +229,19 @@ pub async fn start(
     // FR-3d: Use the engineer's identity for the spec commit, not the control-plane default.
     if spec_from_local {
         // Look up engineer identity from stored credentials (same as loop engine driver).
-        let all_creds = state.store.get_credentials(&req.engineer).await?;
+        // Failure here means the DB row exists in Pending state with a git branch but
+        // no spec commit — mark the loop as Failed to prevent the loop engine from
+        // picking up a broken loop.
+        let all_creds = match state.store.get_credentials(&req.engineer).await {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = state
+                    .store
+                    .update_loop_state(loop_id, LoopState::Failed, None)
+                    .await;
+                return Err(e);
+            }
+        };
         let engineer_name = all_creds
             .iter()
             .find(|c| c.provider == "_name" && c.valid)
@@ -1566,5 +1602,88 @@ mod tests {
             .unwrap();
         let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(err["error"].as_str().unwrap().contains(".md"));
+    }
+
+    #[tokio::test]
+    async fn test_start_double_dots_in_filename_allowed() {
+        // "v2..final.md" contains ".." but not as a path component — should be allowed.
+        let (app, _store, _git) = test_app();
+
+        let body = serde_json::json!({
+            "spec_path": "specs/v2..final.md",
+            "engineer": "alice",
+            "spec_content": "# Legit spec with dots in name"
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_start_bare_md_extension_rejected() {
+        // ".md" with no stem is not a meaningful spec path.
+        let (app, _store, _git) = test_app();
+
+        let body = serde_json::json!({
+            "spec_path": ".md",
+            "engineer": "alice",
+            "spec_content": "# No stem"
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(err["error"]
+            .as_str()
+            .unwrap()
+            .contains("non-empty name"));
+    }
+
+    #[tokio::test]
+    async fn test_start_dir_bare_md_extension_rejected() {
+        // "specs/.md" — stem is empty after the last slash.
+        let (app, _store, _git) = test_app();
+
+        let body = serde_json::json!({
+            "spec_path": "specs/.md",
+            "engineer": "alice",
+            "spec_content": "# No stem"
+        });
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/start")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
