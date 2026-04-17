@@ -1,0 +1,54 @@
+{
+  "round": 12,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 83,
+      "description": "Script heredoc structure loses ALL data on timeout, including already-collected processes. The comment on lines 8-10 says 'Processes are collected FIRST' but they are only emitted at the end via the heredoc on line 83. When `du -sb /work/target` takes >1s on a large Rust project (5-10 GB target dir) and the `timeout 2` wrapper kills the script, the exec-level `|| echo '{...}'` fallback fires with `\"processes\":[]` — discarding the already-computed `$ps_json`. On large projects (exactly where introspection is most needed), operators see empty process data instead of the cargo/rustc tree. FR-2c says 'partial output is still parsed and fields that failed are returned as nulls' — the intent is to preserve what succeeded, not discard everything.",
+      "suggestion": "Emit process JSON to stdout immediately after collecting it (before worktree section), then emit worktree JSON separately. Use two JSON lines (NDJSON) or restructure as: `echo \"$ps_json\"` first, then attempt worktree. Alternatively, pipe process output to a temp file and cat it in the heredoc, so at least partial stdout is available to the read loop even if the script is killed mid-worktree."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 47,
+      "description": "The `|| echo \"null\"` fallback on the target_bytes pipeline is dead code. When `/work/target` doesn't exist, `du` fails and outputs nothing, but `awk '{print $1}'` receives empty input, outputs nothing, and exits 0. Since the pipeline exit status is awk's exit status (0), the `|| echo \"null\"` never fires. The target_bytes variable ends up as empty string, which is then caught by the explicit check on line 72. The code works correctly due to that check, but the `|| echo \"null\"` creates a false sense of safety and could mislead future maintainers into thinking the failure path is covered here.",
+      "suggestion": "Either remove `|| echo \"null\"` (rely on the explicit check on line 72) or restructure: `target_bytes=$(du -sb /work/target 2>/dev/null | awk '{print $1}'); target_bytes=${target_bytes:-null}` which handles both du-failure and awk-empty-output."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 417,
+      "description": "parse_memory_to_bytes uses unchecked `*` multiplication for Gi/Mi/Ki/G/M/k suffixes but saturating_mul for Ei/Pi/Ti. While practical pod memory values won't overflow u64 for Gi, the inconsistency is a latent bug: `18Gi` (18 * 1024^3 = 19327352832) fits, but if the same function is reused for node-level metrics or unusual values, `18446744074G` would overflow and panic in debug builds or silently wrap in release. Ei/Pi/Ti correctly use saturating_mul.",
+      "suggestion": "Use saturating_mul consistently for all branches, or at minimum for Gi and G: `gi.parse::<u64>().unwrap_or(0).saturating_mul(1024 * 1024 * 1024)`."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/ps.rs",
+      "line": 85,
+      "description": "run_watch enters raw mode and alternate screen before installing the panic hook. If `enable_raw_mode()` succeeds but `execute!(stdout, EnterAlternateScreen)` panics, the default panic handler runs (not the custom one), leaving the terminal in raw mode without alternate screen restoration. The window between raw mode entry and hook installation is small but exists.",
+      "suggestion": "Install the panic hook before entering raw mode, or use a guard pattern (Drop impl) that restores terminal state."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/helm.rs",
+      "line": 405,
+      "description": "When the user changes selection while the side panel is Closed, `introspect_status` is set to 'Press p to toggle introspect pane' and `app.introspect` is cleared. But if the user was previously viewing an Introspect pane for a different loop, closed it, selected a new loop, then re-opens with 'p' → Inspect → 'p' → Introspect, the PanelToggle handler correctly resets state and sends the new loop_id. However, the 'Loading...' flash between old-cleared-data and new-fetched-data is unavoidable without caching the previous snapshot. Minor UX concern, not a bug.",
+      "suggestion": "No action required — the current behavior is correct, just has a brief loading flash."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 63,
+      "description": "When `uncommitted_raw` is a single line with no trailing newline (command substitution strips it), `printf '%s' \"$uncommitted_raw\" | grep -c .` correctly counts 1. However, if `git status --porcelain` somehow outputs only whitespace (theoretically impossible for valid porcelain output but possible on corrupt repos), `grep -c .` still counts it as 1 matching line, reporting 1 dirty file when there are really 0. This is an extremely unlikely edge case.",
+      "suggestion": "Acceptable as-is — git porcelain format guarantees non-empty status codes on dirty lines."
+    }
+  ]
+}
