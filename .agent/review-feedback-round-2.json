@@ -1,0 +1,86 @@
+{
+  "round": 2,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 5,
+      "description": "set -e causes the entire script to abort if any command in the jq pipeline or subsequent commands fails. The ps command on line 8 uses `|| echo \"\"` but the jq command on line 9 does not have a fallback. If jq fails (e.g., jq not installed, malformed input that causes jq itself to error), set -e kills the script and the exec returns no output at all. The spec (FR-2c) says 'partial output is still parsed and fields that failed are returned as nulls.' A total script abort prevents partial results.",
+      "suggestion": "Either remove `set -e` and let each section fail independently (the control-plane parser already handles partial/missing JSON), or add `|| ps_json='[]'` fallback after the jq command on line 9."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 189,
+      "description": "The code uses `pods_api.exec()` with `AttachParams`, but kube-rs's `exec()` method requires the `ws` feature which was correctly added. However, `AttachParams` is designed for `attach()`, not `exec()`. The `exec()` method in kube-rs takes `&AttachParams` but semantically the `stdin: false` + `stdout: true` configuration means stdout comes through a websocket multiplexed stream. The real issue: `attached.stdout()` returns an `AsyncRead` over the muxed websocket channel. If the command produces output after the websocket handshake completes but before stdout is polled, there's a race — though in practice kube-rs buffers this. More critically, `exec()` with these params may not capture stderr at all (stderr: false), so if the introspect script fails, the error message is lost silently.",
+      "suggestion": "Set `stderr: true` on AttachParams and optionally log stderr output for debuggability. The spec says the command redirects stderr to /dev/null (`2>/dev/null`) in the shell wrapper, but if the shell itself fails to start, stderr from the exec would be useful."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 122,
+      "description": "The exec timeout error check (`e.contains(\"timed out\")`) is fragile string matching. If the error message from kube-rs or the read loop changes, this check silently becomes a no-op and the handler falls through to the `Err(e)` branch in the parse match, returning a partial snapshot instead of a 503. The \"exec read timed out after 2s\" message on line 235 does contain \"timed out\" but any kube-rs error message change would break this.",
+      "suggestion": "Use a structured error type (enum with Timeout variant) instead of string matching, or at minimum match on the exact error strings you control (\"exec timed out after 3s\" and \"exec read timed out after 2s\")."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm.rs",
+      "line": 700,
+      "description": "The introspect polling task has a race condition: when `loop_id_rx.changed()` fires on line 722 (approximate), the code reads `*loop_id_rx.borrow()` BEFORE awaiting `.changed()`. On the first iteration, the task reads the initial borrow value (which may be None since no panel is open yet), then waits for `.changed()`. However, `spawn_introspect_task` immediately reads `.borrow()` before any `.changed()` await, meaning if the watch channel is initialized with `None`, it will skip spawning a task. This is fine. But: there's no `.changed()` call before the first `.borrow()`, so the initial value is always consumed. If the channel is sent a value between `spawn_introspect_task` starting and the first `.changed().await`, that value would be missed — though in practice this is unlikely since the task spawns before any user input.",
+      "suggestion": "This is a minor race; the existing pattern (used identically for inspect) is acceptable in practice. No action strictly required."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/reconciler.rs",
+      "line": 57,
+      "description": "When the cleanup_interval tick wins the select!, `sweep_old_pod_snapshots()` runs, then execution falls through to `reconcile_all()` on line 71. This means every daily cleanup tick also triggers a reconciliation, which is harmless but wasteful. More importantly: the cleanup_interval tick is NOT consumed properly. `tokio::time::Interval::tick()` is cancel-safe, but when another branch wins the select!, the interval's next tick is NOT reset. Over time, if the reconcile interval (e.g., 10s) always wins, the cleanup_interval accumulates 'missed' ticks and may fire multiple times in rapid succession when it finally gets a chance. tokio::time::MissedTickBehavior defaults to Burst, which fires missed ticks immediately.",
+      "suggestion": "Set `cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay)` after creating the interval, so it won't burst-fire multiple sweeps."
+    },
+    {
+      "severity": "medium",
+      "category": "security",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 61,
+      "description": "The `job_name` from the database is interpolated directly into a Kubernetes label selector string (`job-name={job_name}`). While job_name comes from the database (not user input directly), if it ever contains characters like `,` or `=` it could inject additional label selectors. Kubernetes label selectors have limited injection surface, but this is defense-in-depth.",
+      "suggestion": "Validate that job_name matches expected pattern (alphanumeric + hyphens) before using it in the label selector, or use the kube-rs label selector builder if available."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 38,
+      "description": "The `ls /work/target/debug/deps | wc -l` counts ALL entries including directories and non-artifact files. The spec (FR-2a) says 'artifact count' which this approximates. However, `ls` output when piped doesn't include `.` and `..` but does include directories. More critically: if `/work/target/debug/deps` has thousands of entries, `ls` without `-f` will sort them, which is slow. On a large Rust project with 1000+ deps, this sort can take hundreds of milliseconds, eating into the 2s script budget.",
+      "suggestion": "Use `ls -f /work/target/debug/deps 2>/dev/null | wc -l` to skip sorting, or `find /work/target/debug/deps -maxdepth 1 -type f | wc -l` for accuracy."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/introspect.rs",
+      "line": 251,
+      "description": "The metrics API URL uses `pod_name` and `namespace` directly in a URL path without percent-encoding. Pod names and namespaces in Kubernetes are DNS-safe so this is fine in practice, but it's technically unguarded.",
+      "suggestion": "No action needed for Kubernetes-valid names."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/ps.rs",
+      "line": 62,
+      "description": "The `run()` function calls `std::process::exit()` directly, which skips destructors and async runtime cleanup. For a CLI this is generally fine, but if the tokio runtime has pending background tasks (like connection cleanup), they won't complete.",
+      "suggestion": "Return a typed exit code instead and let main() handle the process exit, or accept this as standard CLI practice."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "images/base/nautiloop-introspect",
+      "line": 39,
+      "description": "The `git -C /work rev-parse HEAD` command will output the full SHA (40 chars). If HEAD is detached or the repo has issues, it outputs 'null' via the fallback. But: `git rev-parse HEAD` can output to stderr (e.g., 'fatal: not a git repository') which is not redirected. With `set -e`, the `|| echo \"null\"` fallback handles git failures, but stderr noise could leak into the exec output if the stderr suppression in the shell wrapper (`2>/dev/null`) doesn't cover subcommands.",
+      "suggestion": "The shell wrapper already redirects the entire script's stderr. This is a non-issue since the `2>/dev/null` in the exec command wraps the whole invocation."
+    }
+  ]
+}
