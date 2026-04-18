@@ -151,6 +151,43 @@ Fields:
 
 **FR-8c.** Keybind `T` cycles themes at runtime (no restart).
 
+### FR-9: Rounds table pane
+
+**FR-9a.** New keybind `R` toggles a rounds-table pane for the selected loop. Replaces the log pane (not an overlay — the table is denser and benefits from full width).
+
+**FR-9b.** Table shape, one row per round, columns:
+
+| # | Stages | Verdict | Issues | Conf | Tokens | $ | Duration |
+|---|--------|---------|--------|------|--------|---|----------|
+| 1 | ✓I ✓T ✗R | not clean | 3 (1m 2l) | 0.88 | 52K | $0.18 | 3m 22s |
+| 2 | ✓I ✓T ✓R | **clean** | 0 | 0.92 | 48K | $0.17 | 2m 41s |
+
+Columns:
+- `#` — round number
+- `Stages` — compact per-stage marker: `I` implement, `T` test, `R` review (or `A` audit, `V` revise for harden loops). Prefixed with `✓`/`✗` based on stage exit. Muted if stage didn't run that round.
+- `Verdict` — final review/audit verdict for the round: `clean` (green, bold) or `not clean` (amber). Blank if review didn't run.
+- `Issues` — issue count by severity: `3 (1h 1m 1l)` = 3 total, 1 high, 1 medium, 1 low. `critical` shown with `c` prefix. Empty → `0`.
+- `Conf` — reviewer/auditor confidence (0.00-1.00).
+- `Tokens` — sum of input+output tokens across all stages this round (K/M format).
+- `$` — cost per round, using the same `[pricing]` lookup as FR-2.
+- `Duration` — wall-clock time for the round (sum of per-stage `duration_secs` from `InspectResponse`).
+
+**FR-9c.** The table scrolls (same keybinds as log pane: PgUp/PgDn/Home/End). For a round with >20 findings, only counts are shown; selecting the row with Enter drops into a detail view (FR-9d).
+
+**FR-9d.** Pressing `Enter` on a selected row opens a detail pane: full verdict summary + list of issues (severity · category · file:line · description, one per line). Press `Esc` or `R` again to return.
+
+**FR-9e.** Harden-loop variant: for loops in `Hardening` state, the `Stages` column uses `A` (audit) / `V` (revise) markers and the `Verdict` column reflects the audit's `clean` field. Same table shape otherwise. This is the primary use case when deciding whether to approve a hardened spec — you see the full convergence trace at a glance before accepting.
+
+**FR-9f.** The rounds table always shows up to the loop's final round. For an active loop, the current round's row shows stages in progress as `~I` / `~T` / `~R` (tilde prefix = running).
+
+### FR-10: Post-harden approval context
+
+**FR-10a.** When a loop is in `AWAITING_APPROVAL` (either post-harden before implement starts, or at the convergence gate), helm's header adds an approval hint: `[a] approve  [x] cancel  [R] see rounds`. Same for `CONVERGED` loops where a PR is open: `[o] open PR  [R] see rounds`.
+
+**FR-10b.** The rounds table view (FR-9) is the natural landing spot before hitting `a` — engineers can inspect what they're approving. Specifically: for a harden loop, the rounds table shows which audit findings were addressed in which revise round, with durations and costs.
+
+**FR-10c.** Acceptance criterion: an engineer who has never seen a spec before can press `R`, scan the table, and decide whether to approve in under 30s for a typical 3-round harden loop.
+
 ## Non-Functional Requirements
 
 ### NFR-1: No new server-side surface beyond FR-5
@@ -191,6 +228,8 @@ A reviewer can verify by:
 6. Press `d` on a converged loop. Diff pane shows the merged commits. Scroll works.
 7. Press `m`. Log pane splits into 2-4 sub-panes showing recent lines per active loop. Press `m` again: back to single.
 8. Press `T`. Theme cycles. Colors change cleanly without artifacts.
+9. Select a multi-round loop, press `R`. Table shows one row per round with stage markers, verdict, issue counts, tokens, cost, duration. Press `Enter` on row 1 to see the full issue list. `Esc` returns to table. `R` returns to log pane.
+10. Select a harden-phase loop in `AWAITING_APPROVAL`. Header shows `[a] approve  [R] see rounds`. Press `R`, see full audit/revise trace. Press `a`, loop transitions forward.
 
 ## Out of Scope
 
@@ -210,6 +249,7 @@ A reviewer can verify by:
 - `cli/src/commands/helm/themes.rs` — new: built-in themes.
 - `cli/src/commands/helm/diff_pane.rs` — new: diff rendering.
 - `cli/src/commands/helm/multi_view.rs` — new: split-pane renderer.
+- `cli/src/commands/helm/rounds_table.rs` — new: FR-9 rounds table + FR-10 detail pane.
 - `cli/src/client.rs` — new client methods (approve, cancel, resume, extend, diff).
 - `control-plane/src/api/mod.rs` + `handlers.rs` — new `/diff/:loop_id` route.
 - `Cargo.toml` — new dep `notify-rust` (optional, gated by FR-4b config flag).
