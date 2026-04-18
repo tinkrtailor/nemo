@@ -857,6 +857,16 @@ impl StateStore for PgStateStore {
         Ok(row.0 as u32)
     }
 
+    async fn count_exit_clean_decisions(&self, loop_id: Uuid) -> Result<u32> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM judge_decisions WHERE loop_id = $1 AND decision = 'exit_clean'",
+        )
+        .bind(loop_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 as u32)
+    }
+
     async fn backfill_judge_decisions(
         &self,
         loop_id: Uuid,

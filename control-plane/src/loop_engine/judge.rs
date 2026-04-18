@@ -184,7 +184,13 @@ impl SidecarJudgeClient {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to build reqwest client with timeout; falling back to default (no per-request timeout)"
+                );
+                reqwest::Client::default()
+            });
         Self {
             client,
             base_url: sidecar_base_url.to_string(),
@@ -675,10 +681,6 @@ mod tests {
             Self {
                 response: tokio::sync::Mutex::new(response.to_string()),
             }
-        }
-
-        async fn set_response(&self, response: &str) {
-            *self.response.lock().await = response.to_string();
         }
     }
 

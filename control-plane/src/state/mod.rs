@@ -119,6 +119,9 @@ pub trait StateStore: Send + Sync + 'static {
     /// Count judge decisions for a loop (for cost-ceiling enforcement).
     async fn count_judge_decisions(&self, loop_id: Uuid) -> Result<u32>;
 
+    /// Count `exit_clean` decisions for a loop (FR-7a one-shot guard).
+    async fn count_exit_clean_decisions(&self, loop_id: Uuid) -> Result<u32>;
+
     /// Back-fill loop_final_state and loop_terminated_at on all judge_decisions
     /// rows for a loop when it reaches a terminal state (FR-5b).
     async fn backfill_judge_decisions(
@@ -459,6 +462,14 @@ pub mod memory {
             Ok(decisions
                 .iter()
                 .filter(|d| d.loop_id == loop_id)
+                .count() as u32)
+        }
+
+        async fn count_exit_clean_decisions(&self, loop_id: Uuid) -> Result<u32> {
+            let decisions = self.judge_decisions.read().await;
+            Ok(decisions
+                .iter()
+                .filter(|d| d.loop_id == loop_id && d.decision == "exit_clean")
                 .count() as u32)
         }
 

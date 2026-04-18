@@ -245,6 +245,9 @@ mod tests {
         ) -> crate::error::Result<()> {
             unimplemented!()
         }
+        async fn count_exit_clean_decisions(&self, _: Uuid) -> crate::error::Result<u32> {
+            unimplemented!()
+        }
     }
 
     #[tokio::test]

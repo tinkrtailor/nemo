@@ -27,9 +27,6 @@ pub struct ConvergentLoopDriver {
     /// Orchestrator judge for intelligent transition decisions.
     /// None when judge_enabled=false or no model client configured.
     judge: Option<OrchestratorJudge>,
-    /// Tracks whether exit_clean has already been used for a given loop (FR-7a).
-    /// Keyed by loop_id. Reset is not needed — each driver instance is short-lived.
-    exit_clean_used: std::sync::Mutex<std::collections::HashSet<Uuid>>,
 }
 
 impl ConvergentLoopDriver {
@@ -45,7 +42,6 @@ impl ConvergentLoopDriver {
             git,
             config,
             judge: None,
-            exit_clean_used: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -68,7 +64,6 @@ impl ConvergentLoopDriver {
             git,
             config,
             judge: Some(judge),
-            exit_clean_used: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -639,15 +634,11 @@ impl ConvergentLoopDriver {
 
                         match judge_decision {
                             Some(ref output) if output.decision == JudgeDecision::ExitClean => {
-                                // FR-7a: atomic check-and-insert to prevent TOCTOU race
-                                let is_new = {
-                                    let mut guard = self
-                                        .exit_clean_used
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner());
-                                    guard.insert(record.id)
-                                };
-                                if !is_new {
+                                // FR-7a: check DB for prior exit_clean (survives restarts)
+                                let already_used = self
+                                    .check_exit_clean_used(record.id)
+                                    .await;
+                                if already_used {
                                     tracing::warn!(
                                         loop_id = %record.id,
                                         "Judge returned exit_clean a second time in harden; treating as continue (FR-7a)"
@@ -695,6 +686,19 @@ impl ConvergentLoopDriver {
 
                         // Heuristic / judge-continue: check max rounds before dispatching
                         if record.round >= record.max_rounds {
+                            // If no critical/high issues remain, escalate for
+                            // human review instead of hard-failing.
+                            if !judge::has_blocking_issues(&v.issues) {
+                                record.state = LoopState::AwaitingApproval;
+                                record.sub_state = None;
+                                record.active_job_name = None;
+                                record.failure_reason = Some(format!(
+                                    "Max harden rounds ({}) exceeded with only non-blocking issues; escalating for review",
+                                    record.max_rounds
+                                ));
+                                self.store.update_loop(record).await?;
+                                return Ok(LoopState::AwaitingApproval);
+                            }
                             record.state = LoopState::Failed;
                             record.sub_state = None;
                             record.failure_reason = Some(format!(
@@ -967,15 +971,11 @@ impl ConvergentLoopDriver {
                 // Handle judge override decisions
                 match judge_decision {
                     Some(ref output) if output.decision == JudgeDecision::ExitClean => {
-                        // FR-7a: atomic check-and-insert to prevent TOCTOU race
-                        let is_new = {
-                            let mut guard = self
-                                .exit_clean_used
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                            guard.insert(record.id)
-                        };
-                        if !is_new {
+                        // FR-7a: check DB for prior exit_clean (survives restarts)
+                        let already_used = self
+                            .check_exit_clean_used(record.id)
+                            .await;
+                        if already_used {
                             tracing::warn!(
                                 loop_id = %record.id,
                                 "Judge returned exit_clean a second time; treating as continue (FR-7a)"
@@ -1027,6 +1027,19 @@ impl ConvergentLoopDriver {
 
                 // Heuristic / judge-continue path: check max rounds
                 if record.round >= record.max_rounds {
+                    // If no critical/high issues remain, escalate for
+                    // human review instead of hard-failing.
+                    if !judge::has_blocking_issues(&v.issues) {
+                        record.state = LoopState::AwaitingApproval;
+                        record.sub_state = None;
+                        record.active_job_name = None;
+                        record.failure_reason = Some(format!(
+                            "Max implement rounds ({}) exceeded with only non-blocking issues; escalating for review",
+                            record.max_rounds
+                        ));
+                        self.store.update_loop(record).await?;
+                        return Ok(LoopState::AwaitingApproval);
+                    }
                     record.state = LoopState::Failed;
                     record.sub_state = None;
                     record.failure_reason = Some(format!(
@@ -1375,6 +1388,25 @@ impl ConvergentLoopDriver {
         };
 
         judge.invoke(&context, &trigger).await
+    }
+
+    /// FR-7a: Check if an `exit_clean` decision was already used for this loop.
+    /// Uses the `judge_decisions` table so the guard survives driver restarts.
+    /// The current decision was just persisted by `judge.invoke()`, so count > 1
+    /// means a prior exit_clean exists. On DB error, conservatively returns
+    /// `true` to avoid violating the one-shot guarantee.
+    async fn check_exit_clean_used(&self, loop_id: Uuid) -> bool {
+        match self.store.count_exit_clean_decisions(loop_id).await {
+            Ok(count) => count > 1,
+            Err(e) => {
+                tracing::warn!(
+                    loop_id = %loop_id,
+                    error = %e,
+                    "Failed to check exit_clean guard in DB; conservatively blocking"
+                );
+                true
+            }
+        }
     }
 
     /// Handle AWAITING_APPROVAL: check for approve flag.
