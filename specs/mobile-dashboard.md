@@ -46,9 +46,13 @@ Today's approve / cancel / extend require the CLI. If the operator is AFK and a 
 | `/dashboard/logout` | POST | Clear auth cookie |
 | `/dashboard/loops/:id` | GET | Loop detail HTML (drawer or full page) |
 | `/dashboard/stream/:id` | GET (SSE or JSON) | Dashboard-specific log proxy: returns the last 200 lines as SSE for active loops (auto-scrolling tail), or a JSON array (full log dump) for terminal loops. Unlike `/logs/:id` which streams the complete log, this endpoint is optimized for the dashboard's live log pane (FR-4a) with a line cap and HTML-safe escaping. |
+| `/dashboard/state` | GET | JSON roll-up of all loops + aggregates (see FR-8b for response schema) |
+| `/dashboard/feed` | GET | JSON feed of terminal events, paginated (see FR-12c for response schema) |
+| `/dashboard/specs` | GET | JSON per-spec history (see FR-13b for response schema) |
+| `/dashboard/stats` | GET | JSON stats deep-dive with aggregation (see FR-14b for response schema) |
 | `/dashboard/static/*` | GET | Embedded CSS + JS assets |
 
-**FR-1b.** Static assets (CSS, single JS file, optional icon/font) are **embedded in the binary** via `include_str!`/`include_bytes!`. No filesystem dependencies at runtime. Total asset budget: <50 KB gzipped.
+**FR-1b.** Static assets (CSS, single JS file, optional icon/font) are **embedded in the binary** via `include_str!`/`include_bytes!`. No filesystem dependencies at runtime. Total asset budget: <25 KB gzipped (leaving headroom for HTML within the NFR-2 page-weight budget of <30 KB gzipped).
 
 **FR-1c.** All dashboard HTML is server-rendered (axum handler returns `Html<String>`). Templating via `askama` (compile-time, already a family of the rust ecosystem) or `maud` — pick one, stick with it. No SPA framework. No React/Vue/Svelte.
 
@@ -60,7 +64,7 @@ Today's approve / cancel / extend require the CLI. If the operator is AFK and a 
 
 The dashboard auth middleware accepts **either** a valid cookie **or** a valid Bearer header on any `/dashboard/*` route (except `/login` and `/static/*`). Dashboard JS does **not** read the cookie value; instead, same-origin `fetch()` calls automatically include the HttpOnly cookie. The middleware checks the cookie first, falls back to Bearer. This preserves XSS protection (JS never touches the key) while keeping programmatic access viable.
 
-**Local development note:** The `Secure` flag prevents cookies from being sent over plain HTTP. When the bind address is `127.0.0.1` or `localhost`, the `Secure` flag should be conditionally omitted so that authentication works without TLS. Production deployments (non-localhost bind) MUST always set `Secure`.
+**Local development note:** The `Secure` flag prevents cookies from being sent over plain HTTP. When the configured bind address (from `NautiloopConfig` or `NAUTILOOP_BIND_ADDR`) is `127.0.0.1`, `[::1]`, or `localhost`, the `Secure` flag should be conditionally omitted so that authentication works without TLS. Production deployments (non-localhost bind) MUST always set `Secure`.
 
 **FR-2b.** `/dashboard/login` renders a form with two inputs: `api_key` (password field) and `engineer_name` (text field, used for the `Mine` filter — see FR-3e). On POST, validates the API key via constant-time comparison against the `NAUTILOOP_API_KEY` environment variable (same logic as the existing auth middleware — no internal HTTP call). If valid, sets two cookies: `nautiloop_api_key=<key>` (HttpOnly, Secure, SameSite=Strict, 7-day expiry) and `nautiloop_engineer=<name>` (HttpOnly, Secure, SameSite=Strict, 7-day expiry), then redirects to `/dashboard`. If invalid, re-renders the form with an error message. The `engineer_name` field is required; it is always accepted as free-text (self-declared, not validated against loop data). This is consistent with the CLI, which accepts any engineer name on `nemo start`. The value is used solely for the `Mine` filter (FR-3e).
 
@@ -95,7 +99,7 @@ The dashboard auth middleware accepts **either** a valid cookie **or** a valid B
 
 **FR-3c.** Clicking/tapping a card navigates (not modal — actual route change) to `/dashboard/loops/:id`.
 
-**FR-3d.** Card grid auto-refreshes every 5s via a small vanilla-JS poll that fetches `/status` and re-renders card fields in place (no full page reload). State transitions animate with a 1s color fade on the badge.
+**FR-3d.** Card grid auto-refreshes every 5s via a small vanilla-JS poll that fetches `/dashboard/state` (FR-8b) and re-renders card fields in place (no full page reload). State transitions animate with a 1s color fade on the badge.
 
 **FR-3e.** Two rows of filter/segment chips at the top of the grid:
 - **State row**: `Active (N)`, `Converged (N)`, `Failed (N)`, `All`. Tapping filters by state.
@@ -118,7 +122,7 @@ Chips are independent: selecting `Active` + `alice` shows Alice's active loops. 
   - `Resume` if state in {PAUSED, AWAITING_REAUTH, transient FAILED}
   - `Extend +10` if state == FAILED with failed_from_state
   - `Open PR` if spec_pr_url is set (opens in new tab)
-- **Rounds table**: one row per round. Columns: round number, stage (Implement/Test/Review/Revise/Harden), verdict (`clean`/`not clean`/`—`), issues count, confidence score, tokens (input + output), cost (or `—`), duration. Tapping a row expands full verdict details inline.
+- **Rounds table**: one row per round. Columns: round number, stage (Implement/Test/Review/Revise/Harden), verdict (`clean`/`not clean`/`—`), issues count, confidence score, tokens (input + output), cost (or `—`), duration. Tapping a row expands full verdict details inline. **Note:** The `/dashboard/loops/:id` handler queries the `rounds` table directly (not via `/inspect`) to access `duration_secs`, `started_at`, and `completed_at` fields that `/inspect` does not currently expose.
 - **Live log pane**: last 200 lines, auto-scrolls. SSE stream via `/dashboard/stream/:id` for active loops; static dump for terminal loops.
 - **Token/cost breakdown**: per-stage, per-round (bar chart optional; data table mandatory). Token data is extracted from the JSONB `output` column of each round's row. The five stage output types that may contain token data are: `ImplResultData`, `TestResultData`, `ReviewResultData`, `ReviseResultData`, and `AuditVerdict`. Each embeds a `token_usage: TokenUsage` struct with fields `input: u64` and `output: u64` (matching the `TokenUsage` struct in `control-plane/src/types/verdict.rs`). The aggregation logic must handle all five stage types and gracefully display `—` when a stage's output lacks `token_usage`. Cost is computed from token counts using the `[pricing]` config (see FR-15); if pricing is not configured, only raw token counts are shown.
 
@@ -136,7 +140,7 @@ Chips are independent: selecting `Active` + `alice` shows Alice's active loops. 
 
 **FR-6a.** Dashboard defaults to **system color scheme** (`prefers-color-scheme` media query). Dark by default on mobile operating systems that default dark at night.
 
-**FR-6b.** CSS uses custom properties for all colors, same palette as helm themes (dark/light/high-contrast). In v1, system `prefers-color-scheme` is the sole source of truth for theme selection — no inheritance from `[helm] theme` in nemo.toml. (The helm TUI theme is a terminal concept with no direct mapping to web CSS custom properties; bridging this is a follow-up if operators request it.)
+**FR-6b.** CSS uses custom properties for all colors. The dark palette is inspired by the helm TUI dark theme (`BG #0f0f0e`, `SURFACE #1a1918`, `TEAL #1b6b5a`, `AMBER #e8a838`, `GREEN #2d7a4f`, `RED #c4392d`, `BLUE #3b7bc0`). The light palette inverts luminance (light backgrounds, dark text) — the dashboard defines its own light-mode values since no light theme exists in the helm TUI. High-contrast is a follow-up. In v1, system `prefers-color-scheme` is the sole source of truth for theme selection — no inheritance from `[helm] theme` in nemo.toml. (The helm TUI theme is a terminal concept with no direct mapping to web CSS custom properties; bridging this is a follow-up if operators request it.)
 
 **FR-6c.** No theme-switcher UI in v1. System-level preference is the source of truth.
 
@@ -281,7 +285,7 @@ Fields with `total_cost` or per-loop `total_cost` are `null` when `[pricing]` is
 }
 ```
 
-**FR-8c.** `/dashboard/state` is auth-protected same as other `/dashboard/*` routes.
+**FR-8c.** All `/dashboard/*` JSON endpoints (`/dashboard/state`, `/dashboard/feed`, `/dashboard/specs`, `/dashboard/stats`) are auth-protected same as other `/dashboard/*` routes (see FR-2a, FR-2c).
 
 ### FR-9: CTO kit — fleet summary header
 
@@ -385,6 +389,12 @@ Plus aggregates at the top: `3 runs · 67% converge rate · avg 10.7 rounds · t
 ```
 
 **FR-15b.** A helper function `compute_cost(token_usage: &TokenUsage, model: &str, pricing: &PricingConfig) -> Option<f64>` lives in the dashboard aggregate module. Returns `None` if the model is not found in the pricing config (graceful degradation — no panic, no default guess).
+
+**Stage→model mapping for per-round cost computation:** Each round's cost requires knowing which model was used. The mapping is:
+- **Implement, Revise, Test** stages → use the loop's `model_implementor` field
+- **Review, Audit (Harden)** stages → use the loop's `model_reviewer` field
+
+**Fallback chain:** loop-level field (`model_implementor` or `model_reviewer`) → `NautiloopConfig` default model for that role → `None` (display `—`). If the resolved model string is not present in the `[pricing.models]` table, `compute_cost` returns `None`.
 
 **FR-15c.** When `[pricing]` is absent from `nemo.toml`, **all cost fields across the dashboard display `—` instead of a dollar amount**. Token counts (raw numbers) are always shown regardless of pricing config. This applies to: FR-3b metrics row, FR-4a token/cost breakdown, FR-9a fleet summary (cost and top-spender fields omitted), FR-12a feed rows, FR-13a history table, FR-14a headline cards and per-engineer/per-spec tables.
 
