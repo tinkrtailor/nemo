@@ -1,0 +1,46 @@
+{
+  "round": 1,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/start.rs",
+      "line": 330,
+      "description": "FR-4a/4b tests are superficial — they only assert boolean conditions on manually-constructed StartArgs structs, not the actual printed output. They don't capture stdout to verify the phase plan strings ('HARDEN → AWAITING_APPROVAL → IMPLEMENT' vs 'IMPLEMENT (harden skipped)') are actually emitted. A bug in the println! branching logic (e.g. wrong condition order) would pass these tests.",
+      "suggestion": "Either capture stdout (e.g., via a writer abstraction or by extracting the phase-plan string into a pure function like `fn phase_plan_label(args: &StartArgs) -> &str` and testing that), or delete these tests and rely on the integration test. As-is they provide false confidence."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/start.rs",
+      "line": 289,
+      "description": "NFR-3 requires testing that the deprecated --harden flag emits a stderr warning. test_deprecated_harden_flag_sends_harden_true only checks that harden=true is sent in the body (identical to the default test), but never verifies the eprintln! deprecation warning fires. The warning logic is in main.rs (line 309-311), completely untested.",
+      "suggestion": "Extract the deprecation-warning logic into a testable function, or add an integration/CLI test that parses stderr for the warning string when --harden is passed. At minimum, the existing test comment should not claim it covers the deprecation warning when it doesn't."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/main.rs",
+      "line": 57,
+      "description": "FR-1d specifies the error message for --harden + --no-harden should be: 'Cannot use --harden and --no-harden together. --harden is deprecated; remove it.' The implementation uses clap's default conflicts_with error, which produces a generic message like 'the argument --harden cannot be used with --no-harden'. The spec-prescribed message with the deprecation hint is lost.",
+      "suggestion": "Use a clap ArgGroup with custom error, or add a manual check before clap parsing, or use clap's `conflicts_with` and accept the deviation as intentional. If the latter, document why the spec's exact message was not used."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/start.rs",
+      "line": 291,
+      "description": "test_deprecated_harden_flag_sends_harden_true is functionally identical to test_default_start_sends_harden_true — both construct StartArgs with harden=true and assert the body contains harden=true. The test doesn't exercise any code path unique to the --harden flag.",
+      "suggestion": "Either make this test meaningfully different (e.g., test the warning output) or remove it to avoid giving the false impression of coverage."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/start.rs",
+      "line": 53,
+      "description": "The ship_mode + harden phase output shows 'HARDEN → IMPLEMENT → SHIP' but omits AWAITING_APPROVAL. This is correct per FR-2c (ship auto-approves), but the spec's FR-2b says --auto-approve bypasses the gate for nemo start. The phase plan for `nemo start --auto-approve` (without ship) would still show 'HARDEN → AWAITING_APPROVAL → IMPLEMENT' even though approval is auto-bypassed, which could confuse operators.",
+      "suggestion": "Consider adjusting the phase plan output to show 'HARDEN → IMPLEMENT' (without AWAITING_APPROVAL) when --auto-approve is set, to accurately reflect the runtime behavior."
+    }
+  ]
+}
