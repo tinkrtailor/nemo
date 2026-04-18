@@ -7,7 +7,7 @@ mod project_config;
 
 use clap::{Parser, Subcommand};
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(
     name = "nemo",
     about = "Nemo CLI - Convergent loop orchestrator",
@@ -26,7 +26,7 @@ struct Cli {
     insecure: bool,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
     /// Harden spec, merge spec PR. Terminal: HARDENED
     Harden {
@@ -47,8 +47,14 @@ enum Commands {
         /// Path to the spec file
         spec_path: String,
 
-        /// Harden spec first, then implement
+        /// Skip the harden phase (audit + optional revise) before implement.
+        /// Default: harden runs first. Use when you've already hardened the spec
+        /// or when audit-in-the-loop is not wanted for this run.
         #[arg(long)]
+        no_harden: bool,
+
+        /// Deprecated: harden is now the default. This flag has no effect.
+        #[arg(long, conflicts_with = "no_harden")]
         harden: bool,
 
         /// Skip AWAITING_APPROVAL gate
@@ -294,11 +300,15 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Start {
             spec_path,
+            no_harden,
             harden,
             auto_approve,
             model_impl,
             model_review,
         } => {
+            if harden {
+                eprintln!("Warning: --harden is now the default; this flag has no effect.");
+            }
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &eng_config.models)?;
             claude_creds::ensure_fresh(
@@ -308,13 +318,13 @@ async fn main() -> anyhow::Result<()> {
                 &eng_config.email,
             )
             .await?;
-            // nemo start: ship_mode=false
+            // nemo start: harden by default, --no-harden to skip
             commands::start::run(
                 &http_client,
                 commands::start::StartArgs {
                     engineer: &eng_config.engineer,
                     spec_path: &spec_path,
-                    harden,
+                    harden: !no_harden,
                     harden_only: false,
                     auto_approve,
                     ship_mode: false,

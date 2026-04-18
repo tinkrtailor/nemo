@@ -127,11 +127,22 @@ Pick a spec in your target repo (must be a `.md` file on `main`):
 nemo start specs/your-spec.md
 # Started loop <uuid>
 #   Branch: agent/dev/your-spec-<hash>
+#   Phase:  HARDEN → AWAITING_APPROVAL → IMPLEMENT (add --no-harden to skip harden)
 #   State:  PENDING
+```
 
+By default, `nemo start` hardens the spec first (audit + optional revise) before implementation. The harden phase catches ambiguity early, typically converging in 1-2 rounds. After hardening, the loop transitions to AWAITING_APPROVAL — review the hardened spec and approve to begin implementation:
+
+```bash
 nemo approve <uuid>
-# State: AWAITING_APPROVAL
 # Implementation will start on next reconciliation tick.
+```
+
+To skip hardening (e.g., when the spec is already hardened), pass `--no-harden`:
+
+```bash
+nemo start specs/your-spec.md --no-harden
+# Phase:  IMPLEMENT (harden skipped)
 ```
 
 Watch it:
@@ -149,7 +160,8 @@ When it converges, a PR is opened against `main` in your target repo. The URL is
 
 ```bash
 nemo status                           # all your active loops
-nemo start <spec>                     # submit a new loop (requires approve to run)
+nemo start <spec>                     # harden + approve gate + implement (default)
+nemo start <spec> --no-harden         # skip harden, implement directly
 nemo ship <spec>                      # start + auto-merge PR once clean (requires [ship] allowed = true)
 nemo harden <spec>                    # converge on the spec itself (fixes ambiguity, adds criteria)
 nemo approve <id>                     # gate the agent at PENDING → dispatch
@@ -207,7 +219,7 @@ docker volume prune -f        # optional: clean up persisted data (sccache, Post
 
 ## What's next
 
-- Drop a real spec into `specs/` and run `nemo start specs/your-spec.md` — watch convergence
+- Drop a real spec into `specs/` and run `nemo start specs/your-spec.md` — it hardens first, then you approve, then convergence runs
 - Open `nemo helm` and keep it visible while you work — live view of all your loops
 - Authenticate OpenAI for cross-model review: `nemo auth --openai` (Claude implements, OpenAI reviews — the different-blind-spots model)
 
