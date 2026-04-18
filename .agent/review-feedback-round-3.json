@@ -1,0 +1,118 @@
+{
+  "round": 3,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "description": "FR-4a: Writing bell character to stdout via crossterm::execute! after terminal.draw() but while ratatui still owns the alternate screen. The bell is emitted via Print('\\x07') which writes raw bytes to stdout. While this is done after draw(), it still bypasses ratatui's rendering pipeline and can cause display artifacts on some terminal emulators. The spec says 'emits a terminal bell' but the implementation approach risks display corruption.",
+      "suggestion": "Use crossterm's queue! macro to queue the bell character before the next terminal.draw() call, letting the terminal backend flush it together with the frame render. Alternatively, test on major terminals to confirm no artifacts."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "description": "FR-4b: Desktop notifications are behind a cargo feature flag 'desktop-notifications' but the feature is not enabled by default and there's no documentation or CLI flag to enable it. The notify-rust dependency is optional, and the #[cfg(feature = \"desktop-notifications\")] block in detect_state_changes references `pr_url` variable which is shadowed — the second `match &pr_url` block inside the cfg uses a variable `pr_url` that has already been moved/consumed by the first `match &pr_url` outside the cfg. However looking more carefully, the first match borrows via `&pr_url` and the cfg block also borrows via `&pr_url`, so this should be fine since both are references. Still, the feature integration is incomplete: there's no way for a user to actually enable this feature short of recompiling with --features.",
+      "suggestion": "Document in the README or config how to enable desktop notifications. Consider making it a default feature or a runtime-only config check."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "line": 465,
+      "description": "FR-3a spec maps 'r' to Resume with states {PAUSED, AWAITING_REAUTH, transient FAILED}. The Resume action validation in actions.rs correctly checks these states, but the 'r' key in handle_input unconditionally returns AppAction::Trigger(LoopCommand::Resume) without the pre-validation that 'x' (cancel) has. This means the validate_action check happens later in the Trigger handler, which is fine functionally, but inconsistent with how 'x' is handled. More importantly, the old 'r' was 'reconnect logs' — this behavioral change is noted but existing muscle memory users may accidentally trigger resume.",
+      "suggestion": "This is acceptable per spec but worth noting the behavioral change from previous 'r' = reconnect."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 946,
+      "description": "FR-5b: The round-scoped diffing implementation looks up commit SHAs from round output's 'new_sha' field. However, there's no guarantee that the round output contains a 'new_sha' field — this depends on the implement/revise stage output format. If the field name is different (e.g., 'commit_sha', 'head_sha'), the lookup silently fails and returns a BadRequest error. The code also uses `next_back()` on an iterator of filter_mapped results, which gets the LAST matching SHA — but there could be multiple stages per round (implement + revise) with different SHAs, and it's unclear which is correct.",
+      "suggestion": "Verify the actual output schema for implement/revise stages to ensure 'new_sha' is the correct field name. Document the expected output format. Consider also checking 'commit_sha' or 'head_sha' as fallbacks."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "line": 1305,
+      "description": "spawn_batch_inspect_task sleeps 5s then also waits up to 5s for a loops_rx change — effectively polling every 5-10 seconds. The spec (FR-1b) says 'Header updates every 2s in line with status polling'. The batch inspect data feeds the header summary, but it updates much less frequently than the 2s status poll, causing stale header cost/token data.",
+      "suggestion": "Reduce the sleep interval to 2-3 seconds to better align with the status polling interval, or trigger a batch inspect refresh whenever the status poller delivers new data."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/summary.rs",
+      "description": "FR-1a: The header summary iterates over `non_terminal` twice — once for stage counting and once for token/cost aggregation. The second iteration borrows `non_terminal` immutably after the first loop, which is fine. However, the header format doesn't exactly match the spec: spec says 'nautiloop · 4 active · 2 impl · 1 review · 0 harden · 1 awaiting · 1.2M tokens · $0.84 · 3h 22m' but the implementation omits zero-count stages (e.g., won't show '0 harden'). This is actually better UX but technically deviates from the spec example.",
+      "suggestion": "Minor spec deviation — likely intentional improvement. No action needed unless strict spec compliance is required."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "description": "FR-6a: Multi-loop view only shows logs for loops that have been selected at some point (since multi_logs is populated from LogLine events for the selected loop). If a loop was never selected, its multi_logs entry will be empty or missing. The spec says 'N most recently-active loops' log streams' — implying all active loops should have log data available.",
+      "suggestion": "Start log streaming for all active loops in the background, not just the selected one. This requires subscribing to SSE streams for all active loops simultaneously, or at minimum populating multi_logs from the batch inspect data."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "line": 808,
+      "description": "Log lines are stored in multi_logs for ALL loop IDs that receive LogLine events, but LogLine events are only emitted for the currently selected loop (the SSE stream is per-selection). This means multi_logs will only contain logs for loops that were selected during the session, making the multi-loop view (FR-6) mostly empty for loops the user never selected.",
+      "suggestion": "Subscribe to log streams for all active (non-terminal) loops, not just the selected one. This likely requires spawning additional SSE connections."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/rounds_table.rs",
+      "line": 33,
+      "description": "render_table destructures cfg but then uses `cfg.model_implementor` and `cfg.model_reviewer` later (in the loop calling calculate_loop_round_cost). However, these fields are destructured as `model_implementor: _` and `model_reviewer: _` (ignored with underscore) in the let binding. This means the actual model information is discarded and never used for cost calculation in the table.",
+      "suggestion": "Remove the underscore bindings and use the destructured variables: change `model_implementor: _` to `model_implementor` and `model_reviewer: _` to `model_reviewer`, then pass them to calculate_loop_round_cost."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/rounds_table.rs",
+      "line": 97,
+      "description": "The rounds table cost calculation calls `calculate_loop_round_cost(pricing, cfg.model_implementor, cfg.model_reviewer, round)` but `cfg` has already been partially moved/destructured. In the destructuring at line 33, `model_implementor` and `model_reviewer` are bound to `_` (discarded). The code then accesses `cfg.model_implementor` and `cfg.model_reviewer` which would fail to compile since cfg is partially moved. This is actually reading from the original cfg reference which may still work since the destructuring uses pattern matching on references — but the underscore bindings explicitly discard these values, making the intent unclear and potentially causing a compile error.",
+      "suggestion": "Fix the destructuring to properly bind model_implementor and model_reviewer, then use them in the calculate_loop_round_cost call."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "description": "FR-10b/FR-10c: The spec says 'The rounds table view (FR-9) is the natural landing spot before hitting a — engineers can inspect what they're approving.' The approval hints in the footer show '[R] see rounds' for AWAITING_APPROVAL state, which is good. However, there's no enforcement or guidance that engineers should view rounds before approving — the 'a' key works regardless of whether rounds were viewed. This is fine per spec (FR-10c just says 'can press R, scan the table, and decide') but worth noting.",
+      "suggestion": "No code change needed — this is informational. The UX is correct per spec."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/helm/mod.rs",
+      "description": "The warning emoji '⚠' was replaced with '!' in the introspect pane warnings section. While this avoids emoji, it reduces visual salience of warnings.",
+      "suggestion": "Consider using a different ASCII indicator like '!!' or '[WARN]' for better visibility."
+    },
+    {
+      "severity": "low",
+      "category": "performance",
+      "file": "cli/src/commands/helm/mod.rs",
+      "line": 866,
+      "description": "Log lines use Arc<String> for shared ownership between logs and multi_logs, which is good. However, the to_owned() call in render_logs (line ~1985: `line.as_str().to_owned()`) creates a fresh String clone for every line on every render frame, defeating the purpose of Arc sharing for the rendering path.",
+      "suggestion": "Consider caching rendered Text or using Cow to avoid per-frame cloning."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/helm/themes.rs",
+      "description": "ThemeName has from_str_opt as an inherent method but doesn't implement the standard FromStr trait. This is fine but slightly unconventional.",
+      "suggestion": "Consider implementing FromStr for ThemeName for idiomatic Rust."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/cost.rs",
+      "description": "format_tokens for the M format uses floating point: `format!(\"{:.1}M\", tokens as f64 / 1_000_000.0)`. For very large token counts (>2^53), the f64 conversion loses precision. In practice this is unlikely to matter since token counts won't reach that range.",
+      "suggestion": "No action needed — theoretical concern only."
+    }
+  ]
+}
