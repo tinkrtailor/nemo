@@ -50,17 +50,31 @@ pub async fn login_submit(
             .into_response();
     }
 
-    if !constant_time_eq(form.api_key.as_bytes(), expected_key.as_bytes()) {
+    if !crate::util::constant_time_eq(form.api_key.as_bytes(), expected_key.as_bytes()) {
         return Html(templates::render_login(Some("Invalid API key")))
             .into_response();
     }
 
-    // Determine if localhost (omit Secure flag)
+    // Validate engineer name: only allow alphanumeric, hyphens, underscores, dots
+    // to prevent cookie header injection via semicolons or CR/LF
+    if !form
+        .engineer_name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Html(templates::render_login(Some(
+            "Engineer name may only contain letters, numbers, hyphens, underscores, and dots",
+        )))
+        .into_response();
+    }
+
+    // Determine if localhost (omit Secure flag for local dev)
+    // Default to secure (Secure flag ON) — only omit when bind address is explicitly localhost
     let bind_addr = std::env::var("NAUTILOOP_BIND_ADDR").unwrap_or_default();
-    let is_localhost = bind_addr == "127.0.0.1"
-        || bind_addr == "[::1]"
-        || bind_addr == "localhost"
-        || bind_addr.is_empty(); // default for dev
+    let is_localhost = !bind_addr.is_empty()
+        && (bind_addr == "127.0.0.1"
+            || bind_addr == "[::1]"
+            || bind_addr == "localhost");
 
     let secure_flag = if is_localhost { "" } else { "; Secure" };
 
@@ -260,7 +274,7 @@ pub async fn feed_page(
     } else {
         let viewer = extract_cookie_value(&headers, "nautiloop_engineer")
             .unwrap_or_else(|| "unknown".to_string());
-        Ok(Html(templates::render_feed(&data, &viewer)).into_response())
+        Ok(Html(templates::render_feed(&data, &viewer, query.filter.as_deref())).into_response())
     }
 }
 
@@ -388,17 +402,6 @@ fn wants_json(headers: &HeaderMap) -> bool {
         .get("accept")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains("application/json"))
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 #[cfg(test)]

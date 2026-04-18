@@ -3,6 +3,8 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 
+use crate::util::constant_time_eq;
+
 /// Dashboard auth middleware: accepts cookie OR Bearer header.
 /// On failure, redirects to `/dashboard/login` for browser requests,
 /// returns 401 for API requests (Accept: application/json).
@@ -79,17 +81,6 @@ fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<String> {
         })
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,12 +128,5 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer ".parse().unwrap());
         assert_eq!(extract_bearer(&headers), None);
-    }
-
-    #[test]
-    fn test_constant_time_eq() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"ab"));
     }
 }

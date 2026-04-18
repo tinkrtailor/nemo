@@ -354,12 +354,11 @@ fn compute_loop_totals(
         }
     }
 
-    let cost = if has_pricing || pricing.is_some() {
-        if has_pricing {
-            Some(total_cost)
-        } else {
-            Some(0.0)
-        }
+    // Only return Some(cost) when at least one round had computable cost.
+    // When pricing is configured but no rounds have token data yet, return None
+    // so the UI shows "—" instead of "$0.00".
+    let cost = if has_pricing {
+        Some(total_cost)
     } else {
         None
     };
@@ -657,8 +656,11 @@ pub async fn build_feed_response(
             if !l.state.is_terminal() {
                 return false;
             }
+            // Cursor-based pagination: exclude loops strictly after the cursor.
+            // Use `>` so that items sharing the cursor timestamp are included
+            // (potential minor duplication is preferable to losing events).
             if let Some(c) = cursor
-                && l.updated_at >= c {
+                && l.updated_at > c {
                     return false;
                 }
             match filter {
@@ -731,22 +733,26 @@ pub async fn build_specs_response(
     let mut total_cost_sum = 0.0f64;
     let mut has_cost = false;
 
+    // Single pass: compute rounds/cost once per loop, build both runs slice and aggregates
     let mut runs = Vec::with_capacity(matching.len().min(limit));
-    for record in &matching[..matching.len().min(limit)] {
+    for (i, record) in matching.iter().enumerate() {
         let rounds = store.get_rounds(record.id).await?;
         let (_, cost) = compute_loop_totals(&rounds, record, config);
-        runs.push(SpecRun {
-            id: record.id.to_string(),
-            engineer: record.engineer.clone(),
-            state: record.state.to_string(),
-            rounds: record.round,
-            total_cost: cost,
-            branch: record.branch.clone(),
-            created_at: record.created_at,
-        });
-    }
 
-    for record in &matching {
+        // Build the runs response slice for the first `limit` items
+        if i < limit {
+            runs.push(SpecRun {
+                id: record.id.to_string(),
+                engineer: record.engineer.clone(),
+                state: record.state.to_string(),
+                rounds: record.round,
+                total_cost: cost,
+                branch: record.branch.clone(),
+                created_at: record.created_at,
+            });
+        }
+
+        // Aggregate across all matching loops
         if record.state.is_terminal() {
             terminal += 1;
             rounds_sum += record.round as i64;
@@ -757,8 +763,6 @@ pub async fn build_specs_response(
                 converged += 1;
             }
         }
-        let rounds = store.get_rounds(record.id).await?;
-        let (_, cost) = compute_loop_totals(&rounds, record, config);
         if let Some(c) = cost {
             total_cost_sum += c;
             has_cost = true;

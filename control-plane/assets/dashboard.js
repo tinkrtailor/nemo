@@ -85,11 +85,12 @@
     return !isTerminal(state);
   }
 
-  // Stable per-engineer color from name hash
+  // Stable per-engineer color from name hash (uses UTF-8 bytes to match Rust)
   function engineerColor(name) {
     let h = 0;
-    for (let i = 0; i < name.length; i++) {
-      h = ((h << 5) - h + name.charCodeAt(i)) | 0;
+    const bytes = new TextEncoder().encode(name);
+    for (let i = 0; i < bytes.length; i++) {
+      h = ((h << 5) - h + bytes[i]) | 0;
     }
     const hue = ((h % 360) + 360) % 360;
     return "hsl(" + hue + ",55%,45%)";
@@ -123,7 +124,7 @@
       + '<div class="card-subtitle">' + esc(loop.branch) + '</div>'
       + '<div class="card-progress">' + progress + '</div>'
       + '<div class="card-metrics">'
-      + '<span>' + fmtTokens((loop.total_tokens||{}).input + (loop.total_tokens||{}).output) + ' tok</span>'
+      + '<span>' + fmtTokens(((loop.total_tokens||{}).input || 0) + ((loop.total_tokens||{}).output || 0)) + ' tok</span>'
       + '<span>' + fmtCost(loop.total_cost) + '</span>'
       + '<span>' + esc(verdict) + '</span>'
       + '</div>'
@@ -352,25 +353,37 @@
           .then(() => { showToast("Extended +10 rounds"); location.reload(); })
           .catch(err => showToast("Error: " + err.message));
       } else if (action === "cancel-all") {
-        const activeLoops = btn.dataset.activeIds ? btn.dataset.activeIds.split(",") : [];
-        showConfirmModal(
-          "Cancel " + activeLoops.length + " active loops?",
-          "This cannot be undone.",
-          function() {
-            let ok = 0, fail = 0;
-            const promises = activeLoops.map(id =>
-              actionFetch("/cancel/" + id, "DELETE")
-                .then(() => ok++)
-                .catch(() => fail++)
+        // Fetch current active loop IDs from /dashboard/state before cancelling
+        fetch("/dashboard/state?team=true", { credentials: "same-origin" })
+          .then(r => r.ok ? r.json() : Promise.reject(r.status))
+          .then(data => {
+            const activeLoops = (data.loops || [])
+              .filter(l => isActive(l.state))
+              .map(l => l.id);
+            if (activeLoops.length === 0) {
+              showToast("No active loops to cancel.");
+              return;
+            }
+            showConfirmModal(
+              "Cancel " + activeLoops.length + " active loops?",
+              "This cannot be undone.",
+              function() {
+                let ok = 0, fail = 0;
+                const promises = activeLoops.map(id =>
+                  actionFetch("/cancel/" + id, "DELETE")
+                    .then(() => ok++)
+                    .catch(() => fail++)
+                );
+                Promise.all(promises).then(() => {
+                  let msg = "Cancelled " + ok + "/" + activeLoops.length + " loops";
+                  if (fail > 0) msg += " (" + fail + " failed)";
+                  showToast(msg);
+                  poll();
+                });
+              }
             );
-            Promise.all(promises).then(() => {
-              let msg = "Cancelled " + ok + "/" + activeLoops.length + " loops";
-              if (fail > 0) msg += " (" + fail + " failed)";
-              showToast(msg);
-              poll();
-            });
-          }
-        );
+          })
+          .catch(e => showToast("Error fetching active loops: " + e));
       }
     });
   }

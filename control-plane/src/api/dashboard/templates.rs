@@ -59,7 +59,7 @@ fn nav_bar(active: &str, viewer: &str) -> Markup {
             div class="header-menu" {
                 button #header-menu-toggle class="header-menu-btn" { "\u{22EF}" }
                 div #header-menu-dropdown class="header-menu-dropdown" {
-                    button #kill-switch-btn data-action="cancel-all" data-active-ids="" style="display:none" {
+                    button #kill-switch-btn data-action="cancel-all" style="display:none" {
                         "Cancel all active loops"
                     }
                     form action="/dashboard/logout" method="post" style="margin:0" {
@@ -523,12 +523,14 @@ fn render_round_detail(r: &RoundRecord) -> Markup {
     };
 
     match r.stage.as_str() {
-        "implement" | "revise" => {
+        "implement" => {
             if let Ok(d) = serde_json::from_value::<ImplResultData>(output.clone()) {
                 return html! {
                     "SHA: " (d.new_sha) " | exit: " (d.exit_code)
                 };
             }
+        }
+        "revise" => {
             if let Ok(d) = serde_json::from_value::<ReviseResultData>(output.clone()) {
                 return html! {
                     "SHA: " (d.new_sha) " | spec: " (d.revised_spec_path) " | exit: " (d.exit_code)
@@ -643,14 +645,17 @@ fn render_token_breakdown(
 
 // ── Feed Page ──
 
-pub fn render_feed(data: &FeedResponse, viewer: &str) -> String {
+pub fn render_feed(data: &FeedResponse, viewer: &str, current_filter: Option<&str>) -> String {
     let body = html! {
         (nav_bar("feed", viewer))
 
         div class="filter-bar" {
-            button class="chip active" onclick="location.href='/dashboard/feed'" { "All events" }
-            button class="chip" onclick="location.href='/dashboard/feed?filter=converged'" { "Converged" }
-            button class="chip" onclick="location.href='/dashboard/feed?filter=failed'" { "Failed" }
+            button class=(if current_filter.is_none() { "chip active" } else { "chip" })
+                onclick="location.href='/dashboard/feed'" { "All events" }
+            button class=(if current_filter == Some("converged") { "chip active" } else { "chip" })
+                onclick="location.href='/dashboard/feed?filter=converged'" { "Converged" }
+            button class=(if current_filter == Some("failed") { "chip active" } else { "chip" })
+                onclick="location.href='/dashboard/feed?filter=failed'" { "Failed" }
         }
 
         div #feed-list class="feed-list" {
