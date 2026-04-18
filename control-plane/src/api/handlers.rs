@@ -945,7 +945,8 @@ pub async fn diff(
         // Look up round records to find commit SHAs
         let rounds = state.store.get_rounds(id).await?;
 
-        // Find the latest SHA produced in the requested round (from implement or revise output)
+        // Find the latest SHA produced in the requested round (from implement or revise output).
+        // The `new_sha` field is set by ImplResultData and ReviseResultData in types/verdict.rs.
         let round_sha = rounds
             .iter()
             .filter(|r| r.round == round_num)

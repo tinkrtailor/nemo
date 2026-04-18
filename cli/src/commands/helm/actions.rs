@@ -1,4 +1,5 @@
 use crate::api_types::LoopSummary;
+use super::is_terminal_state;
 
 /// Loop command types (FR-3a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,10 +66,6 @@ pub fn validate_action(command: LoopCommand, loop_item: &LoopSummary) -> Result<
             }
         }
     }
-}
-
-fn is_terminal_state(state: &str) -> bool {
-    matches!(state, "CONVERGED" | "FAILED" | "CANCELLED" | "HARDENED" | "SHIPPED")
 }
 
 #[cfg(test)]

@@ -57,6 +57,11 @@ enum AppEvent {
     BatchInspectLoaded(uuid::Uuid, InspectResponse),
 }
 
+/// Check if a loop state is terminal (shared across submodules).
+pub(crate) fn is_terminal_state(state: &str) -> bool {
+    matches!(state, "CONVERGED" | "FAILED" | "CANCELLED" | "HARDENED" | "SHIPPED")
+}
+
 /// Active main view (FR-5/FR-6/FR-9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainView {
@@ -129,7 +134,9 @@ struct CancelActionResponse {
 #[derive(serde::Deserialize)]
 struct ExtendActionResponse {
     loop_id: uuid::Uuid,
-    state: String,
+    prior_max_rounds: u32,
+    new_max_rounds: u32,
+    resumed_to_state: String,
 }
 
 #[derive(Debug)]
@@ -182,7 +189,7 @@ impl App {
     fn new(team_view: bool, helm_config: &HelmConfig) -> Self {
         // Load theme from config (FR-8a)
         let theme_name = helm_config.theme.as_deref()
-            .and_then(ThemeName::from_str_opt)
+            .and_then(|s| s.parse::<ThemeName>().ok())
             .unwrap_or(ThemeName::Dark);
 
         // Load pricing from nemo.toml if available (FR-7a)
@@ -670,6 +677,7 @@ async fn run_app(
     spawn_introspect_task(client.clone(), introspect_rx, event_tx.clone());
     spawn_diff_task(client.clone(), diff_rx, event_tx.clone());
     spawn_batch_inspect_task(client.clone(), loops_rx, event_tx.clone());
+    spawn_background_log_task(client.clone(), loops_tx.subscribe(), selection_tx.subscribe(), event_tx.clone());
 
     let mut app = App::new(team, helm_config);
 
@@ -993,11 +1001,14 @@ async fn perform_loop_action(
         }
         LoopCommand::Extend => {
             let response: ExtendActionResponse = client
-                .post(&format!("/extend/{loop_id}"), &serde_json::json!({}))
+                .post(&format!("/extend/{loop_id}"), &serde_json::json!({"add_rounds": 10}))
                 .await?;
             Ok(format!(
-                "extend requested for {} ({})",
-                response.loop_id, response.state
+                "extended {} by {} rounds (now {} max, {})",
+                response.loop_id,
+                response.new_max_rounds - response.prior_max_rounds,
+                response.new_max_rounds,
+                response.resumed_to_state,
             ))
         }
         LoopCommand::OpenPr => {
@@ -1354,11 +1365,73 @@ fn spawn_batch_inspect_task(
                 }
             }
 
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
 
             // Wait for a change in the loop list or just proceed after sleep
             // This ensures we pick up new loops when the status poller updates
-            let _ = tokio::time::timeout(Duration::from_secs(5), loops_rx.changed()).await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), loops_rx.changed()).await;
+        }
+    });
+}
+
+/// Spawn background log streams for non-selected active loops (FR-6 multi-loop view).
+///
+/// Watches the loop list and maintains persisted-log SSE connections for all
+/// active loops that aren't the currently-selected one (which is handled by the
+/// primary log task). This ensures multi-loop view has log data for all loops.
+fn spawn_background_log_task(
+    client: NemoClient,
+    mut loops_rx: watch::Receiver<Vec<LoopSummary>>,
+    selection_rx: watch::Receiver<Option<LogSelection>>,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+) {
+    tokio::spawn(async move {
+        let mut active_tasks: HashMap<uuid::Uuid, tokio::task::JoinHandle<()>> = HashMap::new();
+
+        loop {
+            // Determine which loop is currently selected (handled by primary log task)
+            let selected_id = selection_rx.borrow().as_ref().map(|s| s.loop_id);
+
+            let current_loops: Vec<uuid::Uuid> = loops_rx
+                .borrow()
+                .iter()
+                .filter(|l| !is_terminal_state(&l.state))
+                .filter(|l| Some(l.loop_id) != selected_id)
+                .map(|l| l.loop_id)
+                .collect();
+
+            // Remove tasks for loops that are no longer active or became selected
+            active_tasks.retain(|id, task| {
+                if current_loops.contains(id) {
+                    true
+                } else {
+                    task.abort();
+                    false
+                }
+            });
+
+            // Start tasks for new active loops
+            for loop_id in &current_loops {
+                if active_tasks.contains_key(loop_id) {
+                    continue;
+                }
+                let client = client.clone();
+                let event_tx = event_tx.clone();
+                let lid = *loop_id;
+                let task = tokio::spawn(async move {
+                    stream_persisted_logs(client, lid, event_tx).await;
+                });
+                active_tasks.insert(*loop_id, task);
+            }
+
+            // Wait for loop list to change
+            if loops_rx.changed().await.is_err() {
+                // Channel closed, clean up
+                for (_, task) in active_tasks.drain() {
+                    task.abort();
+                }
+                break;
+            }
         }
     });
 }
@@ -1957,20 +2030,23 @@ fn render_details(app: &App, theme: &Theme) -> Paragraph<'static> {
 }
 
 fn render_logs(app: &App, area: Rect, theme: &Theme) -> Paragraph<'static> {
+    let inner_height = area.height.saturating_sub(2) as usize;
+
     let lines: Vec<Line<'static>> = if app.logs.is_empty() {
         vec![Line::from(Span::styled(
             app.log_status.clone(),
             Style::default().fg(theme.muted),
         ))]
     } else {
+        // Only convert the visible tail of logs to avoid per-frame cloning of all Arc<String>s
+        let total = app.logs.len();
+        let skip = total.saturating_sub(inner_height);
         app.logs
             .iter()
+            .skip(skip)
             .map(|line| Line::from(Span::styled(line.as_str().to_owned(), Style::default().fg(theme.text))))
             .collect()
     };
-
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let scroll = lines.len().saturating_sub(inner_height) as u16;
 
     Paragraph::new(Text::from(lines))
         .block(
@@ -1985,7 +2061,6 @@ fn render_logs(app: &App, area: Rect, theme: &Theme) -> Paragraph<'static> {
         )
         .style(Style::default().fg(theme.text).bg(theme.bg))
         .wrap(Wrap { trim: false })
-        .scroll((scroll, 0))
 }
 
 fn render_inspect_pane(app: &App, theme: &Theme) -> Paragraph<'static> {

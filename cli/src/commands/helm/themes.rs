@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use ratatui::style::Color;
 
 /// Built-in color theme (FR-8).
@@ -50,14 +52,15 @@ impl ThemeName {
     }
 }
 
-/// Parse a theme name from config string.
-impl ThemeName {
-    pub fn from_str_opt(s: &str) -> Option<Self> {
+impl FromStr for ThemeName {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "dark" => Some(Self::Dark),
-            "light" => Some(Self::Light),
-            "high-contrast" | "high_contrast" => Some(Self::HighContrast),
-            _ => None,
+            "dark" => Ok(Self::Dark),
+            "light" => Ok(Self::Light),
+            "high-contrast" | "high_contrast" => Ok(Self::HighContrast),
+            _ => Err(format!("unknown theme: {s}")),
         }
     }
 }

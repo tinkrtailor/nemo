@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::api_types::{InspectResponse, RoundSummary};
 use super::cost::{self, PricingConfig, calculate_loop_round_cost, format_cost, format_tokens, round_total_tokens, round_duration_secs};
+use super::is_terminal_state;
 use super::themes::Theme;
 
 /// Configuration for the rounds table renderer.
@@ -34,8 +35,8 @@ pub fn render_table(cfg: &RoundsTableConfig<'_>) -> Paragraph<'static> {
         current_round,
         current_stage,
         pricing,
-        model_implementor: _,
-        model_reviewer: _,
+        model_implementor,
+        model_reviewer,
         area,
         theme,
     } = cfg;
@@ -90,7 +91,7 @@ pub fn render_table(cfg: &RoundsTableConfig<'_>) -> Paragraph<'static> {
         let tokens_text = format_tokens(total_tokens);
 
         // Cost column (split by stage: implementor vs reviewer pricing)
-        let cost = calculate_loop_round_cost(pricing, cfg.model_implementor, cfg.model_reviewer, round);
+        let cost = calculate_loop_round_cost(pricing, *model_implementor, *model_reviewer, round);
         let cost_text = format_cost(cost);
 
         // Duration column
@@ -392,10 +393,6 @@ fn extract_confidence(round: &RoundSummary, is_harden: bool) -> String {
         Some(c) => format!("{:.2}", c),
         None => String::new(),
     }
-}
-
-fn is_terminal_state(state: &str) -> bool {
-    matches!(state, "CONVERGED" | "FAILED" | "CANCELLED" | "HARDENED" | "SHIPPED")
 }
 
 fn placeholder(msg: &str, theme: &Theme, _area: Rect) -> Paragraph<'static> {

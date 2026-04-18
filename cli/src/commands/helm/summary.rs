@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::api_types::{InspectResponse, LoopSummary};
 use super::cost::{self, PricingConfig, format_cost, format_tokens, round_total_tokens, round_duration_secs, calculate_loop_round_cost};
+use super::is_terminal_state;
 
 /// Build the compact one-line header summary (FR-1a).
 ///
@@ -82,13 +83,16 @@ pub fn build_header(
     };
     let duration_str = cost::format_duration_secs(total_duration);
 
-    // Build stage parts
+    // Build stage parts (always include at least impl count when stages are all zero)
     let mut stage_parts = Vec::new();
     if impl_count > 0 { stage_parts.push(format!("{impl_count} impl")); }
     if test_count > 0 { stage_parts.push(format!("{test_count} test")); }
     if review_count > 0 { stage_parts.push(format!("{review_count} review")); }
     if harden_count > 0 { stage_parts.push(format!("{harden_count} harden")); }
     if awaiting_count > 0 { stage_parts.push(format!("{awaiting_count} awaiting")); }
+    if stage_parts.is_empty() {
+        stage_parts.push("0 active stages".to_string());
+    }
 
     let prefix = if team {
         // FR-1c: label by engineer in team view
@@ -108,10 +112,6 @@ pub fn build_header(
     format!(
         "{prefix} · {active_count} active · {stages} · {tokens_str} tokens · {cost_str} · {duration_str}"
     )
-}
-
-fn is_terminal_state(state: &str) -> bool {
-    matches!(state, "CONVERGED" | "FAILED" | "CANCELLED" | "HARDENED" | "SHIPPED")
 }
 
 /// Build approval context hints for the footer (FR-10a).

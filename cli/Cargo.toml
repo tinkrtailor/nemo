@@ -29,6 +29,7 @@ open = "5"
 notify-rust = { version = "4", optional = true }
 
 [features]
+default = ["desktop-notifications"]
 desktop-notifications = ["notify-rust"]
 
 [dev-dependencies]

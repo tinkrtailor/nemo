@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::api_types::LoopSummary;
+use super::is_terminal_state;
 use super::themes::Theme;
 
 /// Render the multi-loop split view (FR-6).
@@ -22,7 +23,7 @@ pub fn render(
     // Sort by updated_at descending to show most recently active first (FR-6a)
     let mut active_loops: Vec<&LoopSummary> = loops
         .iter()
-        .filter(|l| !is_terminal(&l.state))
+        .filter(|l| !is_terminal_state(&l.state))
         .collect();
     active_loops.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     active_loops.truncate(4);
@@ -106,6 +107,3 @@ pub fn render(
     }
 }
 
-fn is_terminal(state: &str) -> bool {
-    matches!(state, "CONVERGED" | "FAILED" | "CANCELLED" | "HARDENED" | "SHIPPED")
-}
