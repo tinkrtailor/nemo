@@ -50,6 +50,7 @@ impl ConvergentLoopDriver {
             git_repo_url: self.config.cluster.git_repo_url.clone(),
             ssh_known_hosts_configmap: self.config.cluster.ssh_known_hosts_configmap.clone(),
             skip_iptables: self.config.cluster.skip_iptables,
+            cache: self.config.resolved_cache_config(),
         }
     }
 

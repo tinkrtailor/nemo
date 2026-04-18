@@ -195,6 +195,12 @@ enum Commands {
     /// Show authenticated providers and available models
     Models,
 
+    /// Show cache configuration and disk usage
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+
     /// Edit ~/.nemo/config.toml
     Config {
         /// Set a config value
@@ -204,6 +210,16 @@ enum Commands {
         /// Get a config value
         #[arg(long)]
         get: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheAction {
+    /// Show active cache configuration and disk usage
+    Show {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -451,6 +467,11 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
+        Commands::Cache { action } => match action {
+            CacheAction::Show { json } => {
+                commands::cache::run(&http_client, json).await?;
+            }
+        },
         Commands::Models => {
             commands::models::run(&http_client, &eng_config).await?;
         }

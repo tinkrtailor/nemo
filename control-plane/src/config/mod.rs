@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
+pub use repo::CacheConfig;
+
 /// Repo-level configuration loaded from `nemo.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NautiloopConfig {
@@ -34,6 +36,12 @@ pub struct NautiloopConfig {
     /// Observability configuration from `[observability]` in nemo.toml.
     #[serde(default)]
     pub observability: ObservabilityConfig,
+    /// Cache configuration from `[cache]` section in nemo.toml (repo-level only).
+    /// `None` = absent from nemo.toml → sccache defaults injected at resolution time.
+    /// `Some` with empty env → no cache env vars. Uses `Option` (not `#[serde(default)]`)
+    /// so absent vs present-but-empty are distinguishable (FR-3b).
+    #[serde(default)]
+    pub cache: Option<CacheConfig>,
 }
 
 /// Configuration for a single service in the monorepo.
@@ -108,6 +116,19 @@ impl NautiloopConfig {
     /// Returns the remote ref for the default branch (e.g., "origin/main").
     pub fn default_remote_ref(&self) -> String {
         format!("origin/{}", self.cluster.default_branch)
+    }
+
+    /// Resolve the cache configuration for the job builder.
+    ///
+    /// Three cases (FR-3b):
+    /// - `None` (absent `[cache]` section) → inject sccache defaults
+    /// - `Some(CacheConfig { disabled: true, .. })` → no mount, no env vars
+    /// - `Some(CacheConfig { disabled: false, env })` → use env as-is (may be empty)
+    pub fn resolved_cache_config(&self) -> CacheConfig {
+        match &self.cache {
+            None => CacheConfig::sccache_defaults(),
+            Some(c) => c.clone(),
+        }
     }
 }
 
@@ -527,5 +548,82 @@ mod tests {
         assert_eq!(config.sidecar_image, "nautiloop-sidecar:latest");
         assert_eq!(config.sessions_pvc, "nautiloop-sessions");
         assert!(config.image_pull_secret.is_none());
+    }
+
+    // =========================================================================
+    // Cache config resolution tests (NFR-3)
+    // =========================================================================
+
+    #[test]
+    fn test_resolved_cache_absent_injects_sccache_defaults() {
+        // NFR-3: absent [cache] section (None) → sccache defaults injected.
+        let config = NautiloopConfig {
+            cache: None,
+            ..Default::default()
+        };
+        let resolved = config.resolved_cache_config();
+        assert!(!resolved.disabled);
+        assert_eq!(resolved.env.len(), 4);
+        assert_eq!(resolved.env["RUSTC_WRAPPER"], "sccache");
+        assert_eq!(resolved.env["SCCACHE_DIR"], "/cache/sccache");
+        assert_eq!(resolved.env["SCCACHE_CACHE_SIZE"], "15G");
+        assert_eq!(resolved.env["SCCACHE_IDLE_TIMEOUT"], "0");
+    }
+
+    #[test]
+    fn test_resolved_cache_present_empty_no_defaults() {
+        // NFR-3: [cache] present with empty env → zero cache env vars.
+        // Sccache defaults do NOT apply.
+        let config = NautiloopConfig {
+            cache: Some(CacheConfig {
+                disabled: false,
+                env: HashMap::new(),
+            }),
+            ..Default::default()
+        };
+        let resolved = config.resolved_cache_config();
+        assert!(!resolved.disabled);
+        assert!(
+            resolved.env.is_empty(),
+            "explicit [cache] with empty env must not inject sccache defaults"
+        );
+    }
+
+    #[test]
+    fn test_resolved_cache_disabled() {
+        // NFR-3: [cache] disabled = true → disabled flag set.
+        let config = NautiloopConfig {
+            cache: Some(CacheConfig {
+                disabled: true,
+                env: HashMap::new(),
+            }),
+            ..Default::default()
+        };
+        let resolved = config.resolved_cache_config();
+        assert!(resolved.disabled);
+    }
+
+    #[test]
+    fn test_resolved_cache_custom_env() {
+        // NFR-3: [cache.env] with custom entries passes them through.
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "/cache/foo".to_string());
+        let config = NautiloopConfig {
+            cache: Some(CacheConfig {
+                disabled: false,
+                env,
+            }),
+            ..Default::default()
+        };
+        let resolved = config.resolved_cache_config();
+        assert_eq!(resolved.env.len(), 1);
+        assert_eq!(resolved.env["FOO"], "/cache/foo");
+    }
+
+    #[test]
+    fn test_default_nautiloop_config_cache_is_none() {
+        // Default NautiloopConfig has cache = None (triggers sccache defaults).
+        let config = NautiloopConfig::default();
+        assert!(config.cache.is_none());
     }
 }
