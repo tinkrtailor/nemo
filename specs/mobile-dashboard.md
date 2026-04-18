@@ -45,7 +45,7 @@ Today's approve / cancel / extend require the CLI. If the operator is AFK and a 
 | `/dashboard/login` | GET/POST | Login form (API key) + set cookie, then redirect |
 | `/dashboard/logout` | POST | Clear auth cookie |
 | `/dashboard/loops/:id` | GET | Loop detail HTML (drawer or full page) |
-| `/dashboard/stream/:id` | GET (SSE) | Existing `/logs/:id` SSE, re-exposed under dashboard namespace |
+| `/dashboard/stream/:id` | GET (SSE or JSON) | Mirrors existing `/logs/:id` behavior: SSE stream for active loops, JSON array (full log dump) for terminal loops |
 | `/dashboard/static/*` | GET | Embedded CSS + JS assets |
 
 **FR-1b.** Static assets (CSS, single JS file, optional icon/font) are **embedded in the binary** via `include_str!`/`include_bytes!`. No filesystem dependencies at runtime. Total asset budget: <50 KB gzipped.
@@ -56,9 +56,11 @@ Today's approve / cancel / extend require the CLI. If the operator is AFK and a 
 
 **FR-2a.** The dashboard requires the same API key used by `nemo` CLI. Two acceptance paths:
 - **Cookie** `nautiloop_api_key=<key>` (HttpOnly, Secure, SameSite=Strict). Set by `/dashboard/login` form POST. Expires in 7 days.
-- **Bearer header** for API endpoints called from the dashboard JS (same as current CLI → API auth).
+- **Bearer header** (`Authorization: Bearer <key>`) for programmatic access (e.g., curl, external scripts) — same as current CLI → API auth.
 
-**FR-2b.** `/dashboard/login` renders a trivial form: one input (`api_key`), one submit. On POST, validates the key by making an internal `/status` call; if 200, sets the cookie and redirects to `/dashboard`. If invalid, re-renders with an error.
+The dashboard auth middleware accepts **either** a valid cookie **or** a valid Bearer header on any `/dashboard/*` route (except `/login` and `/static/*`). Dashboard JS does **not** read the cookie value; instead, same-origin `fetch()` calls automatically include the HttpOnly cookie. The middleware checks the cookie first, falls back to Bearer. This preserves XSS protection (JS never touches the key) while keeping programmatic access viable.
+
+**FR-2b.** `/dashboard/login` renders a form with two inputs: `api_key` (password field) and `engineer_name` (text field, used for the `Mine` filter — see FR-3e). On POST, validates the API key via constant-time comparison against the `NAUTILOOP_API_KEY` environment variable (same logic as the existing auth middleware — no internal HTTP call). If valid, sets two cookies: `nautiloop_api_key=<key>` (HttpOnly, Secure, SameSite=Strict, 7-day expiry) and `nautiloop_engineer=<name>` (HttpOnly, Secure, SameSite=Strict, 7-day expiry), then redirects to `/dashboard`. If invalid, re-renders the form with an error message. The `engineer_name` field is required; it must match one of the engineer names present in loop data (or be accepted as free-text if no loops exist yet).
 
 **FR-2c.** Unauthenticated requests to any `/dashboard/*` route (other than `/login` and `/static/*`) redirect to `/dashboard/login`.
 
@@ -76,7 +78,7 @@ Today's approve / cancel / extend require the CLI. If the operator is AFK and a 
 - **Title**: spec filename (`health-json-body.md`).
 - **Sub-title**: branch name (muted).
 - **Progress line**: `round N/M · stage: <current_stage>` for active loops; `round N` for terminal.
-- **Metrics row**: tokens (`52K`), cost (`$0.18`), last-round verdict (one of `clean`/`not clean`/`—`).
+- **Metrics row**: tokens (`52K`), cost (`$0.18` — requires `[pricing]` config, see FR-15; displays `—` if pricing is not configured), last-round verdict (one of `clean`/`not clean`/`—`).
 - **Pulse indicator**: small animated dot if state is RUNNING, solid otherwise.
 
 **FR-3c.** Clicking/tapping a card navigates (not modal — actual route change) to `/dashboard/loops/:id`.
@@ -85,7 +87,7 @@ Today's approve / cancel / extend require the CLI. If the operator is AFK and a 
 
 **FR-3e.** Two rows of filter/segment chips at the top of the grid:
 - **State row**: `Active (N)`, `Converged (N)`, `Failed (N)`, `All`. Tapping filters by state.
-- **Engineer row**: one chip per engineer with at least one loop in the current view, plus `Mine` (default) and `Team`. `Mine` scopes to the viewer's own loops (derived from API-key → engineer mapping). `Team` flips the `/dashboard/state?team=true` query and shows all engineers. Individual-engineer chips scope to one engineer.
+- **Engineer row**: one chip per engineer with at least one loop in the current view, plus `Mine` (default) and `Team`. `Mine` scopes to the viewer's own loops, matched by the `nautiloop_engineer` cookie value set at login (see FR-2b) against the loop's `engineer` field. `Team` flips the `/dashboard/state?team=true` query and shows all engineers. Individual-engineer chips scope to one engineer.
 
 Chips are independent: selecting `Active` + `alice` shows Alice's active loops. Default landing state is `Active` + `Mine` — engineers see their own work first.
 
@@ -106,9 +108,9 @@ Chips are independent: selecting `Active` + `alice` shows Alice's active loops. 
   - `Open PR` if spec_pr_url is set (opens in new tab)
 - **Rounds table** (mirrors FR-9 of the helm TUI phase 2 spec): one row per round, columns for stages/verdict/issues/confidence/tokens/cost/duration. Tapping a row expands full verdict details inline.
 - **Live log pane**: last 200 lines, auto-scrolls. SSE stream via `/dashboard/stream/:id` for active loops; static dump for terminal loops.
-- **Token/cost breakdown**: per-stage, per-round (bar chart optional; data table mandatory).
+- **Token/cost breakdown**: per-stage, per-round (bar chart optional; data table mandatory). Token data is extracted from the JSONB `output` column of each round's row: each stage type (`ReviewResultData`, `ImplResultData`, `HardenResultData`) embeds a `token_usage` struct with `input_tokens` and `output_tokens`. The aggregation logic must handle each stage type's struct shape and gracefully display `—` when a stage's output lacks `token_usage`. Cost is computed from token counts using the `[pricing]` config (see FR-15); if pricing is not configured, only raw token counts are shown.
 
-**FR-4b.** The action buttons call the existing API endpoints (`POST /approve/:id`, `DELETE /cancel/:id`, etc.) via fetch with the bearer header derived from the auth cookie. Responses update the card in-place.
+**FR-4b.** The action buttons call the existing API endpoints (`POST /approve/:id`, `DELETE /cancel/:id`, etc.) via same-origin `fetch()`. The HttpOnly auth cookie is sent automatically by the browser; no Bearer header construction is needed (see FR-2a). The existing API auth middleware is extended to accept the cookie in addition to Bearer headers, so these requests authenticate transparently. Responses update the card in-place.
 
 **FR-4c.** Layout on mobile: hero → actions (horizontal scroll if >3 buttons) → rounds table (scrollable) → log tail. On desktop: two-column layout (rounds table left, log tail right).
 
@@ -122,7 +124,7 @@ Chips are independent: selecting `Active` + `alice` shows Alice's active loops. 
 
 **FR-6a.** Dashboard defaults to **system color scheme** (`prefers-color-scheme` media query). Dark by default on mobile operating systems that default dark at night.
 
-**FR-6b.** CSS uses custom properties for all colors, same palette as helm themes (dark/light/high-contrast). Inherits from `[helm] theme` in nemo.toml if set.
+**FR-6b.** CSS uses custom properties for all colors, same palette as helm themes (dark/light/high-contrast). In v1, system `prefers-color-scheme` is the sole source of truth for theme selection — no inheritance from `[helm] theme` in nemo.toml. (The helm TUI theme is a terminal concept with no direct mapping to web CSS custom properties; bridging this is a follow-up if operators request it.)
 
 **FR-6c.** No theme-switcher UI in v1. System-level preference is the source of truth.
 
@@ -143,7 +145,7 @@ Chips are independent: selecting `Active` + `alice` shows Alice's active loops. 
 
 **FR-8a.** Reuses existing endpoints: `/status`, `/inspect?branch=<>`, `/logs/:id`, `/pod-introspect/:id`, `/approve/:id`, `/cancel/:id`, `/resume/:id`, `/extend/:id`.
 
-**FR-8b.** One new JSON endpoint: `GET /dashboard/state` returns a single roll-up object combining all active loops plus aggregates (total tokens, total cost, counts per state). Lets the card grid refresh in one request instead of N+1 (one `/status` + N `/inspect`). Polled every 5s.
+**FR-8b.** One new JSON endpoint: `GET /dashboard/state` returns a single roll-up object combining **all active loops and recently-terminal loops** (terminal within the last 24 hours), plus aggregates (total tokens, total cost, counts per state). Accepts an optional `?include_terminal=all` query parameter to include all terminal loops regardless of age. This ensures that the card grid's filter chips (FR-3e: `Converged`, `Failed`) have data to display after a poll refresh. Lets the card grid refresh in one request instead of N+1 (one `/status` + N `/inspect`). Polled every 5s.
 
 **FR-8c.** `/dashboard/state` is auth-protected same as other `/dashboard/*` routes.
 
@@ -164,13 +166,13 @@ Aggregates all non-terminal + terminal loops in the rolling 7-day window. Fields
 
 **FR-9b.** A subtle trend indicator after each numeric field when a prior-period comparison is available: `82% ↑8% converged` means 8 percentage points higher than the prior 7-day window. First week of data has no trend; don't render the arrow.
 
-**FR-9c.** Tapping any field of the summary navigates to `/dashboard/stats` (FR-12) with that field pre-focused.
+**FR-9c.** Tapping any field of the summary navigates to `/dashboard/stats` (FR-14) with that field pre-focused. Pre-focused means: the URL includes an anchor fragment (e.g., `/dashboard/stats#converge-rate`), the page scrolls to the corresponding section, and a brief highlight animation (CSS `outline` pulse, 2s) draws attention to the relevant headline card or table.
 
 ### FR-10: Kill switch
 
 **FR-10a.** A hidden-by-default `⋯` menu in the header has a destructive `Cancel all active loops` item. Tapping opens a modal: `Cancel N active loops? This cannot be undone.` Two buttons: `Cancel` (aborts) / `Confirm cancel all` (proceeds).
 
-**FR-10b.** On confirm, the dashboard issues `DELETE /cancel/:id` for every active (non-terminal) loop in parallel. Reports `Cancelled N/M loops` in the status bar; failures (rare — usually a race with a loop terminating naturally) are listed with their reasons.
+**FR-10b.** On confirm, the dashboard issues `DELETE /cancel/:id` for every active (non-terminal) loop in parallel. Reports `Cancelled N/M loops` via a dismissible toast notification at the top of the page (auto-dismisses after 10s); failures (rare — usually a race with a loop terminating naturally) are listed inline within the toast with their reasons.
 
 **FR-10c.** Rationale: the dashboard exists precisely because the CTO is AFK. If cost is spiking, credentials are suspected compromised, or a bug is producing runaway loops, the kill switch needs to be one tap from the phone. No new server endpoint; the dashboard fans out to the existing per-loop cancel.
 
@@ -235,6 +237,36 @@ Plus aggregates at the top: `3 runs · 67% converge rate · avg 10.7 rounds · t
 
 **FR-14c.** Cache-friendly: the aggregation is expensive relative to the rest of the dashboard, so the endpoint caches results for 60s server-side (the time-window granularity makes this trivially safe).
 
+### FR-15: Pricing configuration
+
+**FR-15a.** Token-to-cost conversion requires a `[pricing]` section in `nemo.toml`:
+
+```toml
+[pricing]
+# Per-token costs in USD. Supports multiple models since model_implementor
+# and model_reviewer may differ.
+[pricing.models]
+"claude-sonnet-4-20250514" = { input_per_million = 3.00, output_per_million = 15.00 }
+"claude-opus-4-20250514"  = { input_per_million = 15.00, output_per_million = 75.00 }
+```
+
+**FR-15b.** A helper function `compute_cost(token_usage: &TokenUsage, model: &str, pricing: &PricingConfig) -> Option<f64>` lives in the dashboard aggregate module. Returns `None` if the model is not found in the pricing config (graceful degradation — no panic, no default guess).
+
+**FR-15c.** When `[pricing]` is absent from `nemo.toml`, **all cost fields across the dashboard display `—` instead of a dollar amount**. Token counts (raw numbers) are always shown regardless of pricing config. This applies to: FR-3b metrics row, FR-4a token/cost breakdown, FR-9a fleet summary (cost and top-spender fields omitted), FR-12a feed rows, FR-13a history table, FR-14a headline cards and per-engineer/per-spec tables.
+
+**FR-15d.** The pricing config is loaded once at startup and cached in the app state. No hot-reload required in v1; restart the control plane to pick up pricing changes.
+
+### FR-16: JS feature tiers
+
+**FR-16a.** Dashboard JS features are classified into two tiers to guide implementation priority:
+
+| Tier | Features | Required for v1 |
+|---|---|---|
+| **Mandatory** | Card grid polling + diff re-render, action button fetch wiring, SSE log stream subscription, filter chip state, confirm modals | Yes |
+| **Progressive enhancement** | Tab title badge (`(2) nautiloop`), web audio bell on convergence, 1s color fade animation on state transitions, localStorage persistence for feed filters | No — implement if budget allows, skip without blocking launch |
+
+**FR-16b.** All progressive-enhancement features degrade silently: if the JS for them fails or is stripped, the mandatory features continue working. No feature in the progressive tier may block a mandatory feature.
+
 ### NFR-1: Security inherits from deployment
 
 The dashboard is as private as the host. Documented as such. Tailscale-on-Hetzner deployments are private by default; other deployments can front with oauth2-proxy, Authelia, or similar. **Do NOT add sign-in-with-Google or a user database** — that's explicitly out of scope.
@@ -265,8 +297,8 @@ Dashboard routes live under `/dashboard/*`. All existing `/status`, `/inspect`, 
 
 A reviewer can verify by:
 
-1. On a deployed nautiloop, browse to `https://<ts-ipv4>/dashboard` from a phone on the same tailnet. Login form prompts for API key.
-2. Enter the API key. Land on the card grid. At least one loop card is visible with live state.
+1. On a deployed nautiloop, browse to `https://<ts-ipv4>/dashboard` from a phone on the same tailnet. Login form prompts for API key and engineer name.
+2. Enter the API key and engineer name. Land on the card grid. `Mine` filter is active, showing only the logged-in engineer's loops. At least one loop card is visible with live state.
 3. Tap a card. Detail page loads with hero / actions / rounds table / log tail.
 4. On an active loop: live log lines stream in. On a terminal loop: full log dump, no streaming.
 5. Tap Approve on an AWAITING_APPROVAL loop. Response flashes success; card state updates.
@@ -280,6 +312,7 @@ A reviewer can verify by:
 13. `/dashboard/feed` (FR-12) shows chronological terminal events with engineer + outcome + cost. Filter chips work. `Load more` paginates.
 14. Tap a spec filename on any loop detail page → `/dashboard/specs/<path>` (FR-13). Shows all past runs + aggregate metrics.
 15. `/dashboard/stats?window=30d` (FR-14) renders per-engineer + per-spec tables + daily time-series bars. Subsequent loads within 60s hit the cache (observe response time).
+16. With `[pricing]` configured in `nemo.toml`, cost figures appear as dollar amounts throughout the dashboard. Without `[pricing]`, all cost fields show `—` and token counts are still displayed (FR-15).
 
 ## Out of Scope
 
@@ -301,7 +334,7 @@ A reviewer can verify by:
 - `control-plane/src/api/dashboard/mod.rs` — new module.
 - `control-plane/src/api/dashboard/handlers.rs` — per-route handlers.
 - `control-plane/src/api/dashboard/auth.rs` — cookie middleware.
-- `control-plane/src/api/dashboard/aggregate.rs` — `/dashboard/state` roll-up + FR-9 fleet summary + FR-14 stats aggregator (with 60s cache).
+- `control-plane/src/api/dashboard/aggregate.rs` — `/dashboard/state` roll-up + FR-9 fleet summary + FR-14 stats aggregator (with 60s cache) + FR-15 pricing helper (`compute_cost`).
 - `control-plane/src/api/dashboard/feed.rs` — FR-12 notification feed endpoint.
 - `control-plane/src/api/dashboard/specs.rs` — FR-13 per-spec history endpoint.
 - `control-plane/src/api/dashboard/kill_switch.rs` — FR-10 fan-out cancel helper.
