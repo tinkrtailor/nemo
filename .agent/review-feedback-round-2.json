@@ -1,0 +1,54 @@
+{
+  "round": 2,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 697,
+      "description": "Harden phase has no max_rounds fallback after the judge match. In the review path (line 1018), if the judge returns `continue` or is unavailable at max_rounds, the code checks `record.round >= record.max_rounds` and transitions to Failed. The harden path has no equivalent check — after the judge match falls through (continue or None), it calls `dispatch_revise` unconditionally, allowing the loop to exceed max_rounds indefinitely when the judge is disabled, errors out, or returns `continue` at the boundary. The review path handles this correctly; harden does not.",
+      "suggestion": "Add a max_rounds check between the judge match block and the `dispatch_revise` call in the harden evaluation, mirroring the review path: `if record.round >= record.max_rounds { record.state = LoopState::Failed; ... return Ok(LoopState::Failed); }`"
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 642,
+      "description": "TOCTOU race on `exit_clean_used`: the check (`contains`) and the insert happen across two separate Mutex lock/unlock cycles (lines 642-646 and 671-674 in harden, 959-963 and 971-974 in review). If two concurrent ticks for the same loop_id execute between the two locks, both could pass the `contains` check and both would use exit_clean, violating the FR-7a one-shot guarantee. While the driver typically processes one tick per loop at a time, this is not guaranteed by the type system and the fix is trivial.",
+      "suggestion": "Acquire the lock once, check and insert atomically: `let mut guard = self.exit_clean_used.lock().unwrap_or_else(|e| e.into_inner()); if guard.contains(&record.id) { /* already used */ } else { guard.insert(record.id); /* proceed with exit_clean */ }`"
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 349,
+      "description": "The `input_json` stored in judge_decisions includes the full spec_content (potentially tens of KB) for every judge invocation. With up to 10 judge calls per loop, this means the judge_decisions table can grow rapidly. More critically, the `serde_json::to_value(context)` serialization includes the `rounds` array which contains full verdict JSON from every prior round — this means each successive judge decision row stores O(n²) cumulative data. For a 15-round loop hitting the judge 10 times, this is substantial.",
+      "suggestion": "Consider storing only a summary or hash of spec_content in input_json rather than the full text, or at minimum document this as a known growth concern. Alternatively, store spec_content and rounds separately or as references rather than inlining them in every row."
+    },
+    {
+      "severity": "low",
+      "category": "performance",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 828,
+      "description": "The `test_invoke_timeout_returns_none` test uses SlowJudgeClient (60s sleep) with a real 30s timeout. Without `tokio::time::pause()`, this test blocks for 30 real seconds. The dev-dependency already includes `tokio test-util` feature.",
+      "suggestion": "Add `tokio::time::pause()` at the start of the test to make `tokio::time::timeout` resolve instantly in virtual time."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 232,
+      "description": "The `should_invoke` trigger priority silently resolves ambiguity when multiple triggers apply simultaneously (e.g., `not_clean AND max_rounds AND recurring_findings` all true). RecurringFindings wins over MaxRounds, which wins over NotClean. This is fine functionally (the judge gets full context regardless), but the priority ordering is implicit and undocumented.",
+      "suggestion": "Add a brief comment explaining the priority order and why RecurringFindings takes precedence (it's the most specific signal)."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/inspect.rs",
+      "line": 23,
+      "description": "FR-6c envisions judge_decisions rendered inline with round summaries in `nemo inspect` output. The CLI just dumps the full InspectResponse as raw JSON. While the data is present, it's not formatted for human consumption. Acceptable for Stage 1 but worth noting.",
+      "suggestion": "Consider adding a formatted rendering of judge decisions alongside round summaries in a future pass, or at minimum add a comment that this is intentionally deferred."
+    }
+  ]
+}
