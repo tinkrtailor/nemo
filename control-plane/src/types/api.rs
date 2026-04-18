@@ -9,6 +9,10 @@ use super::{LoopState, SubState};
 pub struct StartRequest {
     pub spec_path: String,
     pub engineer: String,
+    /// Optional spec file content sent by the CLI (FR-1b).
+    /// When present, the server uses this instead of reading from the default branch.
+    #[serde(default)]
+    pub spec_content: Option<String>,
     #[serde(default)]
     pub harden: bool,
     #[serde(default)]
@@ -115,6 +119,22 @@ pub struct ResumeResponse {
     pub loop_id: Uuid,
     pub state: LoopState,
     pub resume_requested: bool,
+}
+
+/// POST /extend/:id request body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtendRequest {
+    /// Number of rounds to add to the loop's current max_rounds.
+    pub add_rounds: u32,
+}
+
+/// POST /extend/:id response body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtendResponse {
+    pub loop_id: Uuid,
+    pub prior_max_rounds: u32,
+    pub new_max_rounds: u32,
+    pub resumed_to_state: LoopState,
 }
 
 /// GET /inspect?branch=... response body.

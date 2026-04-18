@@ -114,6 +114,7 @@ check_sidecar() {
 run_and_emit_result() {
     local stage_name="$1"
     shift
+    local cli_cmd="$1"  # claude or opencode — used for extraction dispatch below
     local cli_stdout="/tmp/cli-stdout-$$"
     local cli_stderr="/tmp/cli-stderr-$$"
     local exit_code=0
@@ -213,6 +214,7 @@ run_and_emit_result() {
     # engine logs "No NAUTILOOP_RESULT line found in pod logs" and retries.
     local result
     if [ "$stage_name" = "implement" ] || [ "$stage_name" = "revise" ]; then
+        # Claude stream-json: keep the last assistant event object as data.
         result=$(jq -nc \
             --arg stage "$stage_name" \
             --slurpfile events "$cli_stdout" \
@@ -222,7 +224,78 @@ run_and_emit_result() {
             --arg stage "$stage_name" \
             --rawfile data "$cli_stdout" \
             '{stage: $stage, data: $data}')
+    elif [ "$cli_cmd" = "claude" ]; then
+        # Claude stream-json for review/audit with a claude-* model.
+        #
+        # Claude Code emits the model's final text response in the
+        # `result` event's `result` field (type=="result", subtype=="success"),
+        # not as a separate assistant text-content block. The prompt instructs
+        # the model to output only the verdict JSON, but in practice Claude
+        # often adds a preamble sentence and wraps the JSON in a markdown
+        # code fence (```json ... ```) even when told not to.
+        #
+        # Extraction strategy: find the first `{` and last `}` in the
+        # result string — this reliably isolates the JSON object regardless
+        # of surrounding text or fence wrapping.
+        result=$(jq -nc \
+            --arg stage "$stage_name" \
+            --argjson exit_code "$exit_code" \
+            --slurpfile events "$cli_stdout" \
+            '
+              def extract_json_from_result:
+                # The result field may contain preamble text + the JSON in a
+                # ```json...``` fence, or just the raw JSON object. Use split
+                # on the fence markers (not character-position arithmetic,
+                # which has jq-version-specific bugs with unicode strings).
+                if contains("```json\n") then
+                    split("```json\n")[1] |
+                    if contains("\n```") then split("\n```")[0] else . end
+                elif (contains("```\n") and contains("\n```")) then
+                    split("```\n")[1] | split("\n```")[0]
+                else
+                    ltrimstr("\n") | ltrimstr(" ")
+                end |
+                ltrimstr("\n") | rtrimstr("\n") |
+                fromjson;
+
+              ($events
+                | map(select(.type == "result" and .subtype == "success"))
+                | last
+                | .result
+                | extract_json_from_result
+              ) as $verdict
+              |
+              ($events
+                | map(select(.type == "result" and .subtype == "success"))
+                | last
+                | .usage // {}
+              ) as $usage
+              |
+              ($events
+                | map(select(.type == "result" and .subtype == "success"))
+                | last
+                | .session_id // ""
+              ) as $session_id
+              |
+              {
+                stage: $stage,
+                data: {
+                  verdict: $verdict,
+                  token_usage: {
+                    input:  ($usage.input_tokens  // 0),
+                    output: ($usage.output_tokens // 0)
+                  },
+                  exit_code: $exit_code,
+                  session_id: $session_id
+                }
+              }
+            ' 2>/dev/null) || \
+        result=$(jq -nc \
+            --arg stage "$stage_name" \
+            --rawfile data "$cli_stdout" \
+            '{stage: $stage, data: $data}')
     else
+        # OpenCode streaming JSON for review/audit with an OpenAI model.
         result=$(jq -nc \
             --arg stage "$stage_name" \
             --argjson exit_code "$exit_code" \
@@ -268,6 +341,15 @@ run_and_emit_result() {
     echo "NAUTILOOP_RESULT:$result"
 }
 
+# --- Copy Claude credentials to writable ~/.claude/ ---
+# Credentials are mounted read-only at /secrets/claude-creds/.credentials.json.
+# Claude Code (v2.x+) needs to write session-env/ and other runtime directories
+# under ~/.claude/, so we copy the credentials file into the writable home EmptyDir.
+if [ -f "/secrets/claude-creds/.credentials.json" ]; then
+    mkdir -p "${HOME}/.claude"
+    cp /secrets/claude-creds/.credentials.json "${HOME}/.claude/.credentials.json"
+fi
+
 # --- FR-4: Stage dispatch ---
 case "$STAGE" in
     implement|revise)
@@ -311,79 +393,63 @@ case "$STAGE" in
         if [ -n "${MODEL:-}" ]; then
             CLAUDE_ARGS+=(--model "$MODEL")
         fi
-        # Session IDs do not cross tool boundaries. opencode emits
-        # `ses_<20-char>` IDs; Claude Code v2.x requires UUIDs. When the
-        # loop transitions audit (opencode) -> revise (claude) and
-        # the loop engine dispatches with SESSION_ID still pointing at
-        # the audit's opencode ID, claude rejects it with:
-        #
-        #   Error: --resume requires a valid session ID when used with
-        #   --print. Session IDs must be in UUID format
-        #   (e.g., 550e8400-e29b-41d4-a716-446655440000).
-        #   Provided value "ses_28dede965ffejFSu1XlxxAiqx0" is not a
-        #   valid UUID
-        #
-        # exit 1, revise does zero work, three retries, BackoffLimitExceeded.
-        # Only pass --resume when SESSION_ID is a valid UUID (previous
-        # claude session); silently drop otherwise so the revise starts
-        # a fresh claude session, which is the right behavior for the
-        # first claude stage after an audit.
-        if [ -n "${SESSION_ID:-}" ] && \
-           printf '%s' "$SESSION_ID" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
-            CLAUDE_ARGS+=(--resume "$SESSION_ID")
-        fi
+        # NOTE: We intentionally do NOT pass --resume here.
+        # Claude Code sessions are stored in the container's emptyDir volume
+        # (/home/agent/.claude) which is NOT persistent across pod boundaries.
+        # Passing --resume <uuid> from a previous pod always fails with
+        # "No conversation found with session ID: <uuid>" which causes the
+        # K8s job to hit BackoffLimitExceeded. Each implement/revise pod
+        # starts a fresh Claude session. Session persistence via PVC is a
+        # future enhancement tracked separately.
+        echo "[${STAGE}/r${ROUND}] Starting ${STAGE} (loop ${LOOP_ID}, branch ${BRANCH})"
         STDIN_FILE="$PROMPT_FILE" run_and_emit_result "$STAGE" claude "${CLAUDE_ARGS[@]}"
         ;;
 
     review|audit)
-        # FR-6, FR-7: OpenCode for review/audit (read-only)
-        export OPENCODE_PERMISSIONS='{"edit":"deny","bash":"deny","read":"allow"}'
-        # Prevent opencode from auto-upgrading its binary at runtime. The image
-        # pins a specific opencode version; a self-upgrade would replace it with
-        # an untested version and void our SHA256 verification at build time.
-        # Also disable the models.dev fetch — the sidecar egress logger showed
-        # this as a ~168KB outbound call that isn't needed for headless operation.
-        export OPENCODE_DISABLE_AUTOUPDATE=1
-        export OPENCODE_DISABLE_MODELS_FETCH=1
+        # FR-6, FR-7: Cross-model review for review/audit (read-only).
+        # Route to claude CLI for claude-* models, opencode for OpenAI models.
+        REVIEW_MODEL="${MODEL:-gpt-4o-mini}"
+        case "$REVIEW_MODEL" in
+            claude-*)
+                # Use Claude Code CLI for Claude models (same as implement/revise).
+                CLAUDE_ARGS=(--print --output-format stream-json --verbose --dangerously-skip-permissions)
+                CLAUDE_ARGS+=(--model "$REVIEW_MODEL")
+                # No --resume: same reason as implement/revise — claude sessions
+                # live in the pod's emptyDir and don't survive across pods.
+                echo "[${STAGE}/r${ROUND}] Starting ${STAGE} with claude (loop ${LOOP_ID})"
+                STDIN_FILE="$PROMPT_FILE" run_and_emit_result "$STAGE" claude "${CLAUDE_ARGS[@]}"
+                ;;
+            *)
+                # Use OpenCode for OpenAI (and other) models.
+                export OPENCODE_PERMISSIONS='{"edit":"deny","bash":"deny","read":"allow"}'
+                export OPENCODE_DISABLE_AUTOUPDATE=1
+                export OPENCODE_DISABLE_MODELS_FETCH=1
 
-        # Pin the provider to `openai` so opencode routes through the sidecar
-        # model proxy (OPENAI_BASE_URL=http://localhost:9090/openai) instead
-        # of falling back to its built-in `opencode/*` models that go to the
-        # opencode.ai hosted backend with unknown billing. See issue #62.
-        #
-        # opencode expects `-m provider/model`. If MODEL is unset or doesn't
-        # contain a provider prefix, we prepend `openai/`. If it already has
-        # a prefix (e.g. user explicitly set `anthropic/...`), pass through.
-        # If MODEL is entirely unset, default to a cheap OpenAI model so the
-        # reviewer doesn't silently fall back to a nondeterministic default.
-        OPENCODE_MODEL="${MODEL:-gpt-4o-mini}"
-        case "$OPENCODE_MODEL" in
-            */*) ;;                                          # already has provider prefix
-            claude-*) OPENCODE_MODEL="anthropic/$OPENCODE_MODEL" ;;  # Anthropic models
-            *) OPENCODE_MODEL="openai/$OPENCODE_MODEL" ;;            # default: OpenAI
-        esac
+                # Pin the provider to `openai` so opencode routes through the sidecar
+                # model proxy (OPENAI_BASE_URL=http://localhost:9090/openai) instead
+                # of falling back to its built-in `opencode/*` models that go to the
+                # opencode.ai hosted backend with unknown billing. See issue #62.
+                case "$REVIEW_MODEL" in
+                    */*) OPENCODE_MODEL="$REVIEW_MODEL" ;;
+                    *) OPENCODE_MODEL="openai/$REVIEW_MODEL" ;;
+                esac
 
-        # opencode v1.3+ removed --prompt-file; the message must be passed as a
-        # positional arg. opencode run does NOT accept piped input via stdin.
-        # We read the prompt file and pass it as the message argument.
-        # Truncate to ~100KB to avoid ARG_MAX issues (opencode has limits anyway).
-        OPENCODE_ARGS=(run --format json -m "$OPENCODE_MODEL")
-        # Symmetric with the claude branch: only resume when SESSION_ID
-        # looks like an opencode session (`ses_<chars>`), not a claude
-        # UUID carried over from a previous revise. See the matching
-        # comment in the implement|revise branch.
-        if [ -n "${SESSION_ID:-}" ] && \
-           printf '%s' "$SESSION_ID" | grep -Eq '^ses_[a-zA-Z0-9]+$'; then
-            OPENCODE_ARGS+=(-s "$SESSION_ID")
-        fi
-        # Read prompt and truncate if extremely large to avoid ARG_MAX
-        PROMPT_CONTENT=$(cat "$PROMPT_FILE")
-        if [ "${#PROMPT_CONTENT}" -gt 100000 ]; then
-            PROMPT_CONTENT="${PROMPT_CONTENT:0:100000}
+                OPENCODE_ARGS=(run --format json -m "$OPENCODE_MODEL")
+                # Only resume an opencode ses_ session, not a Claude UUID.
+                if [ -n "${SESSION_ID:-}" ] && \
+                   printf '%s' "$SESSION_ID" | grep -Eq '^ses_[a-zA-Z0-9]+$'; then
+                    OPENCODE_ARGS+=(-s "$SESSION_ID")
+                fi
+                # Read prompt and truncate if extremely large to avoid ARG_MAX
+                PROMPT_CONTENT=$(cat "$PROMPT_FILE")
+                if [ "${#PROMPT_CONTENT}" -gt 100000 ]; then
+                    PROMPT_CONTENT="${PROMPT_CONTENT:0:100000}
 
 ...[truncated: prompt exceeded 100KB limit]"
-        fi
-        run_and_emit_result "$STAGE" opencode "${OPENCODE_ARGS[@]}" "$PROMPT_CONTENT"
+                fi
+                run_and_emit_result "$STAGE" opencode "${OPENCODE_ARGS[@]}" "$PROMPT_CONTENT"
+                ;;
+        esac
         ;;
 
     test)
@@ -391,6 +457,15 @@ case "$STAGE" in
         if [ -z "${AFFECTED_SERVICES:-}" ]; then
             echo "NAUTILOOP_ERROR: test: AFFECTED_SERVICES not set" >&2
             exit 1
+        fi
+
+        # If no services to test (empty array), emit a passed result immediately.
+        # This handles repos with no [services] configured in nemo.toml.
+        if [ "$(echo "$AFFECTED_SERVICES" | jq 'length')" -eq 0 ]; then
+            RESULT_ENVELOPE='{"stage":"test","data":{"services":[],"all_passed":true,"ci_status":"passed","token_usage":{"input":0,"output":0}}}'
+            echo "$RESULT_ENVELOPE" > /output/result.json
+            echo "NAUTILOOP_RESULT:$RESULT_ENVELOPE"
+            exit 0
         fi
 
         # FR-42b: Read test commands from nemo.toml

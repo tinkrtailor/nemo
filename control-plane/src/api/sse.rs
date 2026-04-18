@@ -22,7 +22,7 @@ pub async fn stream_logs(
     stage: Option<String>,
 ) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
     let stream = async_stream::stream! {
-        let mut cursor_timestamp = chrono::DateTime::<chrono::Utc>::MIN_UTC;
+        let mut cursor_timestamp = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
         let mut seen_ids: HashSet<Uuid> = HashSet::new();
         let poll_interval = Duration::from_millis(500);
 

@@ -29,6 +29,18 @@ pub trait GitOperations: Send + Sync + 'static {
     /// Write a file to the worktree for a branch and commit it.
     async fn write_file(&self, branch: &str, path: &str, content: &str) -> Result<()>;
 
+    /// Write a file to the worktree for a branch and commit it with custom author and message.
+    /// Used for spec commits that must be attributed to the engineer (FR-3d).
+    async fn write_file_as(
+        &self,
+        branch: &str,
+        path: &str,
+        content: &str,
+        author_name: &str,
+        author_email: &str,
+        commit_message: &str,
+    ) -> Result<()>;
+
     /// Delete a branch (cleanup on failure).
     async fn delete_branch(&self, branch: &str) -> Result<()>;
 
@@ -63,6 +75,14 @@ pub trait GitOperations: Send + Sync + 'static {
     /// List files changed on a branch relative to the default branch.
     /// Used by the TEST stage to determine affected services (FR-42a).
     async fn changed_files(&self, branch: &str, default_branch: &str) -> Result<Vec<String>>;
+
+    /// Push a branch to the remote. Used after the initial spec commit so the
+    /// agent branch exists on the remote before returning 201.
+    async fn push_branch(&self, branch: &str) -> Result<()>;
+
+    /// Delete a branch from the remote. Used to clean up orphaned remote branches
+    /// when a post-push step (e.g., set_current_sha) fails.
+    async fn delete_remote_branch(&self, branch: &str) -> Result<()>;
 }
 
 /// Real git operations on a bare repository.
@@ -131,7 +151,26 @@ pub mod bare {
             worktree_dir: &str,
             path: &str,
             content: &str,
+            author_name: &str,
+            author_email: &str,
+            commit_message: &str,
         ) -> Result<()> {
+            // Reject control characters (newlines, NUL, etc.) in author fields to prevent
+            // git config injection or malformed commits.
+            fn has_control_chars(s: &str) -> bool {
+                s.bytes().any(|b| b < 0x20 || b == 0x7f)
+            }
+            if has_control_chars(author_name) {
+                return Err(crate::error::NautiloopError::Git(
+                    "author_name contains control characters".to_string(),
+                ));
+            }
+            if has_control_chars(author_email) {
+                return Err(crate::error::NautiloopError::Git(
+                    "author_email contains control characters".to_string(),
+                ));
+            }
+
             let file_path = std::path::Path::new(worktree_dir).join(path);
             if let Some(parent) = file_path.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -143,7 +182,7 @@ pub mod bare {
             })?;
 
             let add = Command::new("git")
-                .args(["add", path])
+                .args(["add", "-f", path])
                 .current_dir(worktree_dir)
                 .output()
                 .await
@@ -157,15 +196,17 @@ pub mod bare {
                 )));
             }
 
+            let user_name_arg = format!("user.name={author_name}");
+            let user_email_arg = format!("user.email={author_email}");
             let commit = Command::new("git")
                 .args([
                     "-c",
-                    "user.name=nautiloop-control-plane",
+                    &user_name_arg,
                     "-c",
-                    "user.email=nautiloop@nautiloop.dev",
+                    &user_email_arg,
                     "commit",
                     "-m",
-                    &format!("chore(agent): add {path}"),
+                    commit_message,
                 ])
                 .current_dir(worktree_dir)
                 .output()
@@ -323,13 +364,40 @@ pub mod bare {
         }
 
         async fn write_file(&self, branch: &str, path: &str, content: &str) -> Result<()> {
+            self.write_file_as(
+                branch,
+                path,
+                content,
+                "nautiloop-control-plane",
+                "nautiloop@nautiloop.dev",
+                &format!("chore(agent): add {path}"),
+            )
+            .await
+        }
+
+        async fn write_file_as(
+            &self,
+            branch: &str,
+            path: &str,
+            content: &str,
+            author_name: &str,
+            author_email: &str,
+            commit_message: &str,
+        ) -> Result<()> {
             // Use the persistent worktree if it exists (created by ensure_worktree).
             // Git forbids the same branch in two worktrees, so we must not create
             // a second temporary worktree for a branch that already has one.
             let persistent = self.persistent_worktree_dir(branch);
             if persistent.exists() {
                 return self
-                    .write_file_in_worktree(&persistent.to_string_lossy(), path, content)
+                    .write_file_in_worktree(
+                        &persistent.to_string_lossy(),
+                        path,
+                        content,
+                        author_name,
+                        author_email,
+                        commit_message,
+                    )
                     .await;
             }
 
@@ -344,7 +412,14 @@ pub mod bare {
                 })?;
 
             let result = self
-                .write_file_in_worktree(&worktree_dir, path, content)
+                .write_file_in_worktree(
+                    &worktree_dir,
+                    path,
+                    content,
+                    author_name,
+                    author_email,
+                    commit_message,
+                )
                 .await;
 
             let _ = self
@@ -648,6 +723,28 @@ pub mod bare {
                 Err(_) => Ok(vec![]), // Can't determine diff — caller tests all services
             }
         }
+
+        async fn push_branch(&self, branch: &str) -> Result<()> {
+            self.run_git(&["push", "-u", "origin", branch])
+                .await
+                .map_err(|e| {
+                    crate::error::NautiloopError::Git(format!(
+                        "Failed to push {branch} to origin: {e}"
+                    ))
+                })?;
+            Ok(())
+        }
+
+        async fn delete_remote_branch(&self, branch: &str) -> Result<()> {
+            self.run_git(&["push", "origin", "--delete", branch])
+                .await
+                .map_err(|e| {
+                    crate::error::NautiloopError::Git(format!(
+                        "Failed to delete remote branch {branch}: {e}"
+                    ))
+                })?;
+            Ok(())
+        }
     }
 }
 
@@ -658,11 +755,23 @@ pub mod mock {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
+    /// Recorded call to `write_file_as` for test assertions (FR-3d).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct WriteFileAsCall {
+        pub branch: String,
+        pub path: String,
+        pub content: String,
+        pub author_name: String,
+        pub author_email: String,
+        pub commit_message: String,
+    }
+
     #[derive(Debug, Clone)]
     pub struct MockGitOperations {
         files: Arc<RwLock<HashMap<String, String>>>,
         branches: Arc<RwLock<HashMap<String, String>>>,
         default_sha: String,
+        write_file_as_calls: Arc<RwLock<Vec<WriteFileAsCall>>>,
     }
 
     impl MockGitOperations {
@@ -671,7 +780,13 @@ pub mod mock {
                 files: Arc::new(RwLock::new(HashMap::new())),
                 branches: Arc::new(RwLock::new(HashMap::new())),
                 default_sha: "0000000000000000000000000000000000000000".to_string(),
+                write_file_as_calls: Arc::new(RwLock::new(Vec::new())),
             }
+        }
+
+        /// Return all recorded `write_file_as` calls for test assertions.
+        pub async fn get_write_file_as_calls(&self) -> Vec<WriteFileAsCall> {
+            self.write_file_as_calls.read().await.clone()
         }
 
         /// Add a file to the mock repo.
@@ -732,9 +847,72 @@ pub mod mock {
             }
         }
 
-        async fn write_file(&self, _branch: &str, path: &str, content: &str) -> Result<()> {
+        async fn write_file(&self, branch: &str, path: &str, content: &str) -> Result<()> {
             let mut files = self.files.write().await;
             files.insert(path.to_string(), content.to_string());
+            drop(files);
+
+            // Generate a realistic 40-hex-char mock SHA using SHA-256, truncated to
+            // 20 bytes (same length as a real git SHA-1). This avoids the artificial
+            // leading-zeros pattern that DefaultHasher::finish() u64→u128 produced.
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(b"write_file:");
+            hasher.update(branch.as_bytes());
+            hasher.update(b":");
+            hasher.update(path.as_bytes());
+            hasher.update(b":");
+            hasher.update(content.as_bytes());
+            let new_sha = hex::encode(&hasher.finalize()[..20]);
+            let mut branches = self.branches.write().await;
+            branches.insert(branch.to_string(), new_sha);
+
+            Ok(())
+        }
+
+        async fn write_file_as(
+            &self,
+            branch: &str,
+            path: &str,
+            content: &str,
+            author_name: &str,
+            author_email: &str,
+            commit_message: &str,
+        ) -> Result<()> {
+            let mut files = self.files.write().await;
+            files.insert(path.to_string(), content.to_string());
+            drop(files);
+
+            // Generate a realistic 40-hex-char mock SHA using SHA-256, truncated to
+            // 20 bytes. Includes all commit inputs for proper diversity.
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(b"write_file_as:");
+            hasher.update(branch.as_bytes());
+            hasher.update(b":");
+            hasher.update(path.as_bytes());
+            hasher.update(b":");
+            hasher.update(content.as_bytes());
+            hasher.update(b":");
+            hasher.update(commit_message.as_bytes());
+            hasher.update(b":");
+            hasher.update(author_name.as_bytes());
+            hasher.update(b":");
+            hasher.update(author_email.as_bytes());
+            let new_sha = hex::encode(&hasher.finalize()[..20]);
+            let mut branches = self.branches.write().await;
+            branches.insert(branch.to_string(), new_sha);
+            drop(branches);
+
+            let mut calls = self.write_file_as_calls.write().await;
+            calls.push(WriteFileAsCall {
+                branch: branch.to_string(),
+                path: path.to_string(),
+                content: content.to_string(),
+                author_name: author_name.to_string(),
+                author_email: author_email.to_string(),
+                commit_message: commit_message.to_string(),
+            });
             Ok(())
         }
 
@@ -787,6 +965,14 @@ pub mod mock {
 
         async fn changed_files(&self, _branch: &str, _default_branch: &str) -> Result<Vec<String>> {
             Ok(vec![])
+        }
+
+        async fn push_branch(&self, _branch: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete_remote_branch(&self, _branch: &str) -> Result<()> {
+            Ok(())
         }
     }
 }

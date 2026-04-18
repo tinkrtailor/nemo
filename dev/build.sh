@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REGISTRY="localhost:5001"
 CONTEXT="$(cd "$(dirname "$0")/.." && pwd)"
 
 BUILD_CONTROL_PLANE=false
@@ -28,30 +27,34 @@ if "$BUILD_CONTROL_PLANE"; then
     echo "==> Building control-plane image..."
     docker build \
         -f "${CONTEXT}/images/control-plane/Dockerfile" \
-        -t "${REGISTRY}/nautiloop-control-plane:dev" \
+        -t "nautiloop-control-plane:dev" \
         "${CONTEXT}"
-    docker push "${REGISTRY}/nautiloop-control-plane:dev"
-    echo "    Pushed ${REGISTRY}/nautiloop-control-plane:dev"
+    echo "==> Importing nautiloop-control-plane:dev into k3d cluster..."
+    k3d image import nautiloop-control-plane:dev -c nautiloop-dev
+    echo "    Done."
 fi
 
 if "$BUILD_SIDECAR"; then
     echo "==> Building sidecar image..."
     docker build \
         -f "${CONTEXT}/sidecar/Dockerfile" \
-        -t "${REGISTRY}/nautiloop-sidecar:dev" \
+        -t "nautiloop-sidecar:dev" \
         "${CONTEXT}"
-    docker push "${REGISTRY}/nautiloop-sidecar:dev"
-    echo "    Pushed ${REGISTRY}/nautiloop-sidecar:dev"
+    echo "==> Importing nautiloop-sidecar:dev into k3d cluster..."
+    k3d image import nautiloop-sidecar:dev -c nautiloop-dev
+    echo "    Done."
 fi
 
 if "$BUILD_AGENT_BASE"; then
-    echo "==> Building agent-base image..."
+    echo "==> Building agent-base image (dev: includes Rust toolchain for dogfooding)..."
     docker build \
+        --build-arg INCLUDE_RUST=true \
         -f "${CONTEXT}/images/base/Dockerfile" \
-        -t "${REGISTRY}/nautiloop-agent-base:dev" \
+        -t "nautiloop-agent-base:dev" \
         "${CONTEXT}"
-    docker push "${REGISTRY}/nautiloop-agent-base:dev"
-    echo "    Pushed ${REGISTRY}/nautiloop-agent-base:dev"
+    echo "==> Importing nautiloop-agent-base:dev into k3d cluster..."
+    k3d image import nautiloop-agent-base:dev -c nautiloop-dev
+    echo "    Done."
 fi
 
 echo "==> Build complete."

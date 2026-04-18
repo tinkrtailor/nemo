@@ -506,7 +506,7 @@ impl ConvergentLoopDriver {
         let new_lines: Vec<String> = logs
             .lines()
             .map(str::trim_end)
-            .filter(|line| !line.is_empty() && !line.starts_with("NAUTILOOP_RESULT:"))
+            .filter(|line| !line.is_empty())
             .map(ToOwned::to_owned)
             .collect();
 
@@ -571,6 +571,28 @@ impl ConvergentLoopDriver {
                     Some(v) if v.clean => {
                         // Audit passed
                         if record.harden_only {
+                            // Check if the branch has any commits ahead of the default branch.
+                            // If the spec was already clean on round 1 (no revise ran), the
+                            // branch has no new commits and GitHub will reject PR creation.
+                            let default_branch = self.default_branch_for(record);
+                            let branch_sha = self.git.get_branch_sha(&record.branch).await?;
+                            // Compare against origin/<default_branch> since the bare repo
+                            // uses remote-tracking refs, not local branch refs, for main.
+                            let remote_ref = format!("origin/{default_branch}");
+                            let default_sha = self.git.get_branch_sha(&remote_ref).await?;
+                            let has_commits = branch_sha != default_sha;
+
+                            if !has_commits {
+                                // Spec was already clean — no revisions needed, no PR to create.
+                                record.state = LoopState::Hardened;
+                                record.sub_state = None;
+                                record.active_job_name = None;
+                                record.hardened_spec_path = Some(record.spec_path.clone());
+                                self.store.update_loop(record).await?;
+                                tracing::info!(loop_id = %record.id, "Harden loop HARDENED (spec already clean, no PR needed)");
+                                return Ok(LoopState::Hardened);
+                            }
+
                             // Clean up .agent/ artifacts before PR creation
                             if let Err(e) = self.git.remove_path(&record.branch, ".agent").await {
                                 tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
@@ -591,7 +613,7 @@ impl ConvergentLoopDriver {
                                     &record.branch,
                                     &pr_title,
                                     &pr_body,
-                                    &self.default_branch_for(record),
+                                    &default_branch,
                                 )
                                 .await?;
                             record.spec_pr_url = Some(pr_url);
@@ -602,7 +624,7 @@ impl ConvergentLoopDriver {
                                     .merge_pr(
                                         &record.branch,
                                         &self.config.harden.merge_strategy,
-                                        &self.default_branch_for(record),
+                                        &default_branch,
                                     )
                                     .await?;
                                 record.merge_sha = Some(merge_sha);
@@ -639,9 +661,9 @@ impl ConvergentLoopDriver {
                             Ok(LoopState::AwaitingApproval)
                         }
                     }
-                    Some(_v) => {
-                        // Audit found issues: dispatch revise
-                        self.dispatch_revise(record).await
+                    Some(v) => {
+                        // Audit found issues: dispatch revise with findings as feedback
+                        self.dispatch_revise(record, &v).await
                     }
                     None => {
                         // Verdict parse failure: retry per FR-9
@@ -688,6 +710,8 @@ impl ConvergentLoopDriver {
                         record.max_rounds
                     ));
                     record.active_job_name = None;
+                    // Preserve the pre-failure state so `nemo extend` can resume here.
+                    record.failed_from_state = Some(LoopState::Hardening);
                     self.store.update_loop(record).await?;
                     return Ok(LoopState::Failed);
                 }
@@ -707,9 +731,19 @@ impl ConvergentLoopDriver {
 
         let stage_config = self.test_stage_config();
         let mut ctx = self.build_context(record).await?;
+        self.inject_test_services(record, &mut ctx).await;
 
-        // Inject affected_services for the TEST stage (FR-42a).
-        // Compute from git diff: only services whose path prefix matches changed files.
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+        self.persist_then_dispatch(record, "test", &job).await?;
+
+        tracing::info!(loop_id = %record.id, round = record.round, "IMPLEMENTING -> TESTING/DISPATCHED");
+        Ok(LoopState::Testing)
+    }
+
+    /// Compute affected services from git diff and inject AFFECTED_SERVICES +
+    /// service_tags into the loop context credentials for the TEST stage.
+    /// Called from both advance_to_testing and redispatch_current_stage.
+    async fn inject_test_services(&self, record: &LoopRecord, ctx: &mut LoopContext) {
         let diff_files = self
             .git
             .changed_files(&record.branch, &self.default_branch_for(record))
@@ -717,16 +751,12 @@ impl ConvergentLoopDriver {
             .unwrap_or_default();
 
         let affected: Vec<String> = if diff_files.is_empty() {
-            // Can't determine diff — test all services
             self.config.services.keys().cloned().collect()
         } else {
             self.config
                 .services
                 .iter()
                 .filter(|(_, svc)| {
-                    // Use path + "/" for prefix matching to prevent false positives
-                    // (e.g., "cli" matching "client", "api" matching "api-gateway").
-                    // Root service (".") matches everything.
                     let prefix = if svc.path == "." {
                         String::new()
                     } else if svc.path.ends_with('/') {
@@ -742,8 +772,7 @@ impl ConvergentLoopDriver {
                 .collect()
         };
 
-        // If no services matched, still test all (safety net)
-        let service_names = if affected.is_empty() {
+        let service_names: Vec<String> = if affected.is_empty() {
             self.config.services.keys().cloned().collect()
         } else {
             affected
@@ -754,7 +783,6 @@ impl ConvergentLoopDriver {
         ctx.credentials
             .push(("affected_services".to_string(), services_json));
 
-        // Inject service_tags for JVM resource escalation (FR-28) — only from affected services
         let all_tags: Vec<String> = self
             .config
             .services
@@ -767,12 +795,6 @@ impl ConvergentLoopDriver {
             ctx.credentials
                 .push(("service_tags".to_string(), tags_json));
         }
-
-        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
-        self.persist_then_dispatch(record, "test", &job).await?;
-
-        tracing::info!(loop_id = %record.id, round = record.round, "IMPLEMENTING -> TESTING/DISPATCHED");
-        Ok(LoopState::Testing)
     }
 
     /// Evaluate test stage output.
@@ -811,6 +833,8 @@ impl ConvergentLoopDriver {
                         record.max_rounds
                     ));
                     record.active_job_name = None;
+                    // Preserve the pre-failure state so `nemo extend` can resume here.
+                    record.failed_from_state = Some(LoopState::Implementing);
                     self.store.update_loop(record).await?;
                     return Ok(LoopState::Failed);
                 }
@@ -884,6 +908,39 @@ impl ConvergentLoopDriver {
 
         match verdict {
             Some(v) if v.clean => {
+                // Guard: review verdict clean but branch has no commits vs. main.
+                // Means the implementor never actually committed (e.g. it emitted a
+                // fake SHA in NAUTILOOP_RESULT, or the agent image lacked build tools
+                // and bailed). Without this guard, the driver retries create_pr every
+                // tick with "No commits between main and branch" and the loop is stuck
+                // forever. Transition to FAILED with a clear reason instead.
+                let default_branch = self.default_branch_for(record);
+                let branch_sha = self.git.get_branch_sha(&record.branch).await?;
+                let default_sha = self
+                    .git
+                    .get_branch_sha(&format!("origin/{default_branch}"))
+                    .await?;
+                if branch_sha.is_some() && branch_sha == default_sha {
+                    tracing::warn!(
+                        loop_id = %record.id,
+                        branch = %record.branch,
+                        "Review verdict clean but branch has no commits vs. {}; marking FAILED",
+                        default_branch
+                    );
+                    record.state = LoopState::Failed;
+                    record.sub_state = None;
+                    record.active_job_name = None;
+                    record.failure_reason = Some(format!(
+                        "Review returned clean={} but agent branch has no commits against {}. \
+                         Likely cause: implementor produced output but did not commit (missing \
+                         build tooling in the agent image, or agent emitted a synthetic SHA). \
+                         Check implement stage logs.",
+                        v.clean, default_branch
+                    ));
+                    self.store.update_loop(record).await?;
+                    return Ok(LoopState::Failed);
+                }
+
                 // Create PR if not already created (idempotent across ticks)
                 if record.spec_pr_url.is_none() {
                     if let Err(e) = self.git.remove_path(&record.branch, ".agent").await {
@@ -902,7 +959,7 @@ impl ConvergentLoopDriver {
                             &record.branch,
                             &pr_title,
                             &pr_body,
-                            &self.default_branch_for(record),
+                            &default_branch,
                         )
                         .await?;
                     record.spec_pr_url = Some(pr_url);
@@ -1025,6 +1082,8 @@ impl ConvergentLoopDriver {
                         record.max_rounds
                     ));
                     record.active_job_name = None;
+                    // Preserve the pre-failure state so `nemo extend` can resume here.
+                    record.failed_from_state = Some(LoopState::Implementing);
                     self.store.update_loop(record).await?;
                     return Ok(LoopState::Failed);
                 }
@@ -1535,9 +1594,34 @@ impl ConvergentLoopDriver {
     }
 
     /// Dispatch a revise job (harden loop).
-    async fn dispatch_revise(&self, record: &mut LoopRecord) -> Result<LoopState> {
+    async fn dispatch_revise(
+        &self,
+        record: &mut LoopRecord,
+        audit_verdict: &AuditVerdict,
+    ) -> Result<LoopState> {
         record.sub_state = Some(SubState::Dispatched);
         record.retry_count = 0;
+
+        // Write audit findings as a feedback file so the revise agent
+        // receives the {{FEEDBACK}} substitution in spec-revise.md.
+        let feedback = FeedbackFile {
+            round: record.round as u32,
+            source: FeedbackSource::Audit,
+            issues: Some(audit_verdict.issues.clone()),
+            failures: None,
+        };
+        let feedback_path = format!(".agent/audit-feedback-round-{}.json", record.round);
+        let feedback_json = serde_json::to_string_pretty(&feedback).map_err(|e| {
+            crate::error::NautiloopError::Internal(format!(
+                "Failed to serialize audit feedback: {e}"
+            ))
+        })?;
+        self.git
+            .write_file(&record.branch, &feedback_path, &feedback_json)
+            .await?;
+        if let Some(new_sha) = self.git.get_branch_sha(&record.branch).await? {
+            record.current_sha = Some(new_sha);
+        }
 
         // #98: Claude credential preflight. If it blocks, write a
         // sentinel `revise` round record ONLY in that case so that
@@ -1561,9 +1645,17 @@ impl ConvergentLoopDriver {
         let stage_config = self.revise_stage_config(record);
         let mut ctx = self.build_context(record).await?;
         ctx.session_id = Self::session_id_for_stage(record, "revise");
+        ctx.feedback_path = Some(feedback_path.clone());
         let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
         self.persist_then_dispatch(record, "revise", &job).await?;
 
+        tracing::info!(
+            loop_id = %record.id,
+            round = record.round,
+            feedback = %feedback_path,
+            issues = audit_verdict.issues.len(),
+            "Dispatching revise with audit feedback"
+        );
         Ok(LoopState::Hardening)
     }
 
@@ -1705,6 +1797,11 @@ impl ConvergentLoopDriver {
 
         let mut ctx = self.build_context(&updated).await?;
         ctx.session_id = Self::session_id_for_stage(record, stage_name);
+
+        // Inject affected_services for test stage retries (same as advance_to_testing)
+        if stage_name == "test" {
+            self.inject_test_services(record, &mut ctx).await;
+        }
 
         // Restore feedback_path for implementing redispatch (N30):
         // look at the prior round's stage to determine review vs test feedback

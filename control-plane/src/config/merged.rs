@@ -147,7 +147,7 @@ impl MergedConfig {
         let max_rounds_implement = engineer_limits
             .and_then(|l| l.max_rounds_implement)
             .or_else(|| repo.limits.as_ref().and_then(|l| l.max_rounds_implement))
-            .unwrap_or(15);
+            .unwrap_or(20);
 
         // Services: deep merge. Repo defines; engineer can add but not override.
         let services = repo.services.clone();
@@ -339,7 +339,7 @@ mod tests {
 
         let result = MergedConfig::merge(&cluster, &repo, None).unwrap();
         assert_eq!(result.config.max_rounds_harden, 10);
-        assert_eq!(result.config.max_rounds_implement, 15);
+        assert_eq!(result.config.max_rounds_implement, 20);
         assert!(!result.config.ship_allowed);
         assert!(result.config.ship_require_passing_ci);
         assert_eq!(result.config.ship_merge_strategy, "squash");

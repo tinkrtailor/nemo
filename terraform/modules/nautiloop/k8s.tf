@@ -100,6 +100,20 @@ spec:
     requests:
       storage: 10Gi
 ---
+# Spec #130: Shared sccache compiler cache across all agent pods.
+# Single-node self-hosted clusters use RWO; multi-node needs RWX
+# (or sccache's S3 backend, not yet implemented).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nautiloop-cargo-cache
+  namespace: nautiloop-jobs
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: ${var.cargo_cache_volume_size}Gi
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

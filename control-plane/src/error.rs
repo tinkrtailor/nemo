@@ -56,6 +56,9 @@ pub enum NautiloopError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    #[error("Spec content too large: {size} bytes exceeds 1 MB limit")]
+    SpecTooLarge { size: usize },
+
     #[error("Bad request: {0}")]
     BadRequest(String),
 
@@ -85,7 +88,7 @@ impl NautiloopError {
                     && !msg.contains("log")
             }
             // Spec not found, ship not enabled — logic errors, won't change on retry
-            Self::SpecNotFound { .. } | Self::ShipNotEnabled => true,
+            Self::SpecNotFound { .. } | Self::ShipNotEnabled | Self::SpecTooLarge { .. } => true,
             // Loop not found — data integrity issue
             Self::LoopNotFound { .. } => true,
             // DB and K8s errors are typically transient
@@ -102,6 +105,7 @@ impl NautiloopError {
                 StatusCode::CONFLICT
             }
             Self::AuthenticationFailed | Self::UnknownEngineer => StatusCode::UNAUTHORIZED,
+            Self::SpecTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ShipNotEnabled | Self::NotImplemented { .. } | Self::BadRequest(_) => {
                 StatusCode::BAD_REQUEST
             }

@@ -18,9 +18,17 @@ spec:
       serviceAccountName: nautiloop-api-server
       securityContext:
         fsGroup: 1000
+      initContainers:
+        - name: fix-bare-repo-perms
+          image: busybox:latest
+          command: ["sh", "-c", "chown -R 1000:1000 /bare-repo"]
+          volumeMounts:
+            - name: bare-repo
+              mountPath: /bare-repo
       containers:
         - name: api-server
-          image: k3d-nautiloop-registry:5001/nautiloop-control-plane:dev
+          image: nautiloop-control-plane:dev
+          imagePullPolicy: Never
           args: ["api-server"]
           ports:
             - containerPort: 8080
@@ -40,12 +48,23 @@ spec:
                 secretKeyRef:
                   name: nautiloop-git-host-token
                   key: GIT_HOST_TOKEN
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nautiloop-git-host-token
+                  key: GIT_HOST_TOKEN
             - name: BARE_REPO_PATH
               value: /bare-repo
             - name: GIT_SSH_COMMAND
               value: "ssh -i /etc/git-ssh/id_ed25519 -o UserKnownHostsFile=/etc/git-ssh-known-hosts/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
             - name: NAUTILOOP_CONFIG_PATH
               value: /etc/nautiloop/nemo.toml
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: /bare-repo
           resources:
             requests:
               cpu: 100m
@@ -118,9 +137,17 @@ spec:
       serviceAccountName: nautiloop-loop-engine
       securityContext:
         fsGroup: 1000
+      initContainers:
+        - name: fix-bare-repo-perms
+          image: busybox:latest
+          command: ["sh", "-c", "chown -R 1000:1000 /bare-repo"]
+          volumeMounts:
+            - name: bare-repo
+              mountPath: /bare-repo
       containers:
         - name: loop-engine
-          image: k3d-nautiloop-registry:5001/nautiloop-control-plane:dev
+          image: nautiloop-control-plane:dev
+          imagePullPolicy: Never
           args: ["loop-engine"]
           env:
             - name: DATABASE_URL
@@ -133,14 +160,25 @@ spec:
                 secretKeyRef:
                   name: nautiloop-git-host-token
                   key: GIT_HOST_TOKEN
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nautiloop-git-host-token
+                  key: GIT_HOST_TOKEN
             - name: BARE_REPO_PATH
               value: /bare-repo
             - name: AGENT_IMAGE
-              value: k3d-nautiloop-registry:5001/nautiloop-agent-base:dev
+              value: nautiloop-agent-base:dev
             - name: GIT_SSH_COMMAND
               value: "ssh -i /etc/git-ssh/id_ed25519 -o UserKnownHostsFile=/etc/git-ssh-known-hosts/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
             - name: NAUTILOOP_CONFIG_PATH
               value: /etc/nautiloop/nemo.toml
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: /bare-repo
           volumeMounts:
             - name: bare-repo
               mountPath: /bare-repo
@@ -160,12 +198,6 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
-          livenessProbe:
-            exec:
-              command: ["kill", "-0", "1"]
-            initialDelaySeconds: 15
-            periodSeconds: 30
-            timeoutSeconds: 3
       volumes:
         - name: bare-repo
           persistentVolumeClaim:

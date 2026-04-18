@@ -79,3 +79,18 @@ spec:
   resources:
     requests:
       storage: 2Gi
+---
+# Shared sccache compiler cache across all agent pods (spec #130).
+# RWO works for dev k3d since all agent pods land on the single node.
+# Prod multi-node needs RWX or sccache's S3 backend.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nautiloop-cargo-cache
+  namespace: nautiloop-jobs
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi

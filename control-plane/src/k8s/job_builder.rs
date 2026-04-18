@@ -71,7 +71,7 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
     let is_test = matches!(parsed_stage, Some(Stage::Test));
 
     // FR-27: Environment variables on the agent container
-    let agent_env = build_agent_env_vars(ctx, stage, is_test);
+    let agent_env = build_agent_env_vars(ctx, stage, is_test, is_implement_or_revise);
 
     // Build volumes (FR-25, FR-26, FR-30)
     let mut volumes = build_volumes(
@@ -81,8 +81,9 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
         &cfg.ssh_known_hosts_configmap,
     );
 
-    // FR-25b: Claude session volume for IMPLEMENT/REVISE stages
-    if is_implement_or_revise {
+    // FR-25b: Claude session volume for IMPLEMENT/REVISE/REVIEW/AUDIT stages
+    // (review/audit may also use claude CLI when model-review is a claude-* model)
+    if is_implement_or_revise || is_review_or_audit {
         let safe_engineer: String = ctx.engineer.to_lowercase().replace('_', "-");
         volumes.push(Volume {
             name: "claude-session".to_string(),
@@ -275,7 +276,12 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
 }
 
 /// Build all environment variables for the agent container (FR-27, FR-8, FR-9, FR-10, FR-11).
-fn build_agent_env_vars(ctx: &LoopContext, stage: &StageConfig, is_test: bool) -> Vec<EnvVar> {
+fn build_agent_env_vars(
+    ctx: &LoopContext,
+    stage: &StageConfig,
+    is_test: bool,
+    is_implement_or_revise: bool,
+) -> Vec<EnvVar> {
     let mut env = vec![
         // FR-27: Core env vars
         env_var("STAGE", &stage.name),
@@ -391,6 +397,19 @@ fn build_agent_env_vars(ctx: &LoopContext, stage: &StageConfig, is_test: bool) -
         }
     }
 
+    // Spec #130: sccache env for implement/revise so rustc invocations hit the
+    // shared compiler cache at /cache/sccache (PVC mount). Claude will pick
+    // RUSTC_WRAPPER up through cargo automatically. SCCACHE_CACHE_SIZE caps
+    // on-disk cache; LRU eviction by sccache itself. SCCACHE_IDLE_TIMEOUT=0
+    // keeps the daemon alive for the duration of the pod (otherwise it exits
+    // after 10 minutes and cold-starts for each new invocation).
+    if is_implement_or_revise {
+        env.push(env_var("RUSTC_WRAPPER", "sccache"));
+        env.push(env_var("SCCACHE_DIR", "/cache/sccache"));
+        env.push(env_var("SCCACHE_CACHE_SIZE", "15G"));
+        env.push(env_var("SCCACHE_IDLE_TIMEOUT", "0"));
+    }
+
     // Credentials are NOT injected as env vars — they go through the sidecar only.
     // This prevents untrusted agent code from reading secrets directly.
 
@@ -422,6 +441,17 @@ fn build_volumes(
             name: "sessions".to_string(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
                 claim_name: sessions_pvc.to_string(),
+                read_only: Some(false),
+            }),
+            ..Default::default()
+        },
+        // Spec #130: Shared sccache compiler cache (RWO PVC, safe for concurrent
+        // agent pods via sccache's internal file locking). Mounted only on
+        // implement/revise stages via build_agent_mounts.
+        Volume {
+            name: "cargo-cache".to_string(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: "nautiloop-cargo-cache".to_string(),
                 read_only: Some(false),
             }),
             ..Default::default()
@@ -506,6 +536,17 @@ fn build_agent_mounts(
             read_only: Some(is_review_or_audit), // FR-6: Read-only for REVIEW/AUDIT
             ..Default::default()
         },
+        // Mount the whole bare-repo PVC (no subPath) at /bare-repo so the
+        // worktree's .git pointer file can resolve `gitdir: /bare-repo/worktrees/<name>`.
+        // Without this, /work/.git points at a path outside the subPath mount, git
+        // fails, and the agent runs `git init` creating a disjoint repo whose commits
+        // never reach the bare repo's branch ref.
+        VolumeMount {
+            name: "worktree".to_string(),
+            mount_path: "/bare-repo".to_string(),
+            read_only: Some(is_review_or_audit),
+            ..Default::default()
+        },
         VolumeMount {
             name: "sessions".to_string(),
             mount_path: "/sessions".to_string(),
@@ -533,11 +574,25 @@ fn build_agent_mounts(
         },
     ];
 
-    // FR-25b: Mount Claude session directory for IMPLEMENT/REVISE stages
+    // Spec #130: Mount shared sccache cache for IMPLEMENT/REVISE only.
+    // Review/audit are read-only stages that don't invoke cargo. Test is
+    // per-service and handled by the repo's nemo.toml test commands.
     if is_implement_or_revise {
         mounts.push(VolumeMount {
+            name: "cargo-cache".to_string(),
+            mount_path: "/cache/sccache".to_string(),
+            ..Default::default()
+        });
+    }
+
+    // FR-25b: Mount Claude credentials for IMPLEMENT/REVISE/REVIEW/AUDIT stages.
+    // Mounted at /secrets/claude-creds/ (read-only), NOT at ~/.claude directly.
+    // The entrypoint copies .credentials.json to the writable ~/.claude/ so that
+    // Claude Code can create session-env/ and other runtime directories there.
+    if is_implement_or_revise || is_review_or_audit {
+        mounts.push(VolumeMount {
             name: "claude-session".to_string(),
-            mount_path: "/home/agent/.claude".to_string(),
+            mount_path: "/secrets/claude-creds".to_string(),
             read_only: Some(true),
             ..Default::default()
         });
@@ -1042,7 +1097,7 @@ mod tests {
 
     #[test]
     fn test_build_job_implement_has_claude_session() {
-        // FR-25b: Claude session mounted for implement stage
+        // FR-25b: Claude credentials mounted at /secrets/claude-creds for implement stage
         let ctx = test_ctx();
         let stage = test_stage(); // implement
         let cfg = test_cfg();
@@ -1051,23 +1106,22 @@ mod tests {
         let mounts = agent.volume_mounts.as_ref().unwrap();
         let claude_mount = mounts
             .iter()
-            .find(|m| m.mount_path == "/home/agent/.claude");
+            .find(|m| m.mount_path == "/secrets/claude-creds");
         assert!(
             claude_mount.is_some(),
-            "Claude session should be mounted for implement"
+            "Claude credentials should be mounted at /secrets/claude-creds for implement"
         );
         assert_eq!(claude_mount.unwrap().read_only, Some(true));
-        // No /secrets or model-credentials in agent
+        // ~/.claude is NOT mounted directly (entrypoint copies from /secrets/claude-creds)
         assert!(
-            !mounts
-                .iter()
-                .any(|m| m.mount_path.contains("/secrets") || m.mount_path.contains("credential"))
+            !mounts.iter().any(|m| m.mount_path == "/home/agent/.claude"),
+            "~/.claude should not be directly mounted; credentials are copied by entrypoint"
         );
     }
 
     #[test]
-    fn test_build_job_review_no_claude_session() {
-        // Claude session NOT mounted for review stage
+    fn test_build_job_review_has_claude_session() {
+        // Claude credentials are mounted at /secrets/claude-creds for review stage
         let ctx = test_ctx();
         let stage = StageConfig {
             name: "review".to_string(),
@@ -1078,7 +1132,7 @@ mod tests {
         let job = build_job(&ctx, &stage, &cfg);
         let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let mounts = agent.volume_mounts.as_ref().unwrap();
-        assert!(mounts.iter().all(|m| m.mount_path != "/home/agent/.claude"));
+        assert!(mounts.iter().any(|m| m.mount_path == "/secrets/claude-creds"));
     }
 
     #[test]
@@ -1118,13 +1172,14 @@ mod tests {
                 .any(|m| m.mount_path == "/secrets/ssh-key")
         );
 
-        // Agent does NOT have /secrets/ mounts (FR-26)
+        // Agent does NOT have model-credentials or ssh-key mounts (FR-26).
+        // /secrets/claude-creds is allowed (read-only Claude credentials for the agent).
         let pod_spec = job.spec.unwrap().template.spec.unwrap();
         let agent_mounts = pod_spec.containers[0].volume_mounts.as_ref().unwrap();
         assert!(
             !agent_mounts
                 .iter()
-                .any(|m| m.mount_path.starts_with("/secrets"))
+                .any(|m| m.mount_path == "/secrets/model-credentials" || m.mount_path == "/secrets/ssh-key")
         );
     }
 
@@ -1226,7 +1281,7 @@ mod tests {
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let volumes = job.spec.unwrap().template.spec.unwrap().volumes.unwrap();
-        // worktree, sessions, output, shared, tmpdir, home, model-credentials, ssh-key, ssh-known-hosts, claude-session (implement stage)
-        assert_eq!(volumes.len(), 10);
+        // worktree, sessions, cargo-cache, output, shared, tmpdir, home, model-credentials, ssh-key, ssh-known-hosts, claude-session (implement stage)
+        assert_eq!(volumes.len(), 11);
     }
 }

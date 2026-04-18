@@ -45,10 +45,14 @@ Your final output MUST be valid JSON matching this schema exactly:
 ```
 
 Field definitions:
-- `clean` (bool): true if spec is ready for implementation, false otherwise
+- `clean` (bool): true ONLY IF there are zero issues at severity `critical`, `high`, or `medium`. Low-severity suggestions (polish, optional rewordings) do NOT block clean — list them anyway so they're visible, but set `clean: true`. If ANY issue is at severity `medium` or higher, `clean` MUST be `false`. Do not set `clean: true` while simultaneously listing medium+ issues — that is self-contradictory.
 - `confidence` (float): 0.0-1.0, your confidence in the audit
-- `issues` (array): list of spec issues found
-  - `severity`: one of "critical", "high", "medium", "low"
+- `issues` (array): list of ALL spec issues found, regardless of severity
+  - `severity`: one of
+    - `critical` — spec cannot be implemented as written (missing information makes it impossible)
+    - `high` — spec contradicts itself, or a functional requirement is ambiguous in a way that would produce a wrong implementation
+    - `medium` — missing acceptance criterion, missing edge-case handling, or a requirement that could be interpreted two different ways
+    - `low` — polish, wording suggestion, or optional rewording that does NOT affect implementation correctness (does NOT block clean)
   - `category` (optional): one of "completeness", "clarity", "correctness", "consistency"
   - `file`: spec file path
   - `line` (optional): line number in spec
