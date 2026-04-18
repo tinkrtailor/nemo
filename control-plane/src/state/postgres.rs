@@ -787,6 +787,103 @@ impl StateStore for PgStateStore {
         Ok(())
     }
 
+    async fn create_judge_decision(
+        &self,
+        record: &crate::types::JudgeDecisionRecord,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO judge_decisions (
+                id, loop_id, round, phase, trigger, input_json, decision,
+                confidence, reasoning, hint, duration_ms, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "#,
+        )
+        .bind(record.id)
+        .bind(record.loop_id)
+        .bind(record.round)
+        .bind(&record.phase)
+        .bind(&record.trigger)
+        .bind(&record.input_json)
+        .bind(&record.decision)
+        .bind(record.confidence)
+        .bind(&record.reasoning)
+        .bind(&record.hint)
+        .bind(record.duration_ms)
+        .bind(record.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_judge_decisions(
+        &self,
+        loop_id: Uuid,
+    ) -> Result<Vec<crate::types::JudgeDecisionRecord>> {
+        let rows = sqlx::query(
+            "SELECT * FROM judge_decisions WHERE loop_id = $1 ORDER BY round ASC, created_at ASC",
+        )
+        .bind(loop_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| crate::types::JudgeDecisionRecord {
+                id: row.get("id"),
+                loop_id: row.get("loop_id"),
+                round: row.get("round"),
+                phase: row.get("phase"),
+                trigger: row.get("trigger"),
+                input_json: row.get("input_json"),
+                decision: row.get("decision"),
+                confidence: row.get("confidence"),
+                reasoning: row.get("reasoning"),
+                hint: row.get("hint"),
+                duration_ms: row.get("duration_ms"),
+                created_at: row.get("created_at"),
+                loop_final_state: row.get("loop_final_state"),
+                loop_terminated_at: row.get("loop_terminated_at"),
+            })
+            .collect())
+    }
+
+    async fn count_judge_decisions(&self, loop_id: Uuid) -> Result<u32> {
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM judge_decisions WHERE loop_id = $1")
+                .bind(loop_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(row.0 as u32)
+    }
+
+    async fn count_exit_clean_decisions(&self, loop_id: Uuid) -> Result<u32> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM judge_decisions WHERE loop_id = $1 AND decision = 'exit_clean'",
+        )
+        .bind(loop_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 as u32)
+    }
+
+    async fn backfill_judge_decisions(
+        &self,
+        loop_id: Uuid,
+        final_state: &str,
+        terminated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE judge_decisions SET loop_final_state = $2, loop_terminated_at = $3 WHERE loop_id = $1",
+        )
+        .bind(loop_id)
+        .bind(final_state)
+        .bind(terminated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn cleanup_pod_snapshots(&self, max_age_hours: u32) -> Result<u64> {
         let result = sqlx::query(
             "DELETE FROM pod_snapshots WHERE created_at < NOW() - make_interval(hours => $1::int)",

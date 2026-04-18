@@ -36,6 +36,9 @@ pub struct NautiloopConfig {
     /// Observability configuration from `[observability]` in nemo.toml.
     #[serde(default)]
     pub observability: ObservabilityConfig,
+    /// Orchestrator judge configuration from `[orchestrator]` in nemo.toml.
+    #[serde(default)]
+    pub orchestrator: OrchestratorConfig,
     /// Cache configuration from `[cache]` section in nemo.toml (repo-level only).
     /// `None` = absent from nemo.toml → sccache defaults injected at resolution time.
     /// `Some` with empty env → no cache env vars. Uses `Option` (not `#[serde(default)]`)
@@ -181,6 +184,39 @@ impl Default for HardenMergeConfig {
             auto_merge_spec_pr: true,
         }
     }
+}
+
+/// Orchestrator judge configuration from `[orchestrator]` in nemo.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestratorConfig {
+    /// Model to use for the orchestrator judge (default: claude-haiku-4-5).
+    #[serde(default = "default_judge_model")]
+    pub judge_model: String,
+    /// Enable the orchestrator judge (default: true). When false, the driver
+    /// falls back to the pure heuristic behavior (byte-identical to pre-spec).
+    #[serde(default = "default_true")]
+    pub judge_enabled: bool,
+    /// Maximum number of judge calls per loop before short-circuiting to
+    /// heuristic fallback (NFR-1 cost ceiling). Default: 10.
+    #[serde(default = "default_max_judge_calls")]
+    pub max_judge_calls: u32,
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            judge_model: default_judge_model(),
+            judge_enabled: true,
+            max_judge_calls: default_max_judge_calls(),
+        }
+    }
+}
+
+fn default_judge_model() -> String {
+    "claude-haiku-4-5".to_string()
+}
+fn default_max_judge_calls() -> u32 {
+    10
 }
 
 /// Observability configuration from `[observability]` in nemo.toml.

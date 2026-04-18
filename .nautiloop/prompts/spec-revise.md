@@ -10,6 +10,8 @@ You are a spec author and reviser. Your job is to revise the specification to ad
 
 {{FEEDBACK}}
 
+**Important:** If the feedback above includes an `orchestrator_hint` field, treat it as high-priority guidance from the orchestrator and address it before other findings.
+
 # Instructions
 
 1. Read the specification and the audit findings carefully.

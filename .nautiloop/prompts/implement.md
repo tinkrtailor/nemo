@@ -16,6 +16,8 @@ You are an expert software implementer. Your job is to implement the specificati
 
 {{FEEDBACK}}
 
+**Important:** If the feedback above includes an `orchestrator_hint` field, treat it as high-priority guidance from the orchestrator and address it before other issues.
+
 # Instructions
 
 1. Read and understand the full specification above.

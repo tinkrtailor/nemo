@@ -907,12 +907,32 @@ pub async fn inspect(
         }
     }
 
+    // Load judge decisions for this loop (FR-6c)
+    let judge_decisions = state
+        .store
+        .get_judge_decisions(record.id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| crate::types::api::JudgeDecisionSummary {
+            round: d.round,
+            phase: d.phase,
+            trigger: d.trigger,
+            decision: d.decision,
+            confidence: d.confidence,
+            reasoning: d.reasoning,
+            hint: d.hint,
+            duration_ms: d.duration_ms,
+        })
+        .collect();
+
     Ok(Json(InspectResponse {
         loop_id: record.id,
         engineer: record.engineer,
         branch: record.branch,
         state: record.state,
         rounds: round_summaries.into_values().collect(),
+        judge_decisions,
     }))
 }
 
@@ -1594,7 +1614,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_with_local_spec_content() {
-        let (app, store, git) = test_app();
+        let (app, store, _git) = test_app();
         // Do NOT add the file to mock git — it only exists locally.
 
         // The mock's create_branch always returns this SHA as the initial branch tip.

@@ -36,6 +36,7 @@ futures.workspace = true
 toml.workspace = true
 async-trait.workspace = true
 async-stream.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

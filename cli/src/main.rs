@@ -219,7 +219,7 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum CacheAction {
     /// Show active cache configuration and disk usage
     Show {

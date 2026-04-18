@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::error::Result;
 use crate::types::{
-    EngineerCredential, LogEvent, LoopRecord, LoopState, MergeEvent, RoundRecord, SubState,
+    EngineerCredential, JudgeDecisionRecord, LogEvent, LoopRecord, LoopState, MergeEvent,
+    RoundRecord, SubState,
 };
 
 /// Trait abstracting all database operations for the control plane.
@@ -109,6 +110,27 @@ pub trait StateStore: Send + Sync + 'static {
     /// Returns the number of deleted rows.
     async fn cleanup_pod_snapshots(&self, max_age_hours: u32) -> Result<u64>;
 
+    /// Create a judge decision record.
+    async fn create_judge_decision(&self, record: &JudgeDecisionRecord) -> Result<()>;
+
+    /// Get all judge decisions for a loop (ordered by round).
+    async fn get_judge_decisions(&self, loop_id: Uuid) -> Result<Vec<JudgeDecisionRecord>>;
+
+    /// Count judge decisions for a loop (for cost-ceiling enforcement).
+    async fn count_judge_decisions(&self, loop_id: Uuid) -> Result<u32>;
+
+    /// Count `exit_clean` decisions for a loop (FR-7a one-shot guard).
+    async fn count_exit_clean_decisions(&self, loop_id: Uuid) -> Result<u32>;
+
+    /// Back-fill loop_final_state and loop_terminated_at on all judge_decisions
+    /// rows for a loop when it reaches a terminal state (FR-5b).
+    async fn backfill_judge_decisions(
+        &self,
+        loop_id: Uuid,
+        final_state: &str,
+        terminated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()>;
+
     /// Health check: verify the store is reachable (e.g., SELECT 1).
     async fn health_check(&self) -> Result<()>;
 }
@@ -165,6 +187,7 @@ pub mod memory {
         logs: Arc<RwLock<Vec<LogEvent>>>,
         credentials: Arc<RwLock<Vec<EngineerCredential>>>,
         merge_events: Arc<RwLock<Vec<MergeEvent>>>,
+        judge_decisions: Arc<RwLock<Vec<JudgeDecisionRecord>>>,
     }
 
     impl MemoryStateStore {
@@ -414,6 +437,53 @@ pub mod memory {
         async fn create_merge_event(&self, event: &MergeEvent) -> Result<()> {
             let mut events = self.merge_events.write().await;
             events.push(event.clone());
+            Ok(())
+        }
+
+        async fn create_judge_decision(&self, record: &JudgeDecisionRecord) -> Result<()> {
+            let mut decisions = self.judge_decisions.write().await;
+            decisions.push(record.clone());
+            Ok(())
+        }
+
+        async fn get_judge_decisions(&self, loop_id: Uuid) -> Result<Vec<JudgeDecisionRecord>> {
+            let decisions = self.judge_decisions.read().await;
+            let mut result: Vec<_> = decisions
+                .iter()
+                .filter(|d| d.loop_id == loop_id)
+                .cloned()
+                .collect();
+            result.sort_by_key(|d| d.round);
+            Ok(result)
+        }
+
+        async fn count_judge_decisions(&self, loop_id: Uuid) -> Result<u32> {
+            let decisions = self.judge_decisions.read().await;
+            Ok(decisions
+                .iter()
+                .filter(|d| d.loop_id == loop_id)
+                .count() as u32)
+        }
+
+        async fn count_exit_clean_decisions(&self, loop_id: Uuid) -> Result<u32> {
+            let decisions = self.judge_decisions.read().await;
+            Ok(decisions
+                .iter()
+                .filter(|d| d.loop_id == loop_id && d.decision == "exit_clean")
+                .count() as u32)
+        }
+
+        async fn backfill_judge_decisions(
+            &self,
+            loop_id: Uuid,
+            final_state: &str,
+            terminated_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<()> {
+            let mut decisions = self.judge_decisions.write().await;
+            for d in decisions.iter_mut().filter(|d| d.loop_id == loop_id) {
+                d.loop_final_state = Some(final_state.to_string());
+                d.loop_terminated_at = Some(terminated_at);
+            }
             Ok(())
         }
 

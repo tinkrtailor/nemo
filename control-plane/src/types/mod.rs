@@ -342,6 +342,25 @@ pub struct MergeEvent {
     pub created_at: DateTime<Utc>,
 }
 
+/// A judge decision record for the orchestrator judge (Stage 1 self-learning).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JudgeDecisionRecord {
+    pub id: Uuid,
+    pub loop_id: Uuid,
+    pub round: i32,
+    pub phase: String,
+    pub trigger: String,
+    pub input_json: serde_json::Value,
+    pub decision: String,
+    pub confidence: Option<f32>,
+    pub reasoning: Option<String>,
+    pub hint: Option<String>,
+    pub duration_ms: i32,
+    pub created_at: DateTime<Utc>,
+    pub loop_final_state: Option<String>,
+    pub loop_terminated_at: Option<DateTime<Utc>>,
+}
+
 /// Generate a branch name per FR-5: agent/{engineer}/{spec-slug}-{short-hash}
 ///
 /// Slugifies engineer and spec path to produce valid git refs.

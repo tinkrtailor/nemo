@@ -20,6 +20,7 @@ pub async fn run(client: &NemoClient, path: &str) -> Result<()> {
     // Pass branch as query param (not path segment) because branch names contain slashes
     let resp = fetch(client, &branch).await?;
 
+    // FR-6c: structured JSON output; formatted human-readable rendering is a future enhancement.
     println!("{}", serde_json::to_string_pretty(&resp)?);
     Ok(())
 }

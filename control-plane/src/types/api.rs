@@ -155,6 +155,22 @@ pub struct InspectResponse {
     pub branch: String,
     pub state: LoopState,
     pub rounds: Vec<RoundSummary>,
+    /// Judge decisions made during this loop (FR-6c).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub judge_decisions: Vec<JudgeDecisionSummary>,
+}
+
+/// Summary of a judge decision for the inspect response (FR-6c).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JudgeDecisionSummary {
+    pub round: i32,
+    pub phase: String,
+    pub trigger: String,
+    pub decision: String,
+    pub confidence: Option<f32>,
+    pub reasoning: Option<String>,
+    pub hint: Option<String>,
+    pub duration_ms: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

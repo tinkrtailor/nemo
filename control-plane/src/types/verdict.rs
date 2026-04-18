@@ -181,6 +181,10 @@ pub struct FeedbackFile {
     pub issues: Option<Vec<Issue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failures: Option<Vec<TestFailure>>,
+    /// Orchestrator judge hint injected when the judge decides `continue`.
+    /// Agents are instructed to weight orchestrator hints heavily.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orchestrator_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,6 +280,7 @@ mod tests {
                 suggestion: "Add early return".to_string(),
             }]),
             failures: None,
+            orchestrator_hint: None,
         };
         let json = serde_json::to_string(&feedback).unwrap();
         assert!(json.contains("\"source\":\"review\""));
@@ -295,6 +300,7 @@ mod tests {
                 stdout: "panicked".to_string(),
                 stderr: "error".to_string(),
             }]),
+            orchestrator_hint: None,
         };
         let json = serde_json::to_string(&feedback).unwrap();
         assert!(json.contains("\"source\":\"test\""));
