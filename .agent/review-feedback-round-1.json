@@ -1,0 +1,78 @@
+{
+  "round": 1,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/api/cache.rs",
+      "line": 100,
+      "description": "Glob `/cache/*` is not expanded without a shell. `pods.exec(pod_name, vec![\"du\", \"-sh\", \"/cache/*\"], &ap)` passes arguments directly to the kernel (no shell), so `*` is treated as a literal filename, not a glob. `du` will fail with \"No such file or directory\" for `/cache/*`.",
+      "suggestion": "Wrap in a shell: `vec![\"sh\", \"-c\", \"du -sh /cache/*\"]`."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/api/cache.rs",
+      "line": 139,
+      "description": "The `total` field is set to `format!(\"{} subdirectories\", subdirectories.len())` — a count, not a size. FR-6a specifies `Disk usage: 2.1 GiB / 50 GiB (4%)` with an actual size total. The CLI also formats this as a plain label, so the user never sees actual total usage.",
+      "suggestion": "Compute total from `du -sh /cache` (without `*`) or sum the subdirectory sizes. Store an actual size string like `\"2.1G\"` in `total`."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "cli/src/commands/cache.rs",
+      "line": 15,
+      "description": "FR-6a output format requires a `Cache volume: nautiloop-cache (50 GiB)` line showing PVC name and capacity, and a `Disk usage: X / Y (Z%)` summary line. The CLI output omits both — it has no volume info at all. The `CacheResponse` struct also lacks `volume_name` and `volume_capacity` fields, so the API endpoint doesn't return this data.",
+      "suggestion": "Add `volume_name: String` and `volume_capacity_gi: Option<u64>` to `CacheResponse`. In the API handler, read PVC `status.capacity` via the kube API. In the CLI, print the volume line and compute the usage percentage."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/cache.rs",
+      "line": 112,
+      "description": "The stdout reader uses a single `read()` call which may return a partial result if the kernel hasn't flushed all output yet. For `du` across many subdirectories the output could exceed one read's worth, truncating the result silently.",
+      "suggestion": "Use `read_to_end()` or loop on `read()` until EOF within the timeout, e.g. `tokio::io::AsyncReadExt::read_to_string`."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/cache.rs",
+      "line": 94,
+      "description": "AttachParams uses `.stderr(true)` but stderr is never consumed. On kube-rs, unconsumed streams can cause the exec to hang or leak. Additionally, stderr output (e.g. `du: cannot access...`) is silently lost, losing diagnostic info.",
+      "suggestion": "Either set `.stderr(false)` if you don't need it, or consume stderr to avoid potential hangs and log any errors."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/cache.rs",
+      "line": 23,
+      "description": "When `disk_usage` is `Some` but `subdirectories` is empty, the code skips the disk usage section entirely — no output at all. The user sees no indication of disk usage status, which is confusing. An empty PVC should still show something like `Disk usage: 0 B`.",
+      "suggestion": "Print a message like `Disk usage: empty (no cache subdirectories)` when subdirectories is empty."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/config/mod.rs",
+      "line": 41,
+      "description": "The spec's FR-3b implementation note explicitly says `cache` field on `NautiloopConfig` must use `Option<CacheConfig>` (not `#[serde(default)]`). The code uses `#[serde(default)]` on the `Option<CacheConfig>` field. While functionally equivalent for Option types (missing = None in both cases), it contradicts the explicit spec instruction. More importantly, the doc comment on the field itself says 'Uses `Option` (not `#[serde(default)]`)' which is self-contradictory with the actual attribute.",
+      "suggestion": "Remove `#[serde(default)]` from the `cache` field. For `Option` fields, serde already deserializes missing keys as `None` by default when the container uses `#[serde(deny_unknown_fields)]` is NOT set — which is the case here. Alternatively, if serde complains, keep the attribute but fix the doc comment."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/api/cache.rs",
+      "line": 58,
+      "description": "`Api::namespaced(client.clone(), namespace)` clones the client unnecessarily. kube::Client is an Arc wrapper and Clone is cheap, but the function already takes a reference — no issue, just noting the clone happens.",
+      "suggestion": "No change needed, just a note."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/cache.rs",
+      "line": 28,
+      "description": "The `for (path, size) in &dirs` iterates over references to references (`&&(String, String)`). Works but slightly awkward.",
+      "suggestion": "Use `for (path, size) in dirs` (consume the vec) since it's not used afterward."
+    }
+  ]
+}
