@@ -371,13 +371,31 @@ pub mod bare {
             }
 
             // `merge-base --is-ancestor A B` exits 0 if A is ancestor of B.
-            match self
+            // Two-sided check: the only true divergence is when neither side
+            // is an ancestor of the other (a force-push reparented history).
+            //
+            // Case 1: expected IS an ancestor of remote tip
+            //   → remote moved forward cleanly since we dispatched; fine.
+            // Case 2: remote tip IS an ancestor of expected
+            //   → we have local commits that haven't been pushed yet
+            //     (e.g., write_file commits during feedback; the local-spec-upload
+            //     flow pushes at start but intra-loop feedback writes don't).
+            //     This is expected and NOT divergence.
+            // Case 3: neither is an ancestor of the other
+            //   → history reparented by a force-push; true divergence.
+            let expected_in_remote = self
                 .run_git(&["merge-base", "--is-ancestor", expected_sha, &tip])
                 .await
-            {
-                Ok(_) => Ok(false), // expected is ancestor of remote tip -> not diverged
-                Err(_) => Ok(true), // not an ancestor -> diverged (force push)
+                .is_ok();
+            if expected_in_remote {
+                return Ok(false);
             }
+            let remote_in_expected = self
+                .run_git(&["merge-base", "--is-ancestor", &tip, expected_sha])
+                .await
+                .is_ok();
+            // Diverged only when neither direction holds.
+            Ok(!remote_in_expected)
         }
 
         async fn write_file(&self, branch: &str, path: &str, content: &str) -> Result<()> {
