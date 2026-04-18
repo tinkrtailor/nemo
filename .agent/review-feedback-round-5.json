@@ -1,0 +1,116 @@
+{
+  "round": 5,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "critical",
+      "category": "correctness",
+      "file": "control-plane/src/api/auth.rs",
+      "description": "FR-4b requires the existing API auth middleware to accept cookies in addition to Bearer headers so dashboard action buttons (Approve, Cancel, Resume, Extend) authenticate transparently. The existing auth middleware only accepts Bearer headers. Dashboard JS calls `/approve/:id`, `/cancel/:id`, `/resume/:id`, `/extend/:id` via same-origin fetch() which sends the HttpOnly cookie but NOT a Bearer header. These calls will all return 401 Unauthorized, making all action buttons non-functional.",
+      "suggestion": "Extend `auth_middleware` in `control-plane/src/api/auth.rs` to also check for the `nautiloop_api_key` cookie, matching the logic in `dashboard/auth.rs`. Use the same fallback: check cookie first, then Bearer header."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/templates.rs",
+      "description": "Kill switch button in `nav_bar` has `data-active-ids=\"\"` (always empty). The JS `cancel-all` action reads `btn.dataset.activeIds.split(',')` which yields `[\"\"]` — it tries to cancel a loop with empty-string ID. The active loop IDs are never populated into this attribute, neither in the initial server render nor in the JS poll update cycle.",
+      "suggestion": "Either (a) populate `data-active-ids` server-side from the active loops in the dashboard state, AND update it in the JS `updateGrid` function after each poll, or (b) have the JS cancel-all handler first fetch `/dashboard/state?team=true` to get active loop IDs, then fan out cancels."
+    },
+    {
+      "severity": "high",
+      "category": "security",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 69,
+      "description": "Cookie value injection in `login_submit`: `form.engineer_name` is interpolated directly into the Set-Cookie header without encoding. An engineer name containing `;` (e.g., `alice; Domain=evil.com`) would corrupt the cookie attributes. Characters like `\\r\\n` could attempt header injection (mitigated by axum's header value parsing, but semicolons are not rejected).",
+      "suggestion": "URL-encode or percent-encode the engineer_name before embedding in the cookie value. Alternatively, validate that engineer_name contains only alphanumeric characters, hyphens, and underscores (matching typical engineer handle patterns)."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 481,
+      "description": "In `build_feed_response`, the cursor filter uses `l.updated_at >= c` inside a let-chain with `if let Some(c) = cursor && l.updated_at >= c { return false; }`. This means ALL loops with `updated_at >= cursor` are excluded, but the cursor-based pagination expects to exclude only loops at or after the cursor. However, when the cursor is the `updated_at` of the last item, any loop with the exact same timestamp as the cursor is excluded — losing events that share a timestamp with the pagination boundary.",
+      "suggestion": "Use cursor-based pagination with a secondary sort key (e.g., loop ID) or use `>` instead of `>=` with a unique cursor value. Alternatively, the cursor should be the `updated_at` of the last returned item, and the next page should use `<` (strictly before) to avoid the boundary issue."
+    },
+    {
+      "severity": "medium",
+      "category": "performance",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 500,
+      "description": "In `build_specs_response`, rounds are fetched for each loop TWICE: once in the `runs` slice (first N loops) to compute cost, and again in the aggregates loop over ALL matching loops. For a spec with 50 runs, this means 100 round queries instead of 50.",
+      "suggestion": "Compute tokens/cost for all matching loops in a single pass, then split into the `runs` response slice and aggregate accumulators."
+    },
+    {
+      "severity": "medium",
+      "category": "performance",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 325,
+      "description": "N+1 query pattern: `build_dashboard_state` calls `store.get_rounds(record.id)` for every loop in the filtered set. With 50 active loops polled every 5 seconds, this is 50 DB queries every 5s just for the card grid poll. The fleet_summary additionally queries rounds for ALL loops in the 7-day window (potentially hundreds) on every cache miss.",
+      "suggestion": "Consider adding a batch `get_rounds_for_loops(ids: &[Uuid])` method to StateStore, or pre-compute token aggregates in the database (e.g., materialized columns on the loops table updated on round completion)."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 300,
+      "description": "In `compute_loop_totals`, the cost logic `if has_pricing || pricing.is_some()` returns `Some(0.0)` when pricing config exists but no rounds have token data. This means a loop with zero rounds (just created) would show `$0.00` instead of `—` when pricing is configured. The spec says cost should be computed from token counts; zero tokens should arguably show `$0.00` not `—`, but the inconsistency with how `None` is used elsewhere (no token data → `—`) could confuse users.",
+      "suggestion": "Only return `Some(total_cost)` when `has_pricing` is true (at least one round had computable cost). Return `None` when pricing is configured but no rounds have token data yet."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/templates.rs",
+      "line": 164,
+      "description": "The initial server-rendered card grid only renders non-terminal loops (`!is_terminal_state(&loop_item.state)`), but the filter chips show counts for ALL states including terminal. On first page load before JS takes over, a user sees chip counts for Converged/Failed loops they can't see in the grid. The spec default is `Active + Mine` so active-only is correct, but the 'All' chip count includes loops that aren't rendered.",
+      "suggestion": "This is acceptable since JS polling starts immediately and replaces the grid content. However, for the no-JS fallback (FR-7c graceful degradation), the grid should show loops matching the default filter or the counts should only reflect what's visible."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/templates.rs",
+      "line": 370,
+      "description": "In `render_round_detail` for 'implement' stage, the code tries to deserialize as `ImplResultData` first, then falls through. For 'revise' stage, it tries `ImplResultData` first (which will fail) before trying `ReviseResultData`. This is harmless (both attempts are in the same match arm) but wasteful — the `ImplResultData` attempt on a 'revise' output will always fail.",
+      "suggestion": "Split the match arm: `\"implement\" => { try ImplResultData }`, `\"revise\" => { try ReviseResultData }` instead of combining them."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 108,
+      "description": "In `fmtTokens`, the function computes `(loop.total_tokens||{}).input + (loop.total_tokens||{}).output`. If `total_tokens` is null/undefined, both `.input` and `.output` are undefined, and `undefined + undefined` is `NaN`. `fmtTokens(NaN)` passes through to `String(NaN)` which displays 'NaN' on the card.",
+      "suggestion": "Guard against null total_tokens: `const t = loop.total_tokens || {}; fmtTokens((t.input || 0) + (t.output || 0))`"
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 63,
+      "description": "In `login_submit`, when `NAUTILOOP_BIND_ADDR` is empty (not set), `is_localhost` is true and the Secure flag is omitted. The spec says 'Production deployments (non-localhost bind) MUST always set Secure.' But many deployments may not set `NAUTILOOP_BIND_ADDR` at all while binding to a non-localhost address (e.g., 0.0.0.0). The default should be secure (Secure flag ON), with explicit localhost detection as the exception.",
+      "suggestion": "Remove `|| bind_addr.is_empty()` from the localhost check. When NAUTILOOP_BIND_ADDR is unset, default to secure (include the Secure flag). Only omit Secure when the bind address is explicitly 127.0.0.1, [::1], or localhost."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 86,
+      "description": "The `engineer_color` hash function in JS uses `charCodeAt` (UTF-16 code units) while the Rust equivalent in `templates.rs` uses `name.bytes()` (UTF-8 bytes). For non-ASCII engineer names (e.g., names with accented characters), the server-rendered engineer badge color will differ from the client-rendered color after a JS poll update, causing a visual flicker.",
+      "suggestion": "Use the same hashing basis in both implementations. Either convert to bytes in JS or use char codes in Rust."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 305,
+      "description": "The `constant_time_eq` function is duplicated in both `auth.rs` and `handlers.rs`. This is a maintenance risk — a bug fix in one copy might not propagate to the other.",
+      "suggestion": "Extract `constant_time_eq` into a shared utility module (e.g., `crate::util`) and reference it from both `auth.rs` and `handlers.rs`."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/templates.rs",
+      "line": 424,
+      "description": "Feed page filter chips are server-rendered with 'All events' always having the `active` class, regardless of the current `?filter=` query parameter. The active chip doesn't reflect the actual filter state on page load.",
+      "suggestion": "Pass the current filter value to `render_feed` and conditionally apply the `active` class to the matching chip."
+    }
+  ]
+}
