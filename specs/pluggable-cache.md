@@ -128,6 +128,32 @@ variable "cargo_cache_volume_size" {
 
 **FR-5c.** The #148 `cache_backends` map variable is removed (it never landed in a production deployment since #148's spec was not yet implemented). No migration needed.
 
+### FR-6: `nemo cache show` CLI command
+
+**FR-6a.** New command `nemo cache show` prints the active cache configuration as seen by the control plane plus observed usage:
+
+```
+Cache volume: nautiloop-cache (50 GiB)
+Disk usage:   2.1 GiB / 50 GiB (4%)
+
+Active env vars (from nemo.toml [cache.env] on origin/main):
+  RUSTC_WRAPPER        = sccache
+  SCCACHE_DIR          = /cache/sccache
+  SCCACHE_CACHE_SIZE   = 15G
+  SCCACHE_IDLE_TIMEOUT = 0
+
+Observed in recent loops (last 24h, last round per loop):
+  sccache hit rate:  82%  (1,247 hits / 1,523 compile requests)
+  /cache/sccache:    1.8 GiB
+  /cache/npm:         340 MiB   (no STATS emitted — passthrough only)
+```
+
+**FR-6b.** Backed by a new `GET /dashboard/cache` endpoint (read-only, no new state) that returns the resolved `[cache.env]` + `du -sh /cache/*` from the latest agent pod (via the existing pod-exec introspection, or just a one-shot `kubectl exec` on the most recent terminal pod) + the last N `SCCACHE_STATS:` lines parsed from the log_events table.
+
+**FR-6c.** Read-only. Does not modify anything. To change config, engineers still edit `nemo.toml` in the target repo and commit. This is deliberate: cache config is a repo-level decision that should be versioned.
+
+**FR-6d.** Output is plain text by default; `--json` flag emits structured JSON for scripting.
+
 ## Non-Functional Requirements
 
 ### NFR-1: Backward compatibility
@@ -152,6 +178,7 @@ Job_builder does NOT list known backends. It reads `[cache.env]`, iterates, and 
 3. Set `[cache] disabled = true`. Agent pods have no `/cache` mount and no cache env vars. Loops still work; slower cold builds.
 4. Set `RUSTC_WRAPPER = "sccache"` without installing sccache in the image. Cargo fails to spawn sccache, loop fails at implement stage with a clear cargo error in the log. (Demonstrates FR-4a.)
 5. Terraform upgrade from #130: existing `cargo_cache_volume_size = 20` still works, deprecation warning logged once. Apply produces no destructive plan for the PVC (in-place rename, not replacement).
+6. `nemo cache show` prints volume size, disk usage, active env vars from nemo.toml, and hit-rate stats from recent loops. `nemo cache show --json` emits structured output.
 
 ## Out of Scope
 
@@ -160,6 +187,8 @@ Job_builder does NOT list known backends. It reads `[cache.env]`, iterates, and 
 - **Per-engineer, per-repo, per-worktree cache isolation.** One PVC, everyone shares. Same trust model as the existing shared worktree architecture.
 - **Cache size accounting per-tool.** `du -sh /cache/*` is the answer. No nautiloop-managed quota per subdirectory.
 - **Config sugar like `[cache.preset] = "rust"` or `"node"`.** The env-var list is short; a preset just moves the configuration to a different file. Skip until repeat-pattern emerges.
+- **`nemo cache enable <tool>` / `disable <tool>`.** Sugar over editing nemo.toml. Bypasses the git discipline that keeps repo config versioned and reviewable. Skip — engineers edit nemo.toml and commit like any other config.
+- **`nemo cache set-default` for cluster-wide defaults.** Mixes CLI with kubectl/terraform territory. Operators manage cluster defaults via the terraform module's ConfigMap, same as other cluster settings.
 - **Deleting the #148 `[cache]` backend-map architecture from its spec file.** It's a documented design that won't ship; leaving it as a historical record is fine.
 
 ## Files Likely Touched
@@ -170,6 +199,9 @@ Job_builder does NOT list known backends. It reads `[cache.env]`, iterates, and 
 - `terraform/modules/nautiloop/variables.tf` — rename variable, keep deprecated alias, remove #148 `cache_backends` map.
 - `terraform/modules/nautiloop/k8s.tf` — rename PVC.
 - `dev/setup.sh` — update any references.
+- `cli/src/commands/cache.rs` — new `nemo cache show` command (FR-6).
+- `cli/src/main.rs` — wire the subcommand.
+- `control-plane/src/api/dashboard/cache.rs` — new endpoint `GET /dashboard/cache` that returns resolved env + disk usage + recent stats.
 - `docs/cache.md` — new doc: short explanation, full example of common env vars for Rust / Node (npm/pnpm/yarn/bun) / Python (pip/poetry/uv) / Go.
 - Tests per NFR-3.
 
