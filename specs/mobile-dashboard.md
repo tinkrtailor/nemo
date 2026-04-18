@@ -45,7 +45,7 @@ Today's approve / cancel / extend require the CLI. If the operator is AFK and a 
 | `/dashboard/login` | GET/POST | Login form (API key) + set cookie, then redirect |
 | `/dashboard/logout` | POST | Clear auth cookie |
 | `/dashboard/loops/:id` | GET | Loop detail HTML (drawer or full page) |
-| `/dashboard/stream/:id` | GET (SSE or JSON) | Mirrors existing `/logs/:id` behavior: SSE stream for active loops, JSON array (full log dump) for terminal loops |
+| `/dashboard/stream/:id` | GET (SSE or JSON) | Dashboard-specific log proxy: returns the last 200 lines as SSE for active loops (auto-scrolling tail), or a JSON array (full log dump) for terminal loops. Unlike `/logs/:id` which streams the complete log, this endpoint is optimized for the dashboard's live log pane (FR-4a) with a line cap and HTML-safe escaping. |
 | `/dashboard/static/*` | GET | Embedded CSS + JS assets |
 
 **FR-1b.** Static assets (CSS, single JS file, optional icon/font) are **embedded in the binary** via `include_str!`/`include_bytes!`. No filesystem dependencies at runtime. Total asset budget: <50 KB gzipped.
@@ -60,7 +60,9 @@ Today's approve / cancel / extend require the CLI. If the operator is AFK and a 
 
 The dashboard auth middleware accepts **either** a valid cookie **or** a valid Bearer header on any `/dashboard/*` route (except `/login` and `/static/*`). Dashboard JS does **not** read the cookie value; instead, same-origin `fetch()` calls automatically include the HttpOnly cookie. The middleware checks the cookie first, falls back to Bearer. This preserves XSS protection (JS never touches the key) while keeping programmatic access viable.
 
-**FR-2b.** `/dashboard/login` renders a form with two inputs: `api_key` (password field) and `engineer_name` (text field, used for the `Mine` filter — see FR-3e). On POST, validates the API key via constant-time comparison against the `NAUTILOOP_API_KEY` environment variable (same logic as the existing auth middleware — no internal HTTP call). If valid, sets two cookies: `nautiloop_api_key=<key>` (HttpOnly, Secure, SameSite=Strict, 7-day expiry) and `nautiloop_engineer=<name>` (HttpOnly, Secure, SameSite=Strict, 7-day expiry), then redirects to `/dashboard`. If invalid, re-renders the form with an error message. The `engineer_name` field is required; it must match one of the engineer names present in loop data (or be accepted as free-text if no loops exist yet).
+**Local development note:** The `Secure` flag prevents cookies from being sent over plain HTTP. When the bind address is `127.0.0.1` or `localhost`, the `Secure` flag should be conditionally omitted so that authentication works without TLS. Production deployments (non-localhost bind) MUST always set `Secure`.
+
+**FR-2b.** `/dashboard/login` renders a form with two inputs: `api_key` (password field) and `engineer_name` (text field, used for the `Mine` filter — see FR-3e). On POST, validates the API key via constant-time comparison against the `NAUTILOOP_API_KEY` environment variable (same logic as the existing auth middleware — no internal HTTP call). If valid, sets two cookies: `nautiloop_api_key=<key>` (HttpOnly, Secure, SameSite=Strict, 7-day expiry) and `nautiloop_engineer=<name>` (HttpOnly, Secure, SameSite=Strict, 7-day expiry), then redirects to `/dashboard`. If invalid, re-renders the form with an error message. The `engineer_name` field is required; it is always accepted as free-text (self-declared, not validated against loop data). This is consistent with the CLI, which accepts any engineer name on `nemo start`. The value is used solely for the `Mine` filter (FR-3e).
 
 **FR-2c.** Unauthenticated requests to any `/dashboard/*` route (other than `/login` and `/static/*`) redirect to `/dashboard/login`.
 
@@ -74,12 +76,22 @@ The dashboard auth middleware accepts **either** a valid cookie **or** a valid B
 - **Desktop (> 1024px)**: three or four columns, adjusts on viewport.
 
 **FR-3b.** Each card shows for one loop:
-- **Header row**: state badge (colored pill: IMPLEMENTING/REVIEWING/CONVERGED/FAILED/etc.), loop_id short form (first 8 chars), elapsed time since `created_at` (`3m 22s` / `1h 14m`).
+- **Header row**: state badge (colored pill — see badge color map below), loop_id short form (first 8 chars), elapsed time since `created_at` (`3m 22s` / `1h 14m`).
+
+**Badge color map** — all 13 `LoopState` variants must have an assigned color:
+
+| Color | States |
+|---|---|
+| Green | `Converged`, `Hardened`, `Shipped` |
+| Red | `Failed`, `Cancelled` |
+| Amber | `AwaitingApproval`, `Paused`, `AwaitingReauth` |
+| Blue | `Implementing`, `Testing`, `Reviewing`, `Hardening` |
+| Gray | `Pending` |
 - **Title**: spec filename (`health-json-body.md`).
 - **Sub-title**: branch name (muted).
 - **Progress line**: `round N/M · stage: <current_stage>` for active loops; `round N` for terminal.
 - **Metrics row**: tokens (`52K`), cost (`$0.18` — requires `[pricing]` config, see FR-15; displays `—` if pricing is not configured), last-round verdict (one of `clean`/`not clean`/`—`).
-- **Pulse indicator**: small animated dot if state is RUNNING, solid otherwise.
+- **Pulse indicator**: small animated dot if `sub_state` is `Running` (i.e., the loop is in an active stage with a dispatched job currently executing), solid dot for all other states.
 
 **FR-3c.** Clicking/tapping a card navigates (not modal — actual route change) to `/dashboard/loops/:id`.
 
@@ -106,9 +118,9 @@ Chips are independent: selecting `Active` + `alice` shows Alice's active loops. 
   - `Resume` if state in {PAUSED, AWAITING_REAUTH, transient FAILED}
   - `Extend +10` if state == FAILED with failed_from_state
   - `Open PR` if spec_pr_url is set (opens in new tab)
-- **Rounds table** (mirrors FR-9 of the helm TUI phase 2 spec): one row per round, columns for stages/verdict/issues/confidence/tokens/cost/duration. Tapping a row expands full verdict details inline.
+- **Rounds table**: one row per round. Columns: round number, stage (Implement/Test/Review/Revise/Harden), verdict (`clean`/`not clean`/`—`), issues count, confidence score, tokens (input + output), cost (or `—`), duration. Tapping a row expands full verdict details inline.
 - **Live log pane**: last 200 lines, auto-scrolls. SSE stream via `/dashboard/stream/:id` for active loops; static dump for terminal loops.
-- **Token/cost breakdown**: per-stage, per-round (bar chart optional; data table mandatory). Token data is extracted from the JSONB `output` column of each round's row: each stage type (`ReviewResultData`, `ImplResultData`, `HardenResultData`) embeds a `token_usage` struct with `input_tokens` and `output_tokens`. The aggregation logic must handle each stage type's struct shape and gracefully display `—` when a stage's output lacks `token_usage`. Cost is computed from token counts using the `[pricing]` config (see FR-15); if pricing is not configured, only raw token counts are shown.
+- **Token/cost breakdown**: per-stage, per-round (bar chart optional; data table mandatory). Token data is extracted from the JSONB `output` column of each round's row. The five stage output types that may contain token data are: `ImplResultData`, `TestResultData`, `ReviewResultData`, `ReviseResultData`, and `AuditVerdict`. Each embeds a `token_usage: TokenUsage` struct with fields `input: u64` and `output: u64` (matching the `TokenUsage` struct in `control-plane/src/types/verdict.rs`). The aggregation logic must handle all five stage types and gracefully display `—` when a stage's output lacks `token_usage`. Cost is computed from token counts using the `[pricing]` config (see FR-15); if pricing is not configured, only raw token counts are shown.
 
 **FR-4b.** The action buttons call the existing API endpoints (`POST /approve/:id`, `DELETE /cancel/:id`, etc.) via same-origin `fetch()`. The HttpOnly auth cookie is sent automatically by the browser; no Bearer header construction is needed (see FR-2a). The existing API auth middleware is extended to accept the cookie in addition to Bearer headers, so these requests authenticate transparently. Responses update the card in-place.
 
@@ -145,7 +157,129 @@ Chips are independent: selecting `Active` + `alice` shows Alice's active loops. 
 
 **FR-8a.** Reuses existing endpoints: `/status`, `/inspect?branch=<>`, `/logs/:id`, `/pod-introspect/:id`, `/approve/:id`, `/cancel/:id`, `/resume/:id`, `/extend/:id`.
 
-**FR-8b.** One new JSON endpoint: `GET /dashboard/state` returns a single roll-up object combining **all active loops and recently-terminal loops** (terminal within the last 24 hours), plus aggregates (total tokens, total cost, counts per state). Accepts an optional `?include_terminal=all` query parameter to include all terminal loops regardless of age. This ensures that the card grid's filter chips (FR-3e: `Converged`, `Failed`) have data to display after a poll refresh. Lets the card grid refresh in one request instead of N+1 (one `/status` + N `/inspect`). Polled every 5s.
+**FR-8b.** One new JSON endpoint: `GET /dashboard/state` returns a single roll-up object combining **all active loops and recently-terminal loops** (terminal within the last 24 hours), plus aggregates (total tokens, total cost, counts per state). Accepts optional query parameters: `?include_terminal=all` to include all terminal loops regardless of age, `?team=true` to include all engineers' loops (default: scoped to the requesting engineer via cookie). This ensures that the card grid's filter chips (FR-3e: `Converged`, `Failed`) have data to display after a poll refresh. Lets the card grid refresh in one request instead of N+1 (one `/status` + N `/inspect`). Polled every 5s.
+
+**Response schema for `/dashboard/state`:**
+
+```json
+{
+  "loops": [
+    {
+      "id": "uuid",
+      "spec_path": "specs/foo.md",
+      "branch": "agent/alice/foo-a1b2c3d4",
+      "engineer": "alice",
+      "state": "Implementing",
+      "sub_state": "Running",
+      "round": 3,
+      "max_rounds": 15,
+      "current_stage": "implement",
+      "created_at": "2026-04-18T12:00:00Z",
+      "updated_at": "2026-04-18T12:05:00Z",
+      "spec_pr_url": "https://github.com/org/repo/pull/147",
+      "failed_from_state": null,
+      "last_verdict": "not clean",
+      "total_tokens": { "input": 42000, "output": 10000 },
+      "total_cost": 0.18
+    }
+  ],
+  "aggregates": {
+    "counts_by_state": {
+      "Implementing": 2,
+      "Converged": 5,
+      "Failed": 1
+    },
+    "total_tokens": { "input": 500000, "output": 120000 },
+    "total_cost": 12.40,
+    "total_loops": 8
+  },
+  "fleet_summary": {
+    "window_days": 7,
+    "total_loops": 47,
+    "total_cost": 12.40,
+    "converge_rate": 0.82,
+    "avg_rounds": 4.2,
+    "top_spender": { "engineer": "alice", "cost": 4.80 },
+    "trends": {
+      "converge_rate_delta": 0.08,
+      "avg_rounds_delta": -0.3
+    }
+  },
+  "engineers": ["alice", "bob", "dev"]
+}
+```
+
+Fields with `total_cost` or per-loop `total_cost` are `null` when `[pricing]` is not configured. `trends` is `null` when insufficient historical data exists (first week).
+
+**Response schema for `/dashboard/feed`:**
+
+```json
+{
+  "events": [
+    {
+      "id": "uuid",
+      "spec_path": "specs/foo.md",
+      "engineer": "alice",
+      "state": "Converged",
+      "rounds": 2,
+      "total_tokens": { "input": 42000, "output": 10000 },
+      "total_cost": 0.18,
+      "spec_pr_url": "https://github.com/org/repo/pull/147",
+      "updated_at": "2026-04-18T15:47:00Z",
+      "extensions": 0
+    }
+  ],
+  "has_more": true
+}
+```
+
+**Response schema for `/dashboard/specs`:**
+
+```json
+{
+  "spec_path": "specs/foo.md",
+  "runs": [
+    {
+      "id": "uuid",
+      "engineer": "alice",
+      "state": "Converged",
+      "rounds": 2,
+      "total_cost": 0.18,
+      "branch": "agent/alice/foo-a1b2c3d4",
+      "created_at": "2026-04-18T15:47:00Z"
+    }
+  ],
+  "aggregates": {
+    "total_runs": 3,
+    "converge_rate": 0.67,
+    "avg_rounds": 10.7,
+    "total_cost": 4.52
+  }
+}
+```
+
+**Response schema for `/dashboard/stats`:**
+
+```json
+{
+  "window": "7d",
+  "headline": {
+    "total_loops": 47,
+    "total_cost": 12.40,
+    "converge_rate": 0.82,
+    "avg_rounds": 4.2
+  },
+  "per_engineer": [
+    { "engineer": "alice", "loops": 20, "cost": 4.80, "converge_rate": 0.90 }
+  ],
+  "per_spec": [
+    { "spec_path": "specs/foo.md", "runs": 5, "cost": 2.10, "converge_rate": 0.80, "avg_rounds": 3.5 }
+  ],
+  "time_series": [
+    { "date": "2026-04-18", "started": 8, "converged": 5, "failed": 1 }
+  ]
+}
+```
 
 **FR-8c.** `/dashboard/state` is auth-protected same as other `/dashboard/*` routes.
 
@@ -211,7 +345,7 @@ Each row is tappable → navigates to the loop detail page.
 
 ### FR-13: Per-spec history
 
-**FR-13a.** In the loop detail view, the spec filename is a link. Tapping navigates to `/dashboard/specs/<path>` which shows all past loops that ran on that spec:
+**FR-13a.** In the loop detail view, the spec filename is a link. Tapping navigates to `/dashboard/specs?path=<url-encoded-path>` (query-parameter form, consistent with the backing endpoint in FR-13b, avoids multi-segment path routing issues in axum). Shows all past loops that ran on that spec:
 
 | Date | Engineer | Result | Rounds | Cost | Branch |
 |---|---|---|---|---|---|
@@ -310,7 +444,7 @@ A reviewer can verify by:
 11. `⋯` menu → `Cancel all active loops` (FR-10). Modal confirms; on proceed, N cancel requests fire and complete within 10s. Hidden in `Mine` mode.
 12. For any loop where the judge fired (post-#128), rounds table shows ⚖ icon on those rows (FR-11). Tapping opens reasoning drawer.
 13. `/dashboard/feed` (FR-12) shows chronological terminal events with engineer + outcome + cost. Filter chips work. `Load more` paginates.
-14. Tap a spec filename on any loop detail page → `/dashboard/specs/<path>` (FR-13). Shows all past runs + aggregate metrics.
+14. Tap a spec filename on any loop detail page → `/dashboard/specs?path=<spec>` (FR-13). Shows all past runs + aggregate metrics.
 15. `/dashboard/stats?window=30d` (FR-14) renders per-engineer + per-spec tables + daily time-series bars. Subsequent loads within 60s hit the cache (observe response time).
 16. With `[pricing]` configured in `nemo.toml`, cost figures appear as dollar amounts throughout the dashboard. Without `[pricing]`, all cost fields show `—` and token counts are still displayed (FR-15).
 
@@ -341,7 +475,7 @@ A reviewer can verify by:
 - `control-plane/src/api/dashboard/templates/` — new dir, Askama `.html` templates (or `maud!{}` macros in `.rs` files).
 - `control-plane/assets/dashboard.css` — embedded via `include_str!`.
 - `control-plane/assets/dashboard.js` — embedded via `include_str!`.
-- `control-plane/Cargo.toml` — add `askama = "0.12"` (or `maud`) and `askama_axum` for response helpers.
+- `control-plane/Cargo.toml` — add `askama` (use latest compatible 0.12.x or newer) and `askama_axum` for response helpers. Or `maud` if that was chosen per FR-1c.
 - Tests per NFR-6.
 - `docs/dashboard-setup.md` — new doc covering the security model (Tailscale as default, explicit warning about public exposure).
 
