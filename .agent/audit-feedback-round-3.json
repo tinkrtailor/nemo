@@ -1,0 +1,62 @@
+{
+  "round": 3,
+  "source": "audit",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/mobile-dashboard.md",
+      "description": "FR-1a route table is incomplete. It lists only /dashboard, /dashboard/login, /dashboard/logout, /dashboard/loops/:id, /dashboard/stream/:id, and /dashboard/static/*. Missing: /dashboard/state (FR-8b), /dashboard/feed (FR-12c), /dashboard/specs (FR-13b), /dashboard/stats (FR-14b). An implementor reading FR-1a as the canonical route list will miss four endpoints.",
+      "suggestion": "Add all dashboard routes to the FR-1a table: GET /dashboard/state, GET /dashboard/feed, GET /dashboard/specs, GET /dashboard/stats. Mark the FR-8/12/13/14 sections as defining the response schemas for those routes."
+    },
+    {
+      "severity": "medium",
+      "category": "clarity",
+      "file": "specs/mobile-dashboard.md",
+      "description": "FR-15b defines compute_cost(token_usage, model, pricing) but rounds don't store which model was used — only the loop-level model_implementor and model_reviewer fields exist. The spec doesn't define the stage→model mapping needed for per-round cost computation. For example: should implement and revise stages use model_implementor, review and audit stages use model_reviewer? What about test stages? What if the loop-level overrides are None and the model comes from config defaults?",
+      "suggestion": "Add an explicit mapping: implement/revise/test → model_implementor (or config default), review/audit → model_reviewer (or config default). State the fallback chain: loop field → NautiloopConfig.models default → return None."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "specs/mobile-dashboard.md",
+      "description": "FR-6b says 'same palette as helm themes (dark/light/high-contrast)' but the helm TUI only defines a single hardcoded dark color palette (cli/src/commands/helm.rs). No light or high-contrast theme exists. An implementor cannot reference non-existent themes.",
+      "suggestion": "Change FR-6b to: 'CSS uses custom properties for all colors, inspired by the helm TUI dark palette (BG #0f0f0e, SURFACE #1a1918, TEAL #1b6b5a, AMBER #e8a838, GREEN #2d7a4f, RED #c4392d, BLUE #3b7bc0). Light mode inverts luminance. High-contrast is a follow-up.' Or simply state the dashboard defines its own light/dark palette."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "specs/mobile-dashboard.md",
+      "description": "Template variable corruption: '{{SPEC}}' appears in multiple places where '&' was intended. Affected: FR-15b (compute_cost signature has {{SPEC}}TokenUsage, {{SPEC}}str, {{SPEC}}PricingConfig), FR-12c (cursor=<timestamp>{{SPEC}}limit=50), FR-13b (path=<>{{SPEC}}limit=50). An implementor may misread these parameter signatures.",
+      "suggestion": "Replace all '{{SPEC}}' occurrences with '&' — these are Rust reference parameters and URL query separators respectively."
+    },
+    {
+      "severity": "medium",
+      "category": "consistency",
+      "file": "specs/mobile-dashboard.md",
+      "description": "FR-1b says static assets must be '<50 KB gzipped'. NFR-2 says total page weight (HTML + CSS + JS + assets) must be '<100 KB uncompressed, <30 KB gzipped'. If the entire page including HTML must be <30 KB gzipped, then the assets-only budget of <50 KB gzipped is vacuous (assets are a subset of page weight and the superset has a tighter constraint). One of these numbers is wrong.",
+      "suggestion": "Reconcile: either FR-1b should say '<25 KB gzipped' (leaving headroom for HTML within the 30 KB NFR-2 budget), or NFR-2 should say '<50 KB gzipped' to match FR-1b. Pick one source of truth."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/mobile-dashboard.md",
+      "description": "FR-4a rounds table includes a 'duration' column, but the existing /inspect endpoint returns RoundSummary with only stage JSONB outputs — it doesn't include started_at, completed_at, or duration_secs from the rounds table. The dashboard detail view will need to either extend /inspect or query rounds directly.",
+      "suggestion": "Note in FR-4a that the /dashboard/loops/:id handler queries rounds directly (not via /inspect) to access duration_secs, or add a note that /inspect should be extended."
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/mobile-dashboard.md",
+      "description": "FR-3d says card grid polls /status every 5s, but FR-8b introduces /dashboard/state specifically to avoid N+1 requests. FR-3d should reference /dashboard/state, not /status.",
+      "suggestion": "Change FR-3d to: 'Card grid auto-refreshes every 5s via a small vanilla-JS poll that fetches /dashboard/state and re-renders card fields in place.'"
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/mobile-dashboard.md",
+      "description": "FR-2a says the Secure flag is conditionally omitted for localhost. The spec doesn't define how the server determines it's in localhost mode — is it from the bind address in config, from an env var, or from the request Host header?",
+      "suggestion": "Clarify: 'When the configured bind address (from NautiloopConfig or NAUTILOOP_BIND_ADDR) is 127.0.0.1 or [::1], omit the Secure flag.'"
+    }
+  ]
+}
