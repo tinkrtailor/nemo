@@ -240,6 +240,7 @@ mod tests {
             ship: None,
             harden: None,
             timeouts: None,
+            cache: None,
         }
     }
 

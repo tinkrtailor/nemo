@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod cache;
 pub mod handlers;
 pub mod introspect;
 pub mod sse;
@@ -80,6 +81,7 @@ fn build_routes(_state: AppState) -> Router<AppState> {
         .route("/inspect", get(handlers::inspect))
         .route("/credentials", get(handlers::list_credentials))
         .route("/credentials", post(handlers::upsert_credentials))
+        .route("/cache", get(cache::cache_show))
 }
 
 #[cfg(test)]

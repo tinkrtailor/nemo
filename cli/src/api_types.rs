@@ -76,6 +76,23 @@ pub struct WorktreeInfo {
     pub head_sha: Option<String>,
 }
 
+/// GET /cache response.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CacheResponse {
+    pub disabled: bool,
+    pub env: std::collections::HashMap<String, String>,
+    pub volume_name: String,
+    #[serde(default)]
+    pub volume_capacity_gi: Option<u64>,
+    pub disk_usage: Option<CacheDiskUsage>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CacheDiskUsage {
+    pub subdirectories: std::collections::HashMap<String, String>,
+    pub total: String,
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct CredentialsResponse {
     pub engineer: String,

@@ -246,6 +246,32 @@ pub struct WorktreeInfo {
     pub head_sha: Option<String>,
 }
 
+/// GET /cache response body (FR-6b).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheResponse {
+    /// Whether cache is disabled.
+    pub disabled: bool,
+    /// Resolved cache env vars (from config, or sccache defaults if absent).
+    pub env: std::collections::HashMap<String, String>,
+    /// PVC name (e.g. "nautiloop-cache").
+    pub volume_name: String,
+    /// PVC provisioned capacity in GiB, read from PVC status.capacity.
+    /// None if kube client is unavailable or PVC not found.
+    pub volume_capacity_gi: Option<u64>,
+    /// Disk usage summary per subdirectory, if available.
+    /// None when no running pod is available for inspection.
+    pub disk_usage: Option<CacheDiskUsage>,
+}
+
+/// Disk usage information from a running agent pod.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheDiskUsage {
+    /// Per-subdirectory sizes (e.g. "/cache/sccache" -> "1.8G").
+    pub subdirectories: std::collections::HashMap<String, String>,
+    /// Total cache directory size (e.g. "2.1G").
+    pub total: String,
+}
+
 /// Generic error response body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {

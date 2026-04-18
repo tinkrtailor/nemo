@@ -80,13 +80,15 @@ spec:
     requests:
       storage: 2Gi
 ---
-# Shared sccache compiler cache across all agent pods (spec #130).
+# Shared cache volume for all caching tools (sccache, npm, pip, etc.).
+# Mounted at /cache on implement/revise pods. Env vars in [cache.env]
+# tell each tool where its subdirectory lives.
 # RWO works for dev k3d since all agent pods land on the single node.
-# Prod multi-node needs RWX or sccache's S3 backend.
+# Prod multi-node needs RWX or tool-native remote backends (e.g. sccache S3).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: nautiloop-cargo-cache
+  name: nautiloop-cache
   namespace: nautiloop-jobs
 spec:
   accessModes: ["ReadWriteOnce"]

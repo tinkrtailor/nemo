@@ -131,10 +131,17 @@ variable "postgres_volume_size" {
   default     = 20
 }
 
-variable "cargo_cache_volume_size" {
-  description = "Size of the shared sccache compiler cache volume in Gi (spec #130). Larger than sccache max-size for headroom."
+variable "cache_volume_size" {
+  description = "Size of the shared /cache PVC in Gi. Used by any caching tool the operator configures via [cache.env] in nemo.toml."
   type        = number
   default     = 50
+}
+
+# Deprecated — keep one release for migration.
+variable "cargo_cache_volume_size" {
+  type        = number
+  default     = null
+  description = "DEPRECATED: use cache_volume_size. Will be removed in the next release."
 }
 
 variable "kubeconfig_output_path" {

@@ -100,19 +100,21 @@ spec:
     requests:
       storage: 10Gi
 ---
-# Spec #130: Shared sccache compiler cache across all agent pods.
+# Shared cache volume for all caching tools (sccache, npm, pip, etc.).
+# Mounted at /cache on implement/revise pods. Env vars in [cache.env]
+# in nemo.toml tell each tool where its subdirectory lives.
 # Single-node self-hosted clusters use RWO; multi-node needs RWX
-# (or sccache's S3 backend, not yet implemented).
+# (or tool-native remote backends like sccache S3).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: nautiloop-cargo-cache
+  name: nautiloop-cache
   namespace: nautiloop-jobs
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
-      storage: ${var.cargo_cache_volume_size}Gi
+      storage: ${coalesce(var.cargo_cache_volume_size, var.cache_volume_size)}Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

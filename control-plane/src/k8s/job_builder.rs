@@ -11,6 +11,8 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use std::collections::BTreeMap;
 
+use crate::config::CacheConfig;
+
 /// Configuration for building a K8s Job, encapsulating all cluster-level settings.
 #[derive(Debug, Clone)]
 pub struct JobBuildConfig {
@@ -26,6 +28,9 @@ pub struct JobBuildConfig {
     pub ssh_known_hosts_configmap: String,
     /// Skip the init-iptables container (for local dev with k3d).
     pub skip_iptables: bool,
+    /// Resolved cache configuration. Controls the /cache PVC mount and
+    /// cache-related env vars on implement/revise pods.
+    pub cache: CacheConfig,
 }
 
 /// Build a K8s Job spec for a given stage.
@@ -71,7 +76,7 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
     let is_test = matches!(parsed_stage, Some(Stage::Test));
 
     // FR-27: Environment variables on the agent container
-    let agent_env = build_agent_env_vars(ctx, stage, is_test, is_implement_or_revise);
+    let agent_env = build_agent_env_vars(ctx, stage, is_test, is_implement_or_revise, &cfg.cache);
 
     // Build volumes (FR-25, FR-26, FR-30)
     let mut volumes = build_volumes(
@@ -79,6 +84,7 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
         &cfg.sessions_pvc,
         &ctx.engineer,
         &cfg.ssh_known_hosts_configmap,
+        &cfg.cache,
     );
 
     // FR-25b: Claude session volume for IMPLEMENT/REVISE/REVIEW/AUDIT stages
@@ -106,6 +112,7 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
         is_review_or_audit,
         is_implement_or_revise,
         &ctx.worktree_path,
+        &cfg.cache,
     );
 
     // Build sidecar container volume mounts
@@ -281,6 +288,7 @@ fn build_agent_env_vars(
     stage: &StageConfig,
     is_test: bool,
     is_implement_or_revise: bool,
+    cache: &CacheConfig,
 ) -> Vec<EnvVar> {
     let mut env = vec![
         // FR-27: Core env vars
@@ -397,17 +405,16 @@ fn build_agent_env_vars(
         }
     }
 
-    // Spec #130: sccache env for implement/revise so rustc invocations hit the
-    // shared compiler cache at /cache/sccache (PVC mount). Claude will pick
-    // RUSTC_WRAPPER up through cargo automatically. SCCACHE_CACHE_SIZE caps
-    // on-disk cache; LRU eviction by sccache itself. SCCACHE_IDLE_TIMEOUT=0
-    // keeps the daemon alive for the duration of the pod (otherwise it exits
-    // after 10 minutes and cold-starts for each new invocation).
-    if is_implement_or_revise {
-        env.push(env_var("RUSTC_WRAPPER", "sccache"));
-        env.push(env_var("SCCACHE_DIR", "/cache/sccache"));
-        env.push(env_var("SCCACHE_CACHE_SIZE", "15G"));
-        env.push(env_var("SCCACHE_IDLE_TIMEOUT", "0"));
+    // Cache env vars for implement/revise stages. Driven by [cache.env] in
+    // nemo.toml (FR-3a). When [cache] is absent, sccache defaults are injected
+    // by NautiloopConfig::resolved_cache_config(). When disabled=true, no env
+    // vars are set. Sorted by key for deterministic pod specs.
+    if is_implement_or_revise && !cache.disabled {
+        let mut keys: Vec<&String> = cache.env.keys().collect();
+        keys.sort();
+        for key in keys {
+            env.push(env_var(key, &cache.env[key]));
+        }
     }
 
     // Credentials are NOT injected as env vars — they go through the sidecar only.
@@ -422,11 +429,12 @@ fn build_volumes(
     sessions_pvc: &str,
     engineer: &str,
     ssh_known_hosts_configmap: &str,
+    cache: &CacheConfig,
 ) -> Vec<Volume> {
     // Normalize engineer name for K8s Secret references (lowercase, _ -> -)
     let safe_engineer: String = engineer.to_lowercase().replace('_', "-");
     let engineer = &safe_engineer;
-    vec![
+    let mut vols = vec![
         // Worktree volume from bare repo PVC (mounted via subPath per job)
         Volume {
             name: "worktree".to_string(),
@@ -445,17 +453,22 @@ fn build_volumes(
             }),
             ..Default::default()
         },
-        // Spec #130: Shared sccache compiler cache (RWO PVC, safe for concurrent
-        // agent pods via sccache's internal file locking). Mounted only on
-        // implement/revise stages via build_agent_mounts.
-        Volume {
-            name: "cargo-cache".to_string(),
+    ];
+
+    // FR-1a: Shared cache PVC (nautiloop-cache). Only included when cache is
+    // not disabled. Mounted at /cache on implement/revise stages via build_agent_mounts.
+    if !cache.disabled {
+        vols.push(Volume {
+            name: "cache".to_string(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                claim_name: "nautiloop-cargo-cache".to_string(),
+                claim_name: "nautiloop-cache".to_string(),
                 read_only: Some(false),
             }),
             ..Default::default()
-        },
+        });
+    }
+
+    vols.extend([
         // Output volume (emptyDir)
         Volume {
             name: "output".to_string(),
@@ -517,7 +530,9 @@ fn build_volumes(
             }),
             ..Default::default()
         },
-    ]
+    ]);
+
+    vols
 }
 
 /// Build agent container volume mounts (FR-25, FR-25b).
@@ -527,6 +542,7 @@ fn build_agent_mounts(
     is_review_or_audit: bool,
     is_implement_or_revise: bool,
     worktree_path: &str,
+    cache: &CacheConfig,
 ) -> Vec<VolumeMount> {
     let mut mounts = vec![
         VolumeMount {
@@ -574,13 +590,13 @@ fn build_agent_mounts(
         },
     ];
 
-    // Spec #130: Mount shared sccache cache for IMPLEMENT/REVISE only.
-    // Review/audit are read-only stages that don't invoke cargo. Test is
-    // per-service and handled by the repo's nemo.toml test commands.
-    if is_implement_or_revise {
+    // FR-2a: Mount shared cache PVC at /cache for IMPLEMENT/REVISE only.
+    // Review/audit are read-only stages. Test is per-service.
+    // FR-3d: Skip mount when cache is disabled.
+    if is_implement_or_revise && !cache.disabled {
         mounts.push(VolumeMount {
-            name: "cargo-cache".to_string(),
-            mount_path: "/cache/sccache".to_string(),
+            name: "cache".to_string(),
+            mount_path: "/cache".to_string(),
             ..Default::default()
         });
     }
@@ -769,6 +785,7 @@ mod tests {
             git_repo_url: "git@github.com:test-org/test-repo.git".to_string(),
             ssh_known_hosts_configmap: "nautiloop-ssh-known-hosts".to_string(),
             skip_iptables: false,
+            cache: CacheConfig::sccache_defaults(),
         }
     }
 
@@ -1281,7 +1298,248 @@ mod tests {
         let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let volumes = job.spec.unwrap().template.spec.unwrap().volumes.unwrap();
-        // worktree, sessions, cargo-cache, output, shared, tmpdir, home, model-credentials, ssh-key, ssh-known-hosts, claude-session (implement stage)
+        // worktree, sessions, cache, output, shared, tmpdir, home, model-credentials, ssh-key, ssh-known-hosts, claude-session (implement stage)
         assert_eq!(volumes.len(), 11);
+    }
+
+    // =========================================================================
+    // Cache config tests (NFR-3)
+    // =========================================================================
+
+    #[test]
+    fn test_cache_env_vars_on_implement() {
+        // NFR-3: [cache.env] with N entries produces N EnvVar entries on implement pods.
+        let ctx = test_ctx();
+        let stage = test_stage(); // implement
+        let mut cfg = test_cfg();
+        let mut env = std::collections::HashMap::new();
+        env.insert("FOO".to_string(), "/cache/foo".to_string());
+        env.insert("BAR".to_string(), "/cache/bar".to_string());
+        env.insert("BAZ".to_string(), "/cache/baz".to_string());
+        cfg.cache = CacheConfig {
+            disabled: false,
+            env,
+        };
+
+        let job = build_job(&ctx, &stage, &cfg);
+        let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let env_vars = agent.env.as_ref().unwrap();
+
+        let find_env = |name: &str| -> Option<String> {
+            env_vars
+                .iter()
+                .find(|e| e.name == name)
+                .and_then(|e| e.value.clone())
+        };
+
+        assert_eq!(find_env("FOO").unwrap(), "/cache/foo");
+        assert_eq!(find_env("BAR").unwrap(), "/cache/bar");
+        assert_eq!(find_env("BAZ").unwrap(), "/cache/baz");
+        // Sccache defaults should NOT be present (explicit config overrides)
+        assert!(find_env("RUSTC_WRAPPER").is_none());
+    }
+
+    #[test]
+    fn test_cache_env_vars_not_on_review() {
+        // NFR-3: Zero cache env vars on review/audit/test stages.
+        let ctx = test_ctx();
+        let stage = StageConfig {
+            name: "review".to_string(),
+            timeout: Duration::from_secs(900),
+            ..Default::default()
+        };
+        let mut cfg = test_cfg();
+        let mut env = std::collections::HashMap::new();
+        env.insert("FOO".to_string(), "/cache/foo".to_string());
+        cfg.cache = CacheConfig {
+            disabled: false,
+            env,
+        };
+
+        let job = build_job(&ctx, &stage, &cfg);
+        let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let env_vars = agent.env.as_ref().unwrap();
+
+        // FOO should not be in env for review stage
+        assert!(
+            !env_vars.iter().any(|e| e.name == "FOO"),
+            "cache env vars must not appear on review stage"
+        );
+    }
+
+    #[test]
+    fn test_cache_env_vars_on_revise() {
+        // NFR-3: Cache env vars appear on revise stage (same as implement).
+        let ctx = test_ctx();
+        let stage = StageConfig {
+            name: "revise".to_string(),
+            timeout: Duration::from_secs(900),
+            ..Default::default()
+        };
+        let mut cfg = test_cfg();
+        let mut env = std::collections::HashMap::new();
+        env.insert("FOO".to_string(), "/cache/foo".to_string());
+        cfg.cache = CacheConfig {
+            disabled: false,
+            env,
+        };
+
+        let job = build_job(&ctx, &stage, &cfg);
+        let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let env_vars = agent.env.as_ref().unwrap();
+
+        let find_env = |name: &str| -> Option<String> {
+            env_vars
+                .iter()
+                .find(|e| e.name == name)
+                .and_then(|e| e.value.clone())
+        };
+
+        assert_eq!(find_env("FOO").unwrap(), "/cache/foo");
+    }
+
+    #[test]
+    fn test_cache_disabled_skips_mount_and_env() {
+        // NFR-3: [cache] disabled = true skips both mount and env vars.
+        let ctx = test_ctx();
+        let stage = test_stage(); // implement
+        let mut cfg = test_cfg();
+        let mut env = std::collections::HashMap::new();
+        env.insert("FOO".to_string(), "/cache/foo".to_string());
+        cfg.cache = CacheConfig {
+            disabled: true,
+            env,
+        };
+
+        let job = build_job(&ctx, &stage, &cfg);
+        let pod_spec = job.spec.unwrap().template.spec.unwrap();
+        let agent = &pod_spec.containers[0];
+        let env_vars = agent.env.as_ref().unwrap();
+        let mounts = agent.volume_mounts.as_ref().unwrap();
+        let volumes = pod_spec.volumes.as_ref().unwrap();
+
+        // No FOO env var
+        assert!(
+            !env_vars.iter().any(|e| e.name == "FOO"),
+            "cache env vars must not appear when disabled"
+        );
+
+        // No /cache mount
+        assert!(
+            !mounts.iter().any(|m| m.mount_path == "/cache"),
+            "/cache mount must not appear when disabled"
+        );
+
+        // No cache volume
+        assert!(
+            !volumes.iter().any(|v| v.name == "cache"),
+            "cache volume must not appear when disabled"
+        );
+    }
+
+    #[test]
+    fn test_cache_empty_env_produces_no_cache_vars() {
+        // NFR-3: [cache] present with empty env produces zero cache env vars.
+        let ctx = test_ctx();
+        let stage = test_stage(); // implement
+        let mut cfg = test_cfg();
+        cfg.cache = CacheConfig {
+            disabled: false,
+            env: std::collections::HashMap::new(),
+        };
+
+        let job = build_job(&ctx, &stage, &cfg);
+        let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let env_vars = agent.env.as_ref().unwrap();
+
+        // No sccache defaults should be present (explicit empty cache config)
+        assert!(
+            !env_vars.iter().any(|e| e.name == "RUSTC_WRAPPER"),
+            "sccache defaults must not appear when [cache] is explicit with empty env"
+        );
+        assert!(
+            !env_vars.iter().any(|e| e.name == "SCCACHE_DIR"),
+            "sccache defaults must not appear when [cache] is explicit with empty env"
+        );
+
+        // /cache mount should still be present (disabled=false)
+        let mounts = agent.volume_mounts.as_ref().unwrap();
+        assert!(
+            mounts.iter().any(|m| m.mount_path == "/cache"),
+            "/cache mount should be present when disabled=false"
+        );
+    }
+
+    #[test]
+    fn test_sccache_defaults_on_implement() {
+        // NFR-3: Default sccache env vars appear on implement when using defaults.
+        let ctx = test_ctx();
+        let stage = test_stage(); // implement
+        let cfg = test_cfg(); // Uses CacheConfig::sccache_defaults()
+
+        let job = build_job(&ctx, &stage, &cfg);
+        let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let env_vars = agent.env.as_ref().unwrap();
+
+        let find_env = |name: &str| -> Option<String> {
+            env_vars
+                .iter()
+                .find(|e| e.name == name)
+                .and_then(|e| e.value.clone())
+        };
+
+        // Sccache defaults
+        assert_eq!(find_env("RUSTC_WRAPPER").unwrap(), "sccache");
+        assert_eq!(find_env("SCCACHE_DIR").unwrap(), "/cache/sccache");
+        assert_eq!(find_env("SCCACHE_CACHE_SIZE").unwrap(), "15G");
+        assert_eq!(find_env("SCCACHE_IDLE_TIMEOUT").unwrap(), "0");
+    }
+
+    #[test]
+    fn test_cache_mount_path_is_cache() {
+        // FR-2a: Mount at /cache, not /cache/sccache.
+        let ctx = test_ctx();
+        let stage = test_stage(); // implement
+        let cfg = test_cfg();
+
+        let job = build_job(&ctx, &stage, &cfg);
+        let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let mounts = agent.volume_mounts.as_ref().unwrap();
+        let cache_mount = mounts.iter().find(|m| m.name == "cache").unwrap();
+        assert_eq!(cache_mount.mount_path, "/cache");
+    }
+
+    #[test]
+    fn test_cache_volume_name_is_nautiloop_cache() {
+        // FR-1a: PVC named nautiloop-cache.
+        let ctx = test_ctx();
+        let stage = test_stage();
+        let cfg = test_cfg();
+
+        let job = build_job(&ctx, &stage, &cfg);
+        let volumes = job.spec.unwrap().template.spec.unwrap().volumes.unwrap();
+        let cache_vol = volumes.iter().find(|v| v.name == "cache").unwrap();
+        let pvc = cache_vol.persistent_volume_claim.as_ref().unwrap();
+        assert_eq!(pvc.claim_name, "nautiloop-cache");
+    }
+
+    #[test]
+    fn test_cache_not_mounted_on_test_stage() {
+        // FR-2a: Test stages do NOT get the /cache mount.
+        let ctx = test_ctx();
+        let stage = StageConfig {
+            name: "test".to_string(),
+            timeout: Duration::from_secs(1800),
+            ..Default::default()
+        };
+        let cfg = test_cfg();
+
+        let job = build_job(&ctx, &stage, &cfg);
+        let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let mounts = agent.volume_mounts.as_ref().unwrap();
+        assert!(
+            !mounts.iter().any(|m| m.mount_path == "/cache"),
+            "/cache mount must not appear on test stage"
+        );
     }
 }
