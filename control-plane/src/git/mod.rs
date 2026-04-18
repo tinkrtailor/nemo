@@ -196,6 +196,23 @@ pub mod bare {
                 )));
             }
 
+            // If nothing is staged (spec content is identical to what's already in the
+            // branch), skip the commit entirely. This happens when an engineer submits a
+            // spec that already exists on main unchanged — the branch already has the
+            // content, no-op commit would exit non-zero with an empty stderr.
+            let diff_check = Command::new("git")
+                .args(["diff", "--cached", "--quiet"])
+                .current_dir(worktree_dir)
+                .status()
+                .await
+                .map_err(|e| {
+                    crate::error::NautiloopError::Git(format!("git diff --cached spawn failed: {e}"))
+                })?;
+            if diff_check.success() {
+                // Exit 0 from `git diff --cached --quiet` means no staged changes.
+                return Ok(());
+            }
+
             let user_name_arg = format!("user.name={author_name}");
             let user_email_arg = format!("user.email={author_email}");
             let commit = Command::new("git")
