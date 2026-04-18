@@ -1,0 +1,59 @@
+{
+  "round": 4,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 688,
+      "description": "NFR-3 violation: `has_blocking_issues` escalation at max_rounds changes behavior even when judge is disabled. On main, reaching max_rounds with a non-clean verdict ALWAYS transitions to Failed. The new code adds an AwaitingApproval path when only low/medium issues remain, but this runs unconditionally — including when `judge_enabled = false` or when the judge is not configured (self.judge is None). The spec explicitly requires 'judge_enabled = false produces byte-identical behavior to today'. Both the review path (line 1029) and harden path (line 688) are affected.",
+      "suggestion": "Gate the `has_blocking_issues` escalation behind a check that the judge is actually enabled and was invoked. For example: only enter the AwaitingApproval branch when `judge_decision.is_some()` returned a `continue` at max_rounds, or when `self.judge.is_some() && self.config.orchestrator.judge_enabled`. When the judge is off or absent, preserve the original direct-to-Failed behavior."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "description": "FR-3 says 'Agents are instructed in their prompts to weight orchestrator hints heavily', but no implement or revise prompt templates were updated to explicitly reference the `orchestrator_hint` field. The field is included in the FeedbackFile JSON (which agents receive via `{{FEEDBACK}}`), but without explicit prompt instructions, agents may ignore it since it's just an extra JSON field with no explanation. The spec specifically requires agents to be 'instructed' to weight hints.",
+      "suggestion": "Update `.nautiloop/prompts/implement.md` and `.nautiloop/prompts/spec-revise.md` to include an instruction like: 'If the feedback includes an `orchestrator_hint` field, treat it as high-priority guidance from the orchestrator and address it first.'"
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/tests/judge_integration.rs",
+      "description": "The integration test `test_review_continue_dispatches_next_round` verifies that the hint is passed through (judge returns hint 'focus on the null check'), but does not assert the hint is actually present in the feedback file written to git. The test only checks the state transition. Since hint threading is a spec requirement (FR-3), the test should verify the hint reaches the feedback JSON.",
+      "suggestion": "After the tick, read the feedback file from the mock git store (e.g., `.agent/review-feedback-round-3.json`) and assert that `orchestrator_hint` equals 'focus on the null check'."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 290,
+      "description": "Cost ceiling check uses `count_judge_decisions` (counting ALL decisions for the loop) but the decision record is written AFTER the model call succeeds. If the model call fails or times out, no record is written, so the count stays the same. This means failed/timed-out calls don't count against the cost ceiling. A loop that hits 9 timeouts + 1 success + 10 more successes would make 20 model calls total (11 successful) but the ceiling only sees 11 records. The cost ceiling is meant to bound API cost (NFR-1), and failed HTTP requests still incur some cost at the API level.",
+      "suggestion": "Write the decision record (with a synthetic 'error' or 'timeout' decision) even on failure, so failed calls count against the ceiling. Alternatively, use an in-memory counter that increments on every attempt, not just successes."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/tests/judge_integration.rs",
+      "description": "NFR-5 requires a fallback test that asserts 'identical behavior to the feature-flag-off case'. The test `test_fallback_on_judge_error_matches_no_judge_behavior` compares judge-error vs no-judge and asserts both produce Implementing. However, with the NFR-3 violation above (has_blocking_issues at max_rounds), the fallback behavior at max_rounds is NOT identical to judge-off behavior — both paths now include the has_blocking_issues escalation. The test doesn't cover the max_rounds boundary, so this divergence is untested.",
+      "suggestion": "Add a fallback test at max_rounds: create a loop at round=max_rounds with non-clean verdict containing only low-severity issues. Compare judge-error vs no-judge. Currently both would escalate (AwaitingApproval), but per NFR-3, the no-judge path should produce Failed."
+    },
+    {
+      "severity": "low",
+      "category": "performance",
+      "file": "control-plane/src/loop_engine/driver.rs",
+      "line": 1351,
+      "description": "Each judge invocation makes two git read operations: one for spec content and one for the prompt template. With up to 10 judge calls per loop, this is 20 git reads. The prompt template is static within a loop — it could be loaded once and cached.",
+      "suggestion": "Consider caching the prompt template on the OrchestratorJudge struct after first load, or pass it in once from the driver rather than loading it per-invocation."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 376,
+      "description": "The hardcoded fallback prompt in `build_prompt()` includes markdown code fences around the output format (`\\`\\`\\`json ... \\`\\`\\``), which contradicts the instruction 'no markdown fencing' in the prompt itself. The template file `.nautiloop/prompts/judge.md` has the same inconsistency. This could confuse the LLM into wrapping its response in fences, which the parser handles but adds unnecessary fragility.",
+      "suggestion": "Remove the markdown code fences from the output format section of both the hardcoded prompt and the template file, keeping only the raw JSON example."
+    }
+  ]
+}
