@@ -1,252 +1,178 @@
-# Pluggable Compilation Cache
+# Shared Cache Volume
 
 ## Overview
 
-Generalize the sccache PVC (spec #130) into a pluggable cache layer that supports multiple backends — `sccache` (default for Rust), `ccache` (C/C++), language-native caches (npm, pip, maven, gradle), or `none` — configurable per repo in nemo.toml and provisioned end-to-end by the terraform module. Ships sccache-as-default for Rust out of the box; supports a common interface for adding more backends without touching the control plane.
+Replace the per-backend PVC design with **one shared cache PVC** mounted at `/cache` on every implement/revise pod. Any caching tool the operator cares about — sccache, ccache, npm, pnpm, yarn, bun, pip, poetry, turbo, go build cache, maven `.m2`, gradle, whatever — writes into its own subdirectory under `/cache`. The control plane's job is narrow: mount `/cache` and set the env vars that tell each tool where its subdirectory lives.
 
-Goal: operators running nautiloop against Go / Node / Python / Java / mixed repos can turn on the right cache for their codebase with one config line and one `terraform apply`, not a patchset to the control plane.
+One PVC. One mount. One terraform variable. Add a new tool = add one line in nemo.toml that sets its env var. No control-plane changes, no new PVCs, no new ACLs.
+
+This supersedes the earlier pluggable-cache spec (merged as PR #148) which had a per-backend PVC architecture that was over-engineered. The operational surface was wrong: each new tool meant a new PVC, new terraform block, new control-plane enum entry. The right abstraction is a single writable directory and passthrough env-var config.
 
 ## Baseline
 
-Main at PR #147 merge.
+Main at PR #148 merge.
 
-Current state (from #130 implementation):
-- `nautiloop-cargo-cache` PVC (dev: 20Gi, terraform prod: `cargo_cache_volume_size` default 50Gi) mounted at `/cache/sccache` on implement/revise pods
-- sccache binary baked into the agent image behind `INCLUDE_RUST=true` build-arg
-- Env vars `RUSTC_WRAPPER=sccache`, `SCCACHE_DIR=/cache/sccache`, `SCCACHE_CACHE_SIZE=15G`, `SCCACHE_IDLE_TIMEOUT=0` hardcoded for implement/revise stages
-- No other cache backends. No way to disable sccache without editing source.
+Current state (from #130 implemented):
+- Single PVC `nautiloop-cargo-cache` (misnamed — sccache-specific in name but the pattern is general) mounted at `/cache/sccache` on implement/revise.
+- Hardcoded env: `RUSTC_WRAPPER=sccache`, `SCCACHE_DIR=/cache/sccache`, `SCCACHE_CACHE_SIZE=15G`, `SCCACHE_IDLE_TIMEOUT=0`.
+- Terraform variable `cargo_cache_volume_size`.
 
-What's working: cold Rust compile ~25min → warm ~2min (measured on nautiloop's own codebase).
-
-What's not:
-- sccache is hardcoded; a C++ target repo gets the variable overhead with no benefit
-- Node / Python / Java repos get nothing
-- No way to configure cache size, path, or backend per-repo
-- Terraform variable is cargo-specific (`cargo_cache_volume_size`), leaking the abstraction
-- No story for operators who want rustc-wrapper alternatives (`rust-analyzer`, Turbo, Nix-build-cache) — they'd fork the image
+Net effect of this spec: rename the PVC to `nautiloop-cache`, mount at `/cache`, move sccache env into a generic `[cache.env]` table, preserve existing sccache behavior as the default. Replace the #148 terraform `cache_backends` map before it ships.
 
 ## Problem Statement
 
-### Problem 1: Cache layer is mono-backend
+### Problem: one PVC pattern, infinite tool ecosystem
 
-The job builder hard-wires sccache env vars. A Rust repo that uses `rust-analyzer`'s disk cache, or prefers `ccache` for its embedded-C bits, or wants Turbo for a mixed TS+Rust monorepo, has no configuration surface. Changing the backend means editing Rust code in the control plane.
+Every compile/build tool has its own cache directory convention:
 
-### Problem 2: Non-Rust repos get nothing
+- `sccache` → `SCCACHE_DIR`
+- `ccache` → `CCACHE_DIR`
+- `npm` → `NPM_CONFIG_CACHE`
+- `pnpm` → `PNPM_STORE_PATH`
+- `yarn` → `YARN_CACHE_FOLDER`
+- `bun` → `BUN_INSTALL_CACHE_DIR`
+- `pip` → `PIP_CACHE_DIR`
+- `poetry` → `POETRY_CACHE_DIR`
+- `uv` → `UV_CACHE_DIR`
+- `turbo` → `TURBO_CACHE_DIR`
+- `go` → `GOCACHE`, `GOMODCACHE`
+- `gradle` → `GRADLE_USER_HOME`
+- `maven` → `-Dmaven.repo.local=...`
+- `cargo registry` → `CARGO_HOME`
 
-Most interesting value-add: Node (`npm ci`) and Python (`pip install`) are dominated by dependency install, which has no build-cache today. The same PVC pattern that works for sccache would work for `npm` cache at `~/.npm` and `pip` cache at `~/.cache/pip`. But the current architecture has no way to express that.
-
-### Problem 3: Terraform surface leaks implementation
-
-`cargo_cache_volume_size` in `variables.tf` locks the terraform API to one specific backend. An operator adopting nautiloop for a Go codebase sees a "cargo" variable and either disables it (losing the pattern's value) or learns to ignore the name.
-
-### Problem 4: No path to add a backend without a release
-
-Today, supporting a new cache backend = patch control-plane + patch agent image + patch terraform + cut a release. That's appropriate for runtime primitives but wrong for what's effectively configuration. Adding `ccache` support should be a nemo.toml stanza, not a PR.
+These are all "give me a writable directory, I'll manage it." Nautiloop shouldn't encode each one as a special-case backend with its own PVC. It should provide the writable directory and let the operator set the env vars that map each tool to its subpath.
 
 ## Functional Requirements
 
-### FR-1: Cache backends enumerated in nemo.toml
+### FR-1: One shared cache PVC
 
-**FR-1a.** New section `[cache]` in nemo.toml:
+**FR-1a.** Terraform + dev manifests provision a **single** PVC named `nautiloop-cache` in `nautiloop-jobs` namespace. RWO. Default size: 50 GiB (bumped from #130's 20 GiB — covers several tools' cache worth on one volume).
+
+**FR-1b.** Previous PVC name `nautiloop-cargo-cache` is renamed in-place. The terraform variable is renamed `cargo_cache_volume_size` → `cache_volume_size` with a deprecation alias for one release.
+
+### FR-2: Mount at `/cache` on implement + revise
+
+**FR-2a.** `build_agent_mounts` in `control-plane/src/k8s/job_builder.rs` mounts the `nautiloop-cache` PVC at `/cache` on implement/revise stages. Review/audit/test stages do NOT get the mount (unchanged from #130 scoping).
+
+**FR-2b.** Mount is read-write. The agent pod (UID 1000) must be able to write all subdirectories. PVC's storage class must support RWO from that UID; dev k3d local-path already does.
+
+### FR-3: Config-driven env vars
+
+**FR-3a.** New section in nemo.toml:
 
 ```toml
 [cache]
-# Enabled cache backends. Order matters — if multiple backends write to the same
-# mount point, later entries win (but in practice each backend has its own path).
-backends = ["sccache"]
+# If true, skip the /cache mount entirely and set no cache env vars.
+# Useful for debugging or disabling caching for one cluster.
+disabled = false
 
-# Per-backend configuration via [cache.<backend>] subsections:
+[cache.env]
+# Every key here becomes an env var on implement/revise agent pods.
+# Every value is passed through verbatim. Point each tool anywhere under /cache.
+# The control plane does NOT validate tool binary presence or env name shape.
 
-[cache.sccache]
-size = "15G"                  # SCCACHE_CACHE_SIZE
-path = "/cache/sccache"       # where to mount the PVC; sets SCCACHE_DIR
+RUSTC_WRAPPER        = "sccache"
+SCCACHE_DIR          = "/cache/sccache"
+SCCACHE_CACHE_SIZE   = "15G"
+SCCACHE_IDLE_TIMEOUT = "0"
 
-[cache.ccache]
-size = "10G"                  # CCACHE_MAXSIZE
-path = "/cache/ccache"        # CCACHE_DIR
-compiler_check = "content"    # CCACHE_COMPILERCHECK
+NPM_CONFIG_CACHE      = "/cache/npm"
+PNPM_STORE_PATH       = "/cache/pnpm"
+YARN_CACHE_FOLDER     = "/cache/yarn"
+BUN_INSTALL_CACHE_DIR = "/cache/bun"
 
-[cache.npm]
-path = "/cache/npm"           # npm config set cache <path>
+PIP_CACHE_DIR    = "/cache/pip"
+POETRY_CACHE_DIR = "/cache/poetry"
+UV_CACHE_DIR     = "/cache/uv"
 
-[cache.pip]
-path = "/cache/pip"           # PIP_CACHE_DIR
+TURBO_CACHE_DIR = "/cache/turbo"
 
-[cache.custom]
-# Escape hatch: any env + mount combo the operator wants.
-env = { RUST_TURBO_CACHE_DIR = "/cache/turbo" }
-mounts = [{ pvc = "nautiloop-turbo-cache", path = "/cache/turbo" }]
+GOCACHE    = "/cache/go-build"
+GOMODCACHE = "/cache/go-mod"
+
+GRADLE_USER_HOME = "/cache/gradle"
 ```
 
-**FR-1b.** Default `backends = ["sccache"]` if the section is missing (backward-compatible with #130). Empty list = no caching.
+**FR-3b.** Default: when `[cache]` section is absent entirely, the control plane injects the sccache set (`RUSTC_WRAPPER=sccache`, `SCCACHE_DIR=/cache/sccache`, `SCCACHE_CACHE_SIZE=15G`, `SCCACHE_IDLE_TIMEOUT=0`). Byte-identical to #130.
 
-**FR-1c.** Validation at control-plane startup: unknown backend names produce a startup warning but don't fatal the server (forward-compat for future backends shipped in newer agent images).
+**FR-3c.** No validation of env-var names or values. Typos are the operator's problem; a wrong env var just means that tool uses its default (usually `$HOME`-relative) path, missing the cache benefit — which shows up as a slow build, not a crash.
 
-### FR-2: Per-backend mount + env contract
+**FR-3d.** `[cache] disabled = true` skips both the `/cache` mount and ALL cache env vars (including the default sccache ones). Single flag for "run without caching."
 
-**FR-2a.** Each backend declares a fixed contract in the control plane:
+### FR-4: No validation of tool binary presence
 
-| Backend   | Default mount path    | Env vars set                                                              | Image binary required |
-|-----------|------------------------|---------------------------------------------------------------------------|-----------------------|
-| `sccache` | `/cache/sccache`       | `RUSTC_WRAPPER=sccache`, `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, `SCCACHE_IDLE_TIMEOUT=0` | `sccache`             |
-| `ccache`  | `/cache/ccache`        | `CCACHE_DIR`, `CCACHE_MAXSIZE`, `CCACHE_COMPILERCHECK`                    | `ccache`              |
-| `npm`     | `/cache/npm`           | `NPM_CONFIG_CACHE`                                                        | `npm` (via node base) |
-| `pip`     | `/cache/pip`           | `PIP_CACHE_DIR`                                                           | `pip` (via python)    |
-| `custom`  | (per-config)           | (per-config)                                                              | (per-config)          |
+**FR-4a.** The control plane does NOT check whether `sccache` / `ccache` / `pnpm` / etc. are installed in the agent image. If the operator sets `RUSTC_WRAPPER=sccache` and `sccache` isn't in the image, cargo will fail to spawn it — same as any misconfiguration. Loud failure, correct ownership: image contents are the image-builder's responsibility.
 
-**FR-2b.** The job builder reads the merged nemo.toml `[cache]` section and, for implement/revise stages, adds one volume mount + one env-var bundle per enabled backend.
+**FR-4b.** The agent base image ships sccache (behind the existing `INCLUDE_RUST` build-arg). Adding other tools is operator image customization — they extend the base image via their own Dockerfile `FROM`, or request the tool in a new build-arg via a separate PR.
 
-**FR-2c.** Mount paths can be overridden per-backend in the config (`[cache.sccache] path = "/mnt/my-cache"`), but the ENV vars that reference the path are updated accordingly. Operator never has to sync two values.
+### FR-5: Terraform module
 
-**FR-2d.** All cache volumes are backed by **one shared PVC** per enabled backend, ReadWriteOnce, provisioned by terraform (FR-4). No per-loop, per-engineer, or per-worktree splitting.
-
-### FR-3: Agent image: multi-backend binaries behind build-args
-
-**FR-3a.** Each backend's binary installation is gated behind a build-arg in `images/base/Dockerfile`:
-
-```dockerfile
-ARG INCLUDE_SCCACHE=false   # default off; production slim
-ARG INCLUDE_CCACHE=false
-# npm / pip / etc. come with the node / python base layers, no separate toggle
-```
-
-**FR-3b.** Dev `dev/build.sh` enables all reasonable defaults for a dogfood experience (`INCLUDE_SCCACHE=true INCLUDE_CCACHE=true`). Production release workflow stays lean; operators opt in via their own image build if they need ccache etc.
-
-**FR-3c.** A one-liner `nemo cache backends` CLI command lists which backends are available in the currently-deployed agent image (introspected via the image's existing manifest / labels), vs. which backends the nemo.toml has enabled. Surfaces configuration mismatches.
-
-**FR-3d.** At pod start, the agent entrypoint verifies each enabled-in-config backend has a matching binary installed. Missing binary → `NAUTILOOP_ERROR: cache: backend 'ccache' enabled in config but binary not found in image` and the pod exits. Fails loud, fails early.
-
-### FR-4: Terraform module: generic cache PVC provisioning
-
-**FR-4a.** `terraform/modules/nautiloop/variables.tf` replaces `cargo_cache_volume_size` (leaky) with:
+**FR-5a.** `terraform/modules/nautiloop/variables.tf`:
 
 ```hcl
-variable "cache_backends" {
-  description = "Map of cache backend name to volume configuration. Keys: sccache, ccache, npm, pip, custom."
-  type = map(object({
-    enabled = bool
-    size_gi = number
-  }))
-  default = {
-    sccache = { enabled = true,  size_gi = 50 }
-    ccache  = { enabled = false, size_gi = 20 }
-    npm     = { enabled = false, size_gi = 10 }
-    pip     = { enabled = false, size_gi = 10 }
-  }
+variable "cache_volume_size" {
+  description = "Size of the shared /cache PVC in Gi. Used by any caching tool the operator configures via [cache.env] in nemo.toml."
+  type        = number
+  default     = 50
+}
+
+# Deprecated — keep one release for migration.
+variable "cargo_cache_volume_size" {
+  type        = number
+  default     = null
+  description = "DEPRECATED: use cache_volume_size. Will be removed in the next release."
 }
 ```
 
-**FR-4b.** The terraform module generates one PVC per `enabled = true` backend, named `nautiloop-<backend>-cache`, in the `nautiloop-jobs` namespace. RWO, storage class inherited from `var.storage_class`.
+**FR-5b.** `terraform/modules/nautiloop/k8s.tf` provisions exactly one PVC named `nautiloop-cache` with size `coalesce(var.cargo_cache_volume_size, var.cache_volume_size)`.
 
-**FR-4c.** The existing `cargo_cache_volume_size` variable becomes an alias for `cache_backends.sccache.size_gi` for one release cycle, with a deprecation warning. Removed two releases later.
-
-**FR-4d.** The control-plane deployment's configmap includes the resolved `[cache]` section so the running control plane's view matches terraform's.
-
-### FR-5: Job builder: iterate enabled backends
-
-**FR-5a.** `build_volumes` iterates over `ctx.config.cache.backends` and for each backend, adds a volume referencing `nautiloop-<backend>-cache` PVC.
-
-**FR-5b.** `build_agent_mounts` iterates and adds the mount path (backend default OR config override).
-
-**FR-5c.** `build_agent_env_vars` iterates and adds the backend's env-var bundle. Env var NAMES are fixed per backend (see FR-2a table); VALUES are from config.
-
-**FR-5d.** Any backend the control plane doesn't recognize is skipped with a warning log (forward-compat, see FR-1c).
-
-### FR-6: Observability
-
-**FR-6a.** `nemo cache stats` (introduced in #130 FR-4b) gets per-backend output:
-
-```
-sccache   462M / 15G    78% hit rate last 100 invocations
-ccache    disabled
-npm       1.2G / 10G    (pack extractions, no hit-rate metric available)
-pip       disabled
-```
-
-**FR-6b.** Per-backend stats surface in `nemo inspect` for each round (replaces #130 FR-5).
-
-**FR-6c.** Per-round `SCCACHE_STATS:` emission (#130 FR-5a) becomes a per-backend loop: entrypoint queries each enabled backend's stats CLI after the stage's main command and emits one `<BACKEND>_STATS:` line per.
-
-### FR-7: Sane defaults for common stacks
-
-**FR-7a.** A `[repo]` hint in nemo.toml lets the operator declare primary language:
-
-```toml
-[repo]
-primary_languages = ["rust", "typescript"]
-```
-
-**FR-7b.** When `[cache]` section is absent, the control plane infers defaults:
-
-| Primary language in [repo] | Default backends enabled |
-|----------------------------|---------------------------|
-| `rust`                      | `sccache`                 |
-| `typescript` / `javascript` | `npm`                     |
-| `python`                    | `pip`                     |
-| `c` / `cpp`                 | `ccache`                  |
-| (mixed)                    | all matching, in union    |
-
-**FR-7c.** Operators keep full control via explicit `[cache] backends = [...]`; the inference is only the zero-config path.
+**FR-5c.** The #148 `cache_backends` map variable is removed (it never landed in a production deployment since #148's spec was not yet implemented). No migration needed.
 
 ## Non-Functional Requirements
 
 ### NFR-1: Backward compatibility
 
-An operator upgrading from #130 with no config changes gets the same behavior (sccache mounted, Rust caching active). The nemo.toml schema addition is additive; missing `[cache]` uses the #130 defaults.
+Operator on #130 with no nemo.toml `[cache]` section gets identical env vars and behavior after upgrade. Terraform accepts `cargo_cache_volume_size` for one release. PVC is renamed in-place — terraform plans a rename; dev operators run `kubectl patch` or accept data-loss on the sccache cache (one slow first loop to refill).
 
-### NFR-2: Forward compatibility
+### NFR-2: No backend enumeration in the control plane
 
-Adding a new backend is: (a) one entry in the FR-2a contract table, (b) one dockerfile stanza, (c) one terraform block. No schema migration, no API break.
+Job_builder does NOT list known backends. It reads `[cache.env]`, iterates, and pushes env vars. Adding a new tool = adding a line in nemo.toml. No Rust change, no release.
 
-### NFR-3: Security
+### NFR-3: Tests
 
-Each cache PVC is read-write from the agent pod. Cross-engineer visibility = same trust model as the existing `nautiloop-cargo-cache` (NFR-4 of #130). Multi-tenant isolation is explicitly out of scope; revisit if/when the threat model demands.
-
-### NFR-4: Performance
-
-Mount overhead per backend: negligible (empty-dir-style mount from PVC). Env-var count increase: ≤5 per backend × ≤4 backends = ≤20 extra env vars, well under k8s limits.
-
-### NFR-5: Tests
-
-- **Unit** (`control-plane/src/k8s/job_builder.rs`): assert each backend adds the right volume + mount + env combo; assert unknown backends are skipped with a warning.
-- **Integration** (`control-plane/tests/cache_backends.rs`): build a job with `backends = ["sccache", "npm"]`, verify pod spec has both mounts and both env-var sets.
-- **Manual**: `nemo cache stats` on a live cluster shows per-backend sections correctly after loops have run.
-- **Terraform**: `terraform plan` with the default `cache_backends` map shows one sccache PVC; changing `npm.enabled = true` adds an npm PVC.
+- **Unit** (`control-plane/src/k8s/job_builder.rs`): `[cache.env]` with N entries produces N `EnvVar` entries on implement/revise pods; zero on review/audit/test.
+- **Unit**: `[cache] disabled = true` skips both mount and env vars.
+- **Unit**: absent `[cache]` section uses sccache defaults.
+- **Integration**: build a job with a custom `[cache.env] FOO = "/cache/foo"`, verify `FOO` env var lands in the pod spec.
 
 ## Acceptance Criteria
 
-1. **Default path works**: fresh install, no `[cache]` section in nemo.toml. Rust loop converges; sccache hit rate >80% on second run.
-2. **Multi-backend**: `backends = ["sccache", "npm"]` in nemo.toml. A mixed Rust+TS monorepo loop mounts both PVCs; `nemo cache stats` shows both.
-3. **Disabled**: `backends = []`. Agent pod has zero cache mounts; `nemo cache stats` reports all disabled; loop completes (no caching, slower cold build, correct behavior).
-4. **Custom backend**: `[cache.custom]` with user-supplied env + mounts. Pod spec reflects exactly those env/mounts.
-5. **Missing binary**: enable `ccache` in config but run against an image built with `INCLUDE_CCACHE=false`. Pod fails at startup with a clear message.
-6. **Terraform migration**: apply with default `cache_backends` map; kubectl shows exactly one PVC `nautiloop-sccache-cache`. Add `ccache.enabled = true`, apply, see a second PVC appear.
-7. **Backward-compat**: cluster previously provisioned with `cargo_cache_volume_size = 20` in terraform. Upgrade to this spec's terraform — no PVC destroyed/recreated, alias variable warning shown once.
+1. Default (no config change) → same behavior as #130. Sccache fills `/cache/sccache`, hit rate >80% on second run.
+2. Add `NPM_CONFIG_CACHE = "/cache/npm"` to nemo.toml `[cache.env]`. On a TypeScript-touching spec, `npm install` inside the agent pod writes to `/cache/npm`; second run hits the cache and is faster.
+3. Set `[cache] disabled = true`. Agent pods have no `/cache` mount and no cache env vars. Loops still work; slower cold builds.
+4. Set `RUSTC_WRAPPER = "sccache"` without installing sccache in the image. Cargo fails to spawn sccache, loop fails at implement stage with a clear cargo error in the log. (Demonstrates FR-4a.)
+5. Terraform upgrade from #130: existing `cargo_cache_volume_size = 20` still works, deprecation warning logged once. Apply produces no destructive plan for the PVC (in-place rename, not replacement).
 
 ## Out of Scope
 
-- **Shared cross-repo / cross-engineer caches.** Each nautiloop deployment has its own PVC per backend. Multi-tenant cache sharing (e.g., sccache S3 backend) is a follow-up once the pluggable architecture lands.
-- **Cache eviction policies beyond each backend's built-in LRU.** No age-based sweep, no size-based aggressive eviction. Each backend self-manages.
-- **Language-specific build-tool integration** (maven `.m2`, gradle `.gradle`, go module cache, cargo registry cache separately from sccache). Each is addable as a backend later; not in the first pass.
-- **Prewarm at image build time** (bake a partial `target/` directory into the agent image). Considered in #130 and rejected; stay with runtime-PVC.
-- **Cache invalidation on toolchain version bumps.** Backend's problem (sccache already handles rustc version; ccache handles gcc version). Out of nautiloop's concern.
-- **Turbo / Nix build cache**: the `custom` backend (FR-1a) is the escape hatch for these. Promoting them to first-class backends can wait for demand.
+- **Installing cache tools in the agent image.** The base image ships sccache. Others are the operator's Dockerfile extension OR a separate build-arg PR.
+- **Multi-node / RWX / S3 backends.** Single-node cluster assumption; multi-node prod uses sccache's S3 backend (separate spec) or accepts the RWO limitation.
+- **Per-engineer, per-repo, per-worktree cache isolation.** One PVC, everyone shares. Same trust model as the existing shared worktree architecture.
+- **Cache size accounting per-tool.** `du -sh /cache/*` is the answer. No nautiloop-managed quota per subdirectory.
+- **Config sugar like `[cache.preset] = "rust"` or `"node"`.** The env-var list is short; a preset just moves the configuration to a different file. Skip until repeat-pattern emerges.
+- **Deleting the #148 `[cache]` backend-map architecture from its spec file.** It's a documented design that won't ship; leaving it as a historical record is fine.
 
 ## Files Likely Touched
 
-- `control-plane/src/config/repo.rs` + `merged.rs` — new `[cache]` section parsing + merge, new `[repo] primary_languages` parsing + merge.
-- `control-plane/src/config/mod.rs` — expose `CacheConfig` to `JobBuildConfig`.
-- `control-plane/src/k8s/job_builder.rs` — iterate backends in `build_volumes`, `build_agent_mounts`, `build_agent_env_vars` instead of hardcoded sccache.
-- `control-plane/src/api/handlers.rs` — expose `cache` section in `/dashboard/state` (optional, for dashboard #145 integration).
-- `cli/src/commands/cache.rs` — extend `nemo cache stats` / `reset` to be backend-aware. Add `nemo cache backends` (FR-3c).
-- `images/base/Dockerfile` — add `INCLUDE_CCACHE` build-arg and install block; keep existing `INCLUDE_SCCACHE` (rename from `INCLUDE_RUST` for clarity, alias old name).
-- `images/base/nautiloop-agent-entry` — verify each enabled backend's binary at startup (FR-3d).
-- `terraform/modules/nautiloop/variables.tf` — add `cache_backends` map, deprecate `cargo_cache_volume_size` alias.
-- `terraform/modules/nautiloop/k8s.tf` — `for_each` over enabled backends, generate PVCs.
-- `terraform/modules/nautiloop/outputs.tf` — expose `cache_pvcs` map for downstream visibility.
-- `docs/cache-backends.md` — new doc, explains backend taxonomy + how to add a new one (+ an example of the `custom` escape hatch using Turbo).
-- Tests per NFR-5.
+- `control-plane/src/config/repo.rs` + `merged.rs` — add `[cache]` section (`HashMap<String, String>` for `env` + a `disabled: bool`).
+- `control-plane/src/k8s/job_builder.rs` — rename volume claim reference, change mount path to `/cache`, replace hardcoded sccache env with iterate-over-config.
+- `dev/k8s/01-storage.yaml` — rename PVC.
+- `terraform/modules/nautiloop/variables.tf` — rename variable, keep deprecated alias, remove #148 `cache_backends` map.
+- `terraform/modules/nautiloop/k8s.tf` — rename PVC.
+- `dev/setup.sh` — update any references.
+- `docs/cache.md` — new doc: short explanation, full example of common env vars for Rust / Node (npm/pnpm/yarn/bun) / Python (pip/poetry/uv) / Go.
+- Tests per NFR-3.
 
 ## Baseline Branch
 
-`main` at PR #147 merge.
+`main` at PR #148 merge. This spec supersedes #148.
