@@ -68,6 +68,8 @@ The dashboard auth middleware accepts **either** a valid cookie **or** a valid B
 
 **FR-2b.** `/dashboard/login` renders a form with two inputs: `api_key` (password field) and `engineer_name` (text field, used for the `Mine` filter — see FR-3e). On POST, validates the API key via constant-time comparison against the `NAUTILOOP_API_KEY` environment variable (same logic as the existing auth middleware — no internal HTTP call). If valid, sets two cookies: `nautiloop_api_key=<key>` (HttpOnly, Secure, SameSite=Strict, 7-day expiry) and `nautiloop_engineer=<name>` (HttpOnly, Secure, SameSite=Strict, 7-day expiry), then redirects to `/dashboard`. If invalid, re-renders the form with an error message. The `engineer_name` field is required; it is always accepted as free-text (self-declared, not validated against loop data). This is consistent with the CLI, which accepts any engineer name on `nemo start`. The value is used solely for the `Mine` filter (FR-3e).
 
+**Engineer identity for client-side JS:** The `nautiloop_engineer` cookie is HttpOnly and cannot be read by JavaScript. To allow the dashboard JS to know the current viewer's engineer name (needed for client-side filter chip rendering and "Mine" highlighting), the `/dashboard/state` response includes a `viewer` field containing the requesting engineer's name (read server-side from the cookie). See FR-8b response schema. The server-rendered HTML also embeds the engineer name as a `data-viewer` attribute on the `<body>` element for initial page load before the first poll.
+
 **FR-2c.** Unauthenticated requests to any `/dashboard/*` route (other than `/login` and `/static/*`) redirect to `/dashboard/login`.
 
 **FR-2d.** Deployment-level security (Tailscale, VPN, or an external auth proxy like oauth2-proxy) is the primary defense. The API-key cookie is defense in depth, not the only barrier. Documented explicitly in the dashboard README: **do not expose `/dashboard` to the public internet without fronting it with auth.**
@@ -95,7 +97,7 @@ The dashboard auth middleware accepts **either** a valid cookie **or** a valid B
 - **Sub-title**: branch name (muted).
 - **Progress line**: `round N/M · stage: <current_stage>` for active loops; `round N` for terminal.
 - **Metrics row**: tokens (`52K`), cost (`$0.18` — requires `[pricing]` config, see FR-15; displays `—` if pricing is not configured), last-round verdict (one of `clean`/`not clean`/`—`).
-- **Pulse indicator**: small animated dot if `sub_state` is `Running` (i.e., the loop is in an active stage with a dispatched job currently executing), solid dot for all other states.
+- **Pulse indicator**: animated dot if `sub_state` is `Running` (i.e., the loop is in an active stage with a dispatched job currently executing); slow-pulsing hollow dot if `sub_state` is `Dispatched` (job submitted to k8s but not yet running — distinguishes "waiting for pod" from "actively executing"); solid dot for `Completed` and all terminal states.
 
 **FR-3c.** Clicking/tapping a card navigates (not modal — actual route change) to `/dashboard/loops/:id`.
 
@@ -122,9 +124,9 @@ Chips are independent: selecting `Active` + `alice` shows Alice's active loops. 
   - `Resume` if state in {PAUSED, AWAITING_REAUTH, transient FAILED}
   - `Extend +10` if state == FAILED with failed_from_state
   - `Open PR` if spec_pr_url is set (opens in new tab)
-- **Rounds table**: one row per round. Columns: round number, stage (Implement/Test/Review/Revise/Harden), verdict (`clean`/`not clean`/`—`), issues count, confidence score, tokens (input + output), cost (or `—`), duration. Tapping a row expands full verdict details inline. **Note:** The `/dashboard/loops/:id` handler queries the `rounds` table directly (not via `/inspect`) to access `duration_secs`, `started_at`, and `completed_at` fields that `/inspect` does not currently expose.
+- **Rounds table**: one row per round. Columns: round number, stage (Implement/Test/Review/Revise/Harden), verdict (`clean`/`not clean`/`—`), issues count, confidence score, tokens (input + output), cost (or `—`), duration. Tapping a row expands stage-specific details inline: for `review` and `audit` stages, this shows the full verdict (issues array, confidence score, summary text); for `implement` and `revise` stages, shows `new_sha` and exit code; for `test` stages, shows test result summary and exit code. Stages whose output lacks structured detail expand to show raw output fields or a `—` placeholder. **Note:** The `/dashboard/loops/:id` handler queries the `rounds` table directly (not via `/inspect`) to access `duration_secs`, `started_at`, and `completed_at` fields that `/inspect` does not currently expose.
 - **Live log pane**: last 200 lines, auto-scrolls. SSE stream via `/dashboard/stream/:id` for active loops; static dump for terminal loops.
-- **Token/cost breakdown**: per-stage, per-round (bar chart optional; data table mandatory). Token data is extracted from the JSONB `output` column of each round's row. The five stage output types that may contain token data are: `ImplResultData`, `TestResultData`, `ReviewResultData`, `ReviseResultData`, and `AuditVerdict`. Each embeds a `token_usage: TokenUsage` struct with fields `input: u64` and `output: u64` (matching the `TokenUsage` struct in `control-plane/src/types/verdict.rs`). The aggregation logic must handle all five stage types and gracefully display `—` when a stage's output lacks `token_usage`. Cost is computed from token counts using the `[pricing]` config (see FR-15); if pricing is not configured, only raw token counts are shown.
+- **Token/cost breakdown**: per-stage, per-round (bar chart optional; data table mandatory). Token data is extracted from the JSONB `output` column of each round's row. The five stage output types that may contain token data are: `ImplResultData`, `TestResultData`, `ReviewResultData` (used for both review and audit/harden stages), and `ReviseResultData`. Note: audit-stage rounds store their output as `ReviewResultData` wrapping an `AuditVerdict` inner struct — deserialize as `ReviewResultData`, not `AuditVerdict` directly. Each embeds a `token_usage: TokenUsage` struct with fields `input: u64` and `output: u64` (matching the `TokenUsage` struct in `control-plane/src/types/verdict.rs`). The aggregation logic must handle all five stage types and gracefully display `—` when a stage's output lacks `token_usage`. Cost is computed from token counts using the `[pricing]` config (see FR-15); if pricing is not configured, only raw token counts are shown.
 
 **FR-4b.** The action buttons call the existing API endpoints (`POST /approve/:id`, `DELETE /cancel/:id`, etc.) via same-origin `fetch()`. The HttpOnly auth cookie is sent automatically by the browser; no Bearer header construction is needed (see FR-2a). The existing API auth middleware is extended to accept the cookie in addition to Bearer headers, so these requests authenticate transparently. Responses update the card in-place.
 
@@ -209,11 +211,14 @@ Chips are independent: selecting `Active` + `alice` shows Alice's active loops. 
       "avg_rounds_delta": -0.3
     }
   },
-  "engineers": ["alice", "bob", "dev"]
+  "engineers": ["alice", "bob", "dev"],
+  "viewer": "alice"
 }
 ```
 
 Fields with `total_cost` or per-loop `total_cost` are `null` when `[pricing]` is not configured. `trends` is `null` when insufficient historical data exists (first week).
+
+**Caching note:** The `fleet_summary` block within `/dashboard/state` involves an expensive 7-day window aggregation, but this endpoint is polled every 5s (FR-3d). To avoid redundant computation, the server MUST cache the `fleet_summary` portion for 60s (same strategy as FR-14c for `/dashboard/stats`). The per-loop `loops` array, `aggregates`, and `engineers` fields are recomputed on every poll (these are cheap queries over active + recent-terminal loops). The cached `fleet_summary` is refreshed independently on a 60s TTL.
 
 **Response schema for `/dashboard/feed`:**
 
@@ -343,7 +348,7 @@ Each row is tappable → navigates to the loop detail page.
 
 **FR-12b.** Filters at the top: `All events` / `Converged only` / `Failed only` / per-engineer. Persists selection in localStorage across visits.
 
-**FR-12c.** Pagination: loads the 50 most recent; `Load more` button at the bottom fetches the next 50. Backed by a new endpoint `GET /dashboard/feed?cursor=<timestamp>&limit=50` that returns terminal loops ordered by `updated_at DESC`.
+**FR-12c.** Pagination: loads the 50 most recent; `Load more` button at the bottom fetches the next 50. Backed by a new endpoint `GET /dashboard/feed?cursor=<timestamp>&limit=50` (note: `&` is a literal ampersand query-parameter separator) that returns terminal loops ordered by `updated_at DESC`.
 
 **FR-12d.** This is the CTO's morning-coffee surface: skim, see what shipped overnight, note what failed, close the tab. Must load in under a second on a mobile connection.
 
@@ -359,7 +364,7 @@ Each row is tappable → navigates to the loop detail page.
 
 Plus aggregates at the top: `3 runs · 67% converge rate · avg 10.7 rounds · total cost $4.52`.
 
-**FR-13b.** Backed by a new endpoint `GET /dashboard/specs?path=<>&limit=50` returning loops filtered by `spec_path`. Existing schema already has `spec_path`, no migration.
+**FR-13b.** Backed by a new endpoint `GET /dashboard/specs?path=<url-encoded-path>&limit=50` (note: `&` is a literal ampersand query-parameter separator) returning loops filtered by `spec_path`. Existing schema already has `spec_path`, no migration.
 
 **FR-13c.** Use case: a spec that fails 3x in a row or consistently takes 15 rounds is a spec-quality problem, not an implementor problem. Visibility surfaces this. Helps engineers tighten specs before submitting again.
 
@@ -390,15 +395,17 @@ Plus aggregates at the top: `3 runs · 67% converge rate · avg 10.7 rounds · t
 
 **FR-15b.** A helper function `compute_cost(token_usage: &TokenUsage, model: &str, pricing: &PricingConfig) -> Option<f64>` lives in the dashboard aggregate module. Returns `None` if the model is not found in the pricing config (graceful degradation — no panic, no default guess).
 
-**Stage→model mapping for per-round cost computation:** Each round's cost requires knowing which model was used. The mapping is:
-- **Implement, Revise, Test** stages → use the loop's `model_implementor` field
-- **Review, Audit (Harden)** stages → use the loop's `model_reviewer` field
+**Stage→model mapping for per-round cost computation:** Each round's cost requires knowing which model was used. The round `stage` column stores lowercase strings: `"implement"`, `"test"`, `"review"`, `"audit"`, `"revise"`. The mapping is:
+- **`implement`, `revise`, `test`** stages → use the loop's `model_implementor` field
+- **`review` and `audit`** stages → use the loop's `model_reviewer` field. (The `"audit"` stage runs during the `Hardening` LoopState — these are distinct concepts: `stage` is the rounds-table value, `Hardening` is the loop-level state.)
 
 **Fallback chain:** loop-level field (`model_implementor` or `model_reviewer`) → `NautiloopConfig` default model for that role → `None` (display `—`). If the resolved model string is not present in the `[pricing.models]` table, `compute_cost` returns `None`.
 
 **FR-15c.** When `[pricing]` is absent from `nemo.toml`, **all cost fields across the dashboard display `—` instead of a dollar amount**. Token counts (raw numbers) are always shown regardless of pricing config. This applies to: FR-3b metrics row, FR-4a token/cost breakdown, FR-9a fleet summary (cost and top-spender fields omitted), FR-12a feed rows, FR-13a history table, FR-14a headline cards and per-engineer/per-spec tables.
 
 **FR-15d.** The pricing config is loaded once at startup and cached in the app state. No hot-reload required in v1; restart the control plane to pick up pricing changes.
+
+**FR-15e.** `NautiloopConfig` in `control-plane/src/config/mod.rs` must be extended with an optional `pricing: Option<PricingConfig>` field. `PricingConfig` contains a `models: HashMap<String, ModelPricing>` where `ModelPricing` has `input_per_million: f64` and `output_per_million: f64`. The field is `Option` so that existing `nemo.toml` files without `[pricing]` continue to deserialize without error. No database migration required — this is config-only.
 
 ### FR-16: JS feature tiers
 
@@ -485,6 +492,7 @@ A reviewer can verify by:
 - `control-plane/src/api/dashboard/templates/` — new dir, Askama `.html` templates (or `maud!{}` macros in `.rs` files).
 - `control-plane/assets/dashboard.css` — embedded via `include_str!`.
 - `control-plane/assets/dashboard.js` — embedded via `include_str!`.
+- `control-plane/src/config/mod.rs` — add optional `pricing: Option<PricingConfig>` field to `NautiloopConfig` + `PricingConfig` / `ModelPricing` structs (FR-15e).
 - `control-plane/Cargo.toml` — add `askama` (use latest compatible 0.12.x or newer) and `askama_axum` for response helpers. Or `maud` if that was chosen per FR-1c.
 - Tests per NFR-6.
 - `docs/dashboard-setup.md` — new doc covering the security model (Tailscale as default, explicit warning about public exposure).
