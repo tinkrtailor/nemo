@@ -98,7 +98,7 @@ pub fn is_stale(path: &Path, now_ms: u64) -> bool {
 /// Decide whether a raw Claude credential JSON string represents a
 /// stale bundle. Shared between disk and keychain checks so both
 /// sources apply the same freshness rule.
-fn is_bundle_stale(contents: &str, now_ms: u64) -> bool {
+pub fn is_bundle_stale(contents: &str, now_ms: u64) -> bool {
     let Ok(parsed) = serde_json::from_str::<ClaudeCredentialsShape>(contents) else {
         return true;
     };
@@ -109,7 +109,7 @@ fn is_bundle_stale(contents: &str, now_ms: u64) -> bool {
     expires_at.saturating_sub(buffer_ms) <= now_ms
 }
 
-fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -120,7 +120,7 @@ fn now_ms() -> u64 {
 /// Returns None on non-macOS platforms or when the keychain entry
 /// isn't present.
 #[cfg(target_os = "macos")]
-fn extract_from_keychain() -> Option<String> {
+pub fn extract_from_keychain() -> Option<String> {
     let output = std::process::Command::new("security")
         .args([
             "find-generic-password",
@@ -143,7 +143,7 @@ fn extract_from_keychain() -> Option<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn extract_from_keychain() -> Option<String> {
+pub fn extract_from_keychain() -> Option<String> {
     None
 }
 

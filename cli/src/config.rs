@@ -4,6 +4,17 @@ use std::path::PathBuf;
 
 use crate::project_config::ModelsSection;
 
+/// Helm TUI settings from `[helm]` section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HelmConfig {
+    /// Theme: "dark", "light", or "high-contrast". Default: "dark".
+    #[serde(default)]
+    pub theme: Option<String>,
+    /// Enable desktop notifications for convergence events. Default: false.
+    #[serde(default)]
+    pub desktop_notifications: bool,
+}
+
 /// Engineer-level configuration from ~/.nemo/config.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineerConfig {
@@ -21,6 +32,9 @@ pub struct EngineerConfig {
     /// See project_config::resolve_models for the full precedence chain.
     #[serde(default)]
     pub models: ModelsSection,
+    /// Helm TUI configuration.
+    #[serde(default)]
+    pub helm: HelmConfig,
 }
 
 fn default_server_url() -> String {
@@ -36,6 +50,7 @@ impl Default for EngineerConfig {
             email: String::new(),
             api_key: None,
             models: ModelsSection::default(),
+            helm: HelmConfig::default(),
         }
     }
 }

@@ -9,6 +9,39 @@ use std::collections::HashMap;
 
 use crate::config::ServiceConfig;
 
+/// Cache configuration from `[cache]` section in nemo.toml.
+///
+/// When `[cache]` is absent from nemo.toml, `RepoConfig.cache` is `None`,
+/// which triggers sccache default injection at the config resolution layer.
+/// When `[cache]` is present but `[cache.env]` is empty/absent, no cache
+/// env vars are injected (sccache defaults do NOT apply).
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct CacheConfig {
+    /// If true, skip the /cache mount entirely and set no cache env vars.
+    #[serde(default)]
+    pub disabled: bool,
+    /// Every key becomes an env var on implement/revise agent pods.
+    /// Values are passed through verbatim.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+impl CacheConfig {
+    /// Sccache defaults injected when `[cache]` is absent from nemo.toml.
+    /// Byte-identical to #130 behavior.
+    pub fn sccache_defaults() -> Self {
+        let mut env = HashMap::new();
+        env.insert("RUSTC_WRAPPER".to_string(), "sccache".to_string());
+        env.insert("SCCACHE_DIR".to_string(), "/cache/sccache".to_string());
+        env.insert("SCCACHE_CACHE_SIZE".to_string(), "15G".to_string());
+        env.insert("SCCACHE_IDLE_TIMEOUT".to_string(), "0".to_string());
+        Self {
+            disabled: false,
+            env,
+        }
+    }
+}
+
 /// Repo metadata from `[repo]` section.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,6 +126,14 @@ pub struct RepoConfig {
     pub harden: Option<HardenConfig>,
     #[serde(default)]
     pub timeouts: Option<TimeoutsConfig>,
+    /// Cache configuration. `None` = absent from nemo.toml → sccache defaults.
+    /// `Some` with empty env → no cache env vars injected.
+    /// `#[serde(default)]` is redundant here (`Option` defaults to `None`), but
+    /// kept for consistency with other optional fields on `RepoConfig`. The
+    /// absent-vs-present distinction required by FR-3b is handled by
+    /// `NautiloopConfig.cache` (which is `Option` without `#[serde(default)]`).
+    #[serde(default)]
+    pub cache: Option<CacheConfig>,
 }
 
 impl RepoConfig {
@@ -311,6 +352,88 @@ mod tests {
         let result = RepoConfig::parse(toml);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unknown field"));
+    }
+
+    #[test]
+    fn test_cache_config_absent_from_nemo_toml() {
+        // FR-3b: When [cache] is absent, cache field is None.
+        let toml = r#"
+            [repo]
+            name = "my-project"
+            default_branch = "main"
+        "#;
+        let config = RepoConfig::parse(toml).unwrap();
+        assert!(
+            config.cache.is_none(),
+            "absent [cache] section should produce None"
+        );
+    }
+
+    #[test]
+    fn test_cache_config_present_but_empty() {
+        // FR-3b: [cache] present but [cache.env] absent → Some with empty env.
+        let toml = r#"
+            [repo]
+            name = "my-project"
+            default_branch = "main"
+
+            [cache]
+        "#;
+        let config = RepoConfig::parse(toml).unwrap();
+        let cache = config.cache.unwrap();
+        assert!(!cache.disabled);
+        assert!(cache.env.is_empty());
+    }
+
+    #[test]
+    fn test_cache_config_disabled() {
+        // FR-3d: [cache] disabled = true.
+        let toml = r#"
+            [repo]
+            name = "my-project"
+            default_branch = "main"
+
+            [cache]
+            disabled = true
+        "#;
+        let config = RepoConfig::parse(toml).unwrap();
+        let cache = config.cache.unwrap();
+        assert!(cache.disabled);
+    }
+
+    #[test]
+    fn test_cache_config_with_env_vars() {
+        // FR-3a: [cache.env] with key-value pairs.
+        let toml = r#"
+            [repo]
+            name = "my-project"
+            default_branch = "main"
+
+            [cache]
+
+            [cache.env]
+            RUSTC_WRAPPER = "sccache"
+            SCCACHE_DIR = "/cache/sccache"
+            NPM_CONFIG_CACHE = "/cache/npm"
+        "#;
+        let config = RepoConfig::parse(toml).unwrap();
+        let cache = config.cache.unwrap();
+        assert!(!cache.disabled);
+        assert_eq!(cache.env.len(), 3);
+        assert_eq!(cache.env["RUSTC_WRAPPER"], "sccache");
+        assert_eq!(cache.env["SCCACHE_DIR"], "/cache/sccache");
+        assert_eq!(cache.env["NPM_CONFIG_CACHE"], "/cache/npm");
+    }
+
+    #[test]
+    fn test_sccache_defaults() {
+        let defaults = CacheConfig::sccache_defaults();
+        assert!(!defaults.disabled);
+        assert_eq!(defaults.env.len(), 4);
+        assert_eq!(defaults.env["RUSTC_WRAPPER"], "sccache");
+        assert_eq!(defaults.env["SCCACHE_DIR"], "/cache/sccache");
+        assert_eq!(defaults.env["SCCACHE_CACHE_SIZE"], "15G");
+        assert_eq!(defaults.env["SCCACHE_IDLE_TIMEOUT"], "0");
     }
 
     #[test]

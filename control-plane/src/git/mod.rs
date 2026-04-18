@@ -83,6 +83,10 @@ pub trait GitOperations: Send + Sync + 'static {
     /// Delete a branch from the remote. Used to clean up orphaned remote branches
     /// when a post-push step (e.g., set_current_sha) fails.
     async fn delete_remote_branch(&self, branch: &str) -> Result<()>;
+
+    /// Compute a unified diff between a branch and its base (origin/main).
+    /// Returns the diff text, truncated to `max_bytes` if specified.
+    async fn diff(&self, branch: &str, base_ref: &str, max_bytes: Option<usize>) -> Result<String>;
 }
 
 /// Real git operations on a bare repository.
@@ -371,13 +375,31 @@ pub mod bare {
             }
 
             // `merge-base --is-ancestor A B` exits 0 if A is ancestor of B.
-            match self
+            // Two-sided check: the only true divergence is when neither side
+            // is an ancestor of the other (a force-push reparented history).
+            //
+            // Case 1: expected IS an ancestor of remote tip
+            //   → remote moved forward cleanly since we dispatched; fine.
+            // Case 2: remote tip IS an ancestor of expected
+            //   → we have local commits that haven't been pushed yet
+            //     (e.g., write_file commits during feedback; the local-spec-upload
+            //     flow pushes at start but intra-loop feedback writes don't).
+            //     This is expected and NOT divergence.
+            // Case 3: neither is an ancestor of the other
+            //   → history reparented by a force-push; true divergence.
+            let expected_in_remote = self
                 .run_git(&["merge-base", "--is-ancestor", expected_sha, &tip])
                 .await
-            {
-                Ok(_) => Ok(false), // expected is ancestor of remote tip -> not diverged
-                Err(_) => Ok(true), // not an ancestor -> diverged (force push)
+                .is_ok();
+            if expected_in_remote {
+                return Ok(false);
             }
+            let remote_in_expected = self
+                .run_git(&["merge-base", "--is-ancestor", &tip, expected_sha])
+                .await
+                .is_ok();
+            // Diverged only when neither direction holds.
+            Ok(!remote_in_expected)
         }
 
         async fn write_file(&self, branch: &str, path: &str, content: &str) -> Result<()> {
@@ -762,6 +784,24 @@ pub mod bare {
                 })?;
             Ok(())
         }
+
+        async fn diff(&self, branch: &str, base_ref: &str, max_bytes: Option<usize>) -> Result<String> {
+            let diff_range = format!("{base_ref}...{branch}");
+            let output = self.run_git(&["diff", &diff_range]).await.map_err(|e| {
+                crate::error::NautiloopError::Git(format!(
+                    "Failed to compute diff {diff_range}: {e}"
+                ))
+            })?;
+            match max_bytes {
+                Some(max) if output.len() > max => {
+                    let truncated = &output[..max];
+                    // Find last newline to avoid cutting mid-line
+                    let cut = truncated.rfind('\n').unwrap_or(max);
+                    Ok(format!("{}\n\n[truncated — open PR for full diff]", &output[..cut]))
+                }
+                _ => Ok(output),
+            }
+        }
     }
 }
 
@@ -990,6 +1030,10 @@ pub mod mock {
 
         async fn delete_remote_branch(&self, _branch: &str) -> Result<()> {
             Ok(())
+        }
+
+        async fn diff(&self, _branch: &str, _base_ref: &str, _max_bytes: Option<usize>) -> Result<String> {
+            Ok(String::new())
         }
     }
 }

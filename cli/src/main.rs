@@ -7,7 +7,7 @@ mod project_config;
 
 use clap::{Parser, Subcommand};
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(
     name = "nemo",
     about = "Nemo CLI - Convergent loop orchestrator",
@@ -26,7 +26,7 @@ struct Cli {
     insecure: bool,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
     /// Harden spec, merge spec PR. Terminal: HARDENED
     Harden {
@@ -47,7 +47,13 @@ enum Commands {
         /// Path to the spec file
         spec_path: String,
 
-        /// Harden spec first, then implement
+        /// Skip the harden phase (audit + optional revise) before implement.
+        /// Default: harden runs first. Use when you've already hardened the spec
+        /// or when audit-in-the-loop is not wanted for this run.
+        #[arg(long)]
+        no_harden: bool,
+
+        /// Deprecated: harden is now the default. Passing this flag only emits a deprecation warning.
         #[arg(long)]
         harden: bool,
 
@@ -195,6 +201,12 @@ enum Commands {
     /// Show authenticated providers and available models
     Models,
 
+    /// Show cache configuration and disk usage
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+
     /// Edit ~/.nemo/config.toml
     Config {
         /// Set a config value
@@ -204,6 +216,16 @@ enum Commands {
         /// Get a config value
         #[arg(long)]
         get: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CacheAction {
+    /// Show active cache configuration and disk usage
+    Show {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -217,6 +239,12 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Fail fast on contradictory flags before any side effects (config loading,
+    // credential checks, HTTP client construction).
+    if let Commands::Start { harden, no_harden, .. } = cli.command {
+        commands::start::validate_harden_flags(harden, no_harden)?;
+    }
 
     // Handle config command before loading config — a broken config file
     // must not prevent `nemo config --set` from working.
@@ -294,11 +322,16 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Start {
             spec_path,
+            no_harden,
             harden,
             auto_approve,
             model_impl,
             model_review,
         } => {
+            // Conflict check already done above (before config loading).
+            if let Some(warning) = commands::start::deprecation_warning(harden) {
+                eprintln!("{warning}");
+            }
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &eng_config.models)?;
             claude_creds::ensure_fresh(
@@ -308,13 +341,13 @@ async fn main() -> anyhow::Result<()> {
                 &eng_config.email,
             )
             .await?;
-            // nemo start: ship_mode=false
+            // nemo start: harden by default, --no-harden to skip
             commands::start::run(
                 &http_client,
                 commands::start::StartArgs {
                     engineer: &eng_config.engineer,
                     spec_path: &spec_path,
-                    harden,
+                    harden: !no_harden,
                     harden_only: false,
                     auto_approve,
                     ship_mode: false,
@@ -359,7 +392,7 @@ async fn main() -> anyhow::Result<()> {
             commands::status::run(&http_client, &eng_config.engineer, team, json).await?;
         }
         Commands::Helm { team } => {
-            commands::helm::run(&http_client, &eng_config.engineer, team).await?;
+            commands::helm::run(&http_client, &eng_config.engineer, team, &eng_config.helm).await?;
         }
         Commands::Logs {
             loop_id,
@@ -451,6 +484,11 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
+        Commands::Cache { action } => match action {
+            CacheAction::Show { json } => {
+                commands::cache::run(&http_client, json).await?;
+            }
+        },
         Commands::Models => {
             commands::models::run(&http_client, &eng_config).await?;
         }

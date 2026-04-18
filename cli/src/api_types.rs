@@ -34,6 +34,22 @@ pub struct RoundSummary {
     pub review: Option<serde_json::Value>,
     pub audit: Option<serde_json::Value>,
     pub revise: Option<serde_json::Value>,
+    #[serde(default)]
+    pub implement_duration_secs: Option<i64>,
+    #[serde(default)]
+    pub test_duration_secs: Option<i64>,
+    #[serde(default)]
+    pub review_duration_secs: Option<i64>,
+    #[serde(default)]
+    pub audit_duration_secs: Option<i64>,
+    #[serde(default)]
+    pub revise_duration_secs: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DiffResponse {
+    pub diff: String,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -47,6 +63,16 @@ pub struct LoopSummary {
     pub round: i32,
     pub current_stage: Option<String>,
     pub active_job_name: Option<String>,
+    pub spec_pr_url: Option<String>,
+    pub failed_from_state: Option<String>,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub max_rounds: i32,
+    #[serde(default)]
+    pub model_implementor: Option<String>,
+    #[serde(default)]
+    pub model_reviewer: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -88,6 +114,23 @@ pub struct WorktreeInfo {
     pub target_dir_bytes: Option<u64>,
     pub uncommitted_files: Option<u64>,
     pub head_sha: Option<String>,
+}
+
+/// GET /cache response.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CacheResponse {
+    pub disabled: bool,
+    pub env: std::collections::HashMap<String, String>,
+    pub volume_name: String,
+    #[serde(default)]
+    pub volume_capacity_gi: Option<u64>,
+    pub disk_usage: Option<CacheDiskUsage>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CacheDiskUsage {
+    pub subdirectories: std::collections::HashMap<String, String>,
+    pub total: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

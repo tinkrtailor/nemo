@@ -108,13 +108,51 @@ pub async fn run(
             continue;
         }
 
-        // Read the credential file
-        let content = match std::fs::read_to_string(&cred_path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Warning: could not read {provider} credentials at {cred_path}: {e}");
-                any_error = true;
-                continue;
+        // Read the credential file. For Claude on macOS, prefer a fresh
+        // keychain entry over a stale disk file — Claude Code 2.x updates the
+        // macOS keychain as its OAuth refreshes, but writes the disk file
+        // less eagerly. Without this fallback, `nemo auth --claude` pushes
+        // an expired disk token while a fresh keychain token is sitting right
+        // there, and every loop immediately hits AWAITING_REAUTH.
+        let content = {
+            let file_content = std::fs::read_to_string(&cred_path);
+            if *provider == "claude" {
+                let now = crate::claude_creds::now_ms();
+                let file_stale = match &file_content {
+                    Ok(c) => crate::claude_creds::is_bundle_stale(c, now),
+                    Err(_) => true,
+                };
+                if file_stale {
+                    match crate::claude_creds::extract_from_keychain() {
+                        Some(kc) if !crate::claude_creds::is_bundle_stale(&kc, now) => {
+                            eprintln!(
+                                "Note: disk credentials at {cred_path} are stale; using fresh keychain entry."
+                            );
+                            kc
+                        }
+                        _ => match file_content {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!(
+                                    "Warning: could not read claude credentials at {cred_path} and keychain has no fresh entry: {e}"
+                                );
+                                any_error = true;
+                                continue;
+                            }
+                        },
+                    }
+                } else {
+                    file_content.unwrap()
+                }
+            } else {
+                match file_content {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Warning: could not read {provider} credentials at {cred_path}: {e}");
+                        any_error = true;
+                        continue;
+                    }
+                }
             }
         };
 

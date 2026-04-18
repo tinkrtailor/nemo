@@ -66,6 +66,16 @@ pub struct LoopSummary {
     pub current_stage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_job_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_pr_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_from_state: Option<LoopState>,
+    pub kind: String,
+    pub max_rounds: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_implementor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_reviewer: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -176,6 +186,29 @@ pub struct RoundSummary {
     pub audit: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revise: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implement_duration_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_duration_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_duration_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_duration_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revise_duration_secs: Option<i64>,
+}
+
+/// GET /diff/:loop_id response body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffResponse {
+    pub diff: String,
+    pub truncated: bool,
+}
+
+/// GET /diff/:loop_id query parameters.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiffQuery {
+    pub round: Option<i32>,
 }
 
 /// POST /credentials request body.
@@ -260,6 +293,32 @@ pub struct WorktreeInfo {
     pub target_dir_bytes: Option<u64>,
     pub uncommitted_files: Option<u64>,
     pub head_sha: Option<String>,
+}
+
+/// GET /cache response body (FR-6b).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheResponse {
+    /// Whether cache is disabled.
+    pub disabled: bool,
+    /// Resolved cache env vars (from config, or sccache defaults if absent).
+    pub env: std::collections::HashMap<String, String>,
+    /// PVC name (e.g. "nautiloop-cache").
+    pub volume_name: String,
+    /// PVC provisioned capacity in GiB, read from PVC status.capacity.
+    /// None if kube client is unavailable or PVC not found.
+    pub volume_capacity_gi: Option<u64>,
+    /// Disk usage summary per subdirectory, if available.
+    /// None when no running pod is available for inspection.
+    pub disk_usage: Option<CacheDiskUsage>,
+}
+
+/// Disk usage information from a running agent pod.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheDiskUsage {
+    /// Per-subdirectory sizes (e.g. "/cache/sccache" -> "1.8G").
+    pub subdirectories: std::collections::HashMap<String, String>,
+    /// Total cache directory size (e.g. "2.1G").
+    pub total: String,
 }
 
 /// Generic error response body.

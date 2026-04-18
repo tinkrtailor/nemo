@@ -8,9 +8,9 @@ use super::AppState;
 use crate::error::NautiloopError;
 use crate::state::LoopFlag;
 use crate::types::api::{
-    ApproveResponse, CancelResponse, CredentialRequest, ExtendRequest, ExtendResponse,
-    InspectResponse, LogsQuery, LoopSummary, ResumeResponse, RoundSummary, StartRequest,
-    StartResponse, StatusQuery, StatusResponse,
+    ApproveResponse, CancelResponse, CredentialRequest, DiffQuery, DiffResponse, ExtendRequest,
+    ExtendResponse, InspectResponse, LogsQuery, LoopSummary, ResumeResponse, RoundSummary,
+    StartRequest, StartResponse, StatusQuery, StatusResponse,
 };
 use crate::types::{LoopKind, LoopRecord, LoopState, generate_branch_name};
 
@@ -342,7 +342,7 @@ pub async fn status(
         let active_job_name = loop_record.active_job_name.clone();
         summaries.push(LoopSummary {
             loop_id: loop_record.id,
-            engineer: loop_record.engineer,
+            engineer: loop_record.engineer.clone(),
             spec_path: loop_record.spec_path,
             branch: loop_record.branch,
             state: loop_record.state,
@@ -350,6 +350,15 @@ pub async fn status(
             round: loop_record.round,
             current_stage,
             active_job_name,
+            spec_pr_url: loop_record.spec_pr_url,
+            failed_from_state: loop_record.failed_from_state,
+            kind: match loop_record.kind {
+                LoopKind::Harden => "harden".to_string(),
+                LoopKind::Implement => "implement".to_string(),
+            },
+            max_rounds: loop_record.max_rounds,
+            model_implementor: loop_record.model_implementor.clone(),
+            model_reviewer: loop_record.model_reviewer.clone(),
             created_at: loop_record.created_at,
             updated_at: loop_record.updated_at,
         });
@@ -866,14 +875,34 @@ pub async fn inspect(
                 review: None,
                 audit: None,
                 revise: None,
+                implement_duration_secs: None,
+                test_duration_secs: None,
+                review_duration_secs: None,
+                audit_duration_secs: None,
+                revise_duration_secs: None,
             });
 
         match r.stage.as_str() {
-            "implement" => summary.implement = r.output.clone(),
-            "test" => summary.test = r.output.clone(),
-            "review" => summary.review = r.output.clone(),
-            "audit" => summary.audit = r.output.clone(),
-            "revise" => summary.revise = r.output.clone(),
+            "implement" => {
+                summary.implement = r.output.clone();
+                summary.implement_duration_secs = r.duration_secs;
+            }
+            "test" => {
+                summary.test = r.output.clone();
+                summary.test_duration_secs = r.duration_secs;
+            }
+            "review" => {
+                summary.review = r.output.clone();
+                summary.review_duration_secs = r.duration_secs;
+            }
+            "audit" => {
+                summary.audit = r.output.clone();
+                summary.audit_duration_secs = r.duration_secs;
+            }
+            "revise" => {
+                summary.revise = r.output.clone();
+                summary.revise_duration_secs = r.duration_secs;
+            }
             _ => {}
         }
     }
@@ -904,6 +933,87 @@ pub async fn inspect(
         state: record.state,
         rounds: round_summaries.into_values().collect(),
         judge_decisions,
+    }))
+}
+
+/// GET /diff/:id - Get unified diff for a loop's branch vs origin/main.
+///
+/// Returns the diff text and a truncation flag. Diffs > 100KB are truncated
+/// to avoid pulling large diffs into the terminal (FR-5d).
+pub async fn diff(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<DiffQuery>,
+) -> Result<Json<DiffResponse>, NautiloopError> {
+    let record = state
+        .store
+        .get_loop(id)
+        .await?
+        .ok_or(NautiloopError::LoopNotFound { id })?;
+
+    let default_branch = record
+        .resolved_default_branch
+        .as_deref()
+        .unwrap_or("main");
+    let base_ref = format!("origin/{default_branch}");
+
+    // FR-5d: truncate at 100KB
+    let max_bytes: usize = 100 * 1024;
+
+    // Per-round scoping: if round is specified, diff only that round's commits
+    let (diff_branch, diff_base) = if let Some(round_num) = query.round {
+        // Look up round records to find commit SHAs
+        let rounds = state.store.get_rounds(id).await?;
+
+        // Find the latest SHA produced in the requested round (from implement or revise output).
+        // The `new_sha` field is set by ImplResultData and ReviseResultData in types/verdict.rs.
+        let round_sha = rounds
+            .iter()
+            .filter(|r| r.round == round_num)
+            .filter_map(|r| {
+                r.output.as_ref().and_then(|o| {
+                    o.get("new_sha").and_then(|v| v.as_str().map(|s| s.to_string()))
+                })
+            })
+            .next_back();
+
+        let round_sha = round_sha.ok_or_else(|| {
+            NautiloopError::BadRequest(format!(
+                "No commit SHA found for round {round_num}. The round may not have completed an implement or revise stage."
+            ))
+        })?;
+
+        // Find the previous round's last SHA as the base
+        let prev_sha = if round_num > 1 {
+            rounds
+                .iter()
+                .filter(|r| r.round == round_num - 1)
+                .filter_map(|r| {
+                    r.output.as_ref().and_then(|o| {
+                        o.get("new_sha").and_then(|v| v.as_str().map(|s| s.to_string()))
+                    })
+                })
+                .next_back()
+                .unwrap_or_else(|| base_ref.clone())
+        } else {
+            base_ref.clone()
+        };
+
+        (round_sha, prev_sha)
+    } else {
+        (record.branch.clone(), base_ref)
+    };
+
+    let diff_text = state
+        .git
+        .diff(&diff_branch, &diff_base, Some(max_bytes))
+        .await?;
+
+    let truncated = diff_text.contains("[truncated");
+
+    Ok(Json(DiffResponse {
+        diff: diff_text,
+        truncated,
     }))
 }
 

@@ -49,6 +49,15 @@ pub fn find_project_toml(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Load `[pricing]` from the nearest `./nemo.toml`, walking up from `start`.
+/// Returns the raw TOML value for the pricing section if found.
+pub fn load_project_pricing(start: &Path) -> Option<toml::Value> {
+    let path = find_project_toml(start)?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let parsed: toml::Value = toml::from_str(&contents).ok()?;
+    parsed.get("pricing").cloned()
+}
+
 /// Load `[models]` from the nearest `./nemo.toml`, walking up from `start`.
 /// Returns an empty section if no file is found or the section is absent.
 pub fn load_project_models(start: &Path) -> Result<ModelsSection> {

@@ -48,6 +48,10 @@ pub async fn run(client: &NemoClient, args: StartArgs<'_>) -> Result<()> {
         args.spec_path,
         format_thousands(spec_bytes)
     );
+
+    // FR-4: show phase plan so engineers know what to expect
+    println!("  Phase:  {}", phase_plan_label(&args));
+
     println!("  State:  {}", resp.state);
 
     if args.ship_mode {
@@ -95,6 +99,47 @@ fn validate_spec_size(spec_path: &str, content: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Return the phase-plan label for CLI output. Pure function for testability.
+fn phase_plan_label(args: &StartArgs<'_>) -> &'static str {
+    if args.ship_mode {
+        if args.harden {
+            "HARDEN \u{2192} IMPLEMENT \u{2192} SHIP"
+        } else {
+            "IMPLEMENT \u{2192} SHIP"
+        }
+    } else if args.harden_only {
+        "HARDEN"
+    } else if args.harden {
+        if args.auto_approve {
+            "HARDEN \u{2192} IMPLEMENT"
+        } else {
+            "HARDEN \u{2192} AWAITING_APPROVAL \u{2192} IMPLEMENT (add --no-harden to skip harden)"
+        }
+    } else {
+        "IMPLEMENT (harden skipped)"
+    }
+}
+
+/// Validate that `--harden` and `--no-harden` are not both provided.
+/// Returns Ok(()) if valid, or an error with the spec-prescribed message.
+pub fn validate_harden_flags(harden: bool, no_harden: bool) -> Result<()> {
+    if harden && no_harden {
+        anyhow::bail!(
+            "Cannot use --harden and --no-harden together. --harden is deprecated; remove it."
+        );
+    }
+    Ok(())
+}
+
+/// Return a deprecation warning if the `--harden` flag was explicitly passed.
+pub fn deprecation_warning(harden_flag_set: bool) -> Option<&'static str> {
+    if harden_flag_set {
+        Some("Warning: --harden is now the default; this flag has no effect.")
+    } else {
+        None
+    }
 }
 
 /// Build the JSON request body for /start. Extracted for testability.
@@ -230,5 +275,179 @@ mod tests {
         assert_eq!(format_thousands(1_234), "1,234");
         assert_eq!(format_thousands(1_000_000), "1,000,000");
         assert_eq!(format_thousands(12_345_678), "12,345,678");
+    }
+
+    /// NFR-3: default invocation sends harden: true
+    #[test]
+    fn test_default_start_sends_harden_true() {
+        let args = StartArgs {
+            engineer: "alice",
+            spec_path: "specs/test.md",
+            harden: true, // default: !no_harden where no_harden=false
+            harden_only: false,
+            auto_approve: false,
+            ship_mode: false,
+            model_impl: None,
+            model_review: None,
+        };
+        let body = build_start_body(&args, "# Spec");
+        assert_eq!(body["harden"], true, "default invocation must send harden: true");
+    }
+
+    /// NFR-3: --no-harden sends harden: false
+    #[test]
+    fn test_no_harden_flag_sends_harden_false() {
+        let args = StartArgs {
+            engineer: "alice",
+            spec_path: "specs/test.md",
+            harden: false, // !no_harden where no_harden=true
+            harden_only: false,
+            auto_approve: false,
+            ship_mode: false,
+            model_impl: None,
+            model_review: None,
+        };
+        let body = build_start_body(&args, "# Spec");
+        assert_eq!(body["harden"], false, "--no-harden must send harden: false");
+    }
+
+    /// NFR-3: deprecated --harden flag emits deprecation warning
+    #[test]
+    fn test_deprecated_harden_flag_emits_warning() {
+        let warning = deprecation_warning(true);
+        assert_eq!(
+            warning,
+            Some("Warning: --harden is now the default; this flag has no effect."),
+            "--harden must emit deprecation warning"
+        );
+    }
+
+    /// NFR-3: no deprecation warning when --harden is not passed
+    #[test]
+    fn test_no_deprecation_warning_without_harden_flag() {
+        assert_eq!(deprecation_warning(false), None);
+    }
+
+    /// NFR-3: --harden --no-harden together parses at clap level but is caught
+    /// by validate_harden_flags with the spec-prescribed error message.
+    #[test]
+    fn test_harden_and_no_harden_both_parse() {
+        use clap::Parser;
+
+        // Both flags parse successfully (conflict check is in validate_harden_flags, not clap)
+        let cli = crate::Cli::try_parse_from([
+            "nemo", "start", "specs/foo.md", "--harden", "--no-harden",
+        ]);
+        assert!(cli.is_ok(), "clap should parse both flags; conflict is checked manually");
+    }
+
+    /// NFR-3: validate_harden_flags returns the spec-prescribed error message
+    /// when both --harden and --no-harden are set.
+    #[test]
+    fn test_validate_harden_flags_both_set_returns_error() {
+        let result = validate_harden_flags(true, true);
+        assert!(result.is_err(), "both flags set must return error");
+        let err_msg = format!("{:#}", result.unwrap_err());
+        assert_eq!(
+            err_msg,
+            "Cannot use --harden and --no-harden together. --harden is deprecated; remove it."
+        );
+    }
+
+    /// NFR-3: validate_harden_flags accepts valid flag combinations.
+    #[test]
+    fn test_validate_harden_flags_valid_combinations() {
+        assert!(validate_harden_flags(false, false).is_ok(), "neither flag is valid");
+        assert!(validate_harden_flags(true, false).is_ok(), "--harden only is valid");
+        assert!(validate_harden_flags(false, true).is_ok(), "--no-harden only is valid");
+    }
+
+    /// FR-4a: default output shows HARDEN → AWAITING_APPROVAL → IMPLEMENT phase plan
+    #[test]
+    fn test_default_start_phase_label() {
+        let args = StartArgs {
+            engineer: "alice",
+            spec_path: "specs/test.md",
+            harden: true,
+            harden_only: false,
+            auto_approve: false,
+            ship_mode: false,
+            model_impl: None,
+            model_review: None,
+        };
+        assert_eq!(
+            phase_plan_label(&args),
+            "HARDEN \u{2192} AWAITING_APPROVAL \u{2192} IMPLEMENT (add --no-harden to skip harden)"
+        );
+    }
+
+    /// FR-4b: --no-harden output shows IMPLEMENT (harden skipped)
+    #[test]
+    fn test_no_harden_phase_label() {
+        let args = StartArgs {
+            engineer: "alice",
+            spec_path: "specs/test.md",
+            harden: false,
+            harden_only: false,
+            auto_approve: false,
+            ship_mode: false,
+            model_impl: None,
+            model_review: None,
+        };
+        assert_eq!(phase_plan_label(&args), "IMPLEMENT (harden skipped)");
+    }
+
+    /// FR-2b: --auto-approve omits AWAITING_APPROVAL from phase plan
+    #[test]
+    fn test_auto_approve_phase_label_omits_approval_gate() {
+        let args = StartArgs {
+            engineer: "alice",
+            spec_path: "specs/test.md",
+            harden: true,
+            harden_only: false,
+            auto_approve: true,
+            ship_mode: false,
+            model_impl: None,
+            model_review: None,
+        };
+        assert_eq!(
+            phase_plan_label(&args),
+            "HARDEN \u{2192} IMPLEMENT"
+        );
+    }
+
+    /// Phase plan for ship mode with harden
+    #[test]
+    fn test_ship_harden_phase_label() {
+        let args = StartArgs {
+            engineer: "alice",
+            spec_path: "specs/test.md",
+            harden: true,
+            harden_only: false,
+            auto_approve: true,
+            ship_mode: true,
+            model_impl: None,
+            model_review: None,
+        };
+        assert_eq!(
+            phase_plan_label(&args),
+            "HARDEN \u{2192} IMPLEMENT \u{2192} SHIP"
+        );
+    }
+
+    /// Phase plan for harden-only mode
+    #[test]
+    fn test_harden_only_phase_label() {
+        let args = StartArgs {
+            engineer: "alice",
+            spec_path: "specs/test.md",
+            harden: true,
+            harden_only: true,
+            auto_approve: false,
+            ship_mode: false,
+            model_impl: None,
+            model_review: None,
+        };
+        assert_eq!(phase_plan_label(&args), "HARDEN");
     }
 }
