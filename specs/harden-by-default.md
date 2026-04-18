@@ -58,7 +58,9 @@ Start {
 }
 ```
 
-**FR-1b.** The existing `--harden` flag is kept as a no-op with a deprecation warning for one release cycle: `--harden is now the default; this flag has no effect`. Remove in the release after.
+**FR-1b.** The existing `--harden` flag is kept as a no-op with a deprecation warning: `--harden is now the default; this flag has no effect`. Remove after 30 days or the next minor release, whichever comes first.
+
+**FR-1d.** `--harden` and `--no-harden` are mutually exclusive. If both are provided, the CLI exits with an error: `Cannot use --harden and --no-harden together. --harden is deprecated; remove it.` Enforce via clap `conflicts_with` attribute on the `--harden` flag.
 
 **FR-1c.** Control-plane `StartRequest.harden` flag semantic is unchanged — the CLI computes `harden = !no_harden` before sending. No API change.
 
@@ -74,23 +76,9 @@ Start {
 
 **FR-3a.** When the audit stage returns `clean: true` on round 1 AND the revise stage has not run, the harden phase emits the spec PR immediately. Engineer gets a notification like `Spec hardened in 1 round (no changes)` in the CLI output.
 
-**FR-3b.** Optional spec frontmatter marker (informational only, not gating):
+**FR-3b.** *(Deferred to follow-up spec.)* Optional spec frontmatter marker (`nautiloop.hardened_at`, `hardened_model`, `hardened_rounds`) is out of scope for this change. Writing the marker requires the harden agent to modify spec frontmatter, which is new server-side behavior and conflicts with NFR-1. A follow-up spec will define who writes the marker (harden agent prompt vs. control-plane post-merge hook) and the exact format. This keeps the current change CLI-only as NFR-1 promises.
 
-```markdown
----
-nautiloop:
-  hardened_at: <commit-sha-of-spec-on-main>
-  hardened_model: claude-opus-4-6
-  hardened_rounds: 1
----
-
-# Spec title
-...
-```
-
-Auto-added by the harden loop on the merged spec PR. Lets engineers see at a glance "this spec was hardened." Does NOT skip the harden phase — audit still runs — but the run is near-free if the marker is current.
-
-**FR-3c.** Engineers can delete the marker to force a fresh harden. Normal audit behavior handles whether a re-harden finds anything.
+**FR-3c.** *(Deferred with FR-3b.)* Engineers can delete the marker to force a fresh harden. Normal audit behavior handles whether a re-harden finds anything. Defined in the follow-up spec.
 
 ### FR-4: Clear CLI output
 
@@ -104,7 +92,7 @@ Started loop 8cb88352...
   State:  PENDING
 ```
 
-The `--no-harden` hint surfaces the opt-out for engineers who want the old behavior.
+The `--no-harden` hint surfaces the opt-out for engineers who want the old behavior. Output format is illustrative; actual loop ID, byte count, and branch name come from the API response.
 
 **FR-4b.** `nemo start <spec> --no-harden` output:
 
@@ -120,13 +108,13 @@ Started loop 8cb88352...
 
 **FR-5a.** `docs/local-dev-quickstart.md` section "Your first loop" is updated to reflect the new default: the example shows `nemo start` without `--harden` and explains the harden phase will run first.
 
-**FR-5b.** Release notes for the release containing this change include a prominent callout: `BREAKING (behavior): nemo start now hardens before implement. Add --no-harden for the prior behavior.`
+**FR-5b.** Release notes for the release containing this change include a prominent callout: `BREAKING (behavior): nemo start now hardens before implement. Add --no-harden for the prior behavior.` Release notes go in the GitHub Release body for the tagged release (created via `gh release create`). If a `CHANGELOG.md` exists at time of implementation, add the entry there as well.
 
 ## Non-Functional Requirements
 
 ### NFR-1: No server-side changes
 
-The control plane keeps accepting the existing `StartRequest.harden` bool. CLI is where the default flips. Existing HTTP clients (CI scripts hitting the API directly) see no change.
+The control plane keeps accepting the existing `StartRequest.harden` bool. CLI is where the default flips. Existing HTTP clients (CI scripts hitting the API directly) see no change. No changes to control-plane code, harden agent prompts, or server-side job behavior.
 
 ### NFR-2: Backward-compat for CI scripts that use the CLI
 
@@ -134,7 +122,7 @@ CI automation calling `nemo start` will now auto-harden. If their specs are alre
 
 ### NFR-3: Tests
 
-- **Unit** (`cli/src/commands/start.rs`): default invocation sends `harden: true`; `--no-harden` sends `harden: false`; deprecated `--harden` sends `harden: true` with stderr warning.
+- **Unit** (`cli/src/commands/start.rs`): default invocation sends `harden: true`; `--no-harden` sends `harden: false`; deprecated `--harden` sends `harden: true` with stderr warning; `--harden --no-harden` together exits with error.
 - **Integration**: full harden → approval → implement cycle with default flags.
 
 ## Acceptance Criteria
@@ -144,20 +132,22 @@ CI automation calling `nemo start` will now auto-harden. If their specs are alre
 3. `nemo start specs/foo.md --no-harden` → skips harden, transitions directly to IMPLEMENTING.
 4. `nemo start specs/foo.md --harden` → works, emits deprecation warning, same behavior as default.
 5. CLI output shows the phase plan (`HARDEN → AWAITING_APPROVAL → IMPLEMENT`) so engineers know what to expect.
+6. `nemo start specs/foo.md --harden --no-harden` → exits with error, does not start a loop.
 
 ## Out of Scope
 
 - **Skipping harden based on the frontmatter marker** (FR-3b). Marker is informational only in v1. Skipping harden entirely based on a sha marker introduces freshness-check complexity (what if main moved?); not worth the complexity when a clean re-harden is ~60s.
 - **Reverse default for `nemo harden`**. Harden-only is a distinct verb and stays harden-only. No changes.
 - **Interactive prompting** (`Spec not hardened, run harden first? [Y/n]`). Harden-by-default makes the prompt unnecessary.
-- **Changing `nemo ship` behavior**. Ship already supports `--harden`; leave it as an explicit flag there since ship-mode's auto-approve makes "harden then auto-approve then implement then auto-merge" a bigger leap than ship-mode operators might expect.
+- **Changing `nemo ship` behavior**. Ship already supports `--harden`; leave it as an explicit flag there since ship-mode's auto-approve makes "harden then auto-approve then implement then auto-merge" a bigger leap than ship-mode operators might expect. **Known inconsistency:** after this change, `nemo start` defaults to harden-on while `nemo ship` defaults to harden-off. Engineers who want harden-before-ship must pass `nemo ship --harden` explicitly. A future spec may align ship defaults.
+- **Frontmatter marker** (formerly FR-3b/FR-3c). Deferred to a follow-up spec to keep this change CLI-only per NFR-1. See FR-3b for rationale.
 
 ## Files Likely Touched
 
 - `cli/src/main.rs` — flip default; add `--no-harden`; keep `--harden` as deprecated no-op.
 - `cli/src/commands/start.rs` — update output strings to show phase plan.
 - `docs/local-dev-quickstart.md` — update first-loop example.
-- `docs/release-notes.md` (or equivalent) — prominent behavior-change callout.
+- GitHub Release body (and `CHANGELOG.md` if it exists) — prominent behavior-change callout.
 - Tests per NFR-3.
 
 ## Baseline Branch
