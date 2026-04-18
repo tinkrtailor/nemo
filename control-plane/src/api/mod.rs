@@ -106,6 +106,7 @@ mod tests {
             git: git.clone(),
             config: Arc::new(NautiloopConfig::default()),
             kube_client: None,
+            pool: None,
         };
         build_router(state)
     }
@@ -218,6 +219,9 @@ mod tests {
         async fn advisory_unlock(&self, _: Uuid) -> crate::error::Result<()> {
             unimplemented!()
         }
+        async fn cleanup_pod_snapshots(&self, _: u32) -> crate::error::Result<u64> {
+            unimplemented!()
+        }
     }
 
     #[tokio::test]
@@ -263,6 +267,7 @@ mod tests {
             git: git.clone(),
             config: Arc::new(NautiloopConfig::default()),
             kube_client: None,
+            pool: None,
         };
         let app = build_router(state);
 
