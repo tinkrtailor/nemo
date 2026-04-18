@@ -1,0 +1,97 @@
+{
+  "round": 4,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "line": 996,
+      "description": "FR-3a: Extend action sends empty JSON body `{}` but the server's ExtendRequest requires `add_rounds: u32` with no serde default. The request will always fail with a deserialization error. The spec says 'Extend --add 10', so the body should be `{\"add_rounds\": 10}`.",
+      "suggestion": "Change the POST body from `serde_json::json!({})` to `serde_json::json!({\"add_rounds\": 10})`."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "line": 130,
+      "description": "ExtendActionResponse expects a `state` field, but the server's ExtendResponse serializes `resumed_to_state: LoopState`, `prior_max_rounds`, and `new_max_rounds`. The field name mismatch means the client will fail to deserialize the response even if the request body is fixed.",
+      "suggestion": "Align ExtendActionResponse with ExtendResponse: use `resumed_to_state` or add `#[serde(rename)]`. Consider also including `new_max_rounds` in the success message."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "line": 881,
+      "description": "FR-6: Multi-loop view (FR-6a) only has log data for loops that have been selected during the session. The SSE log stream only subscribes to the currently-selected loop. Loops that were never selected will show 'waiting for logs...' in the multi-loop view, defeating its purpose of showing recent activity across all active loops simultaneously.",
+      "suggestion": "Subscribe to log SSE streams for all active (non-terminal) loops, not just the selected one. This requires spawning additional SSE connections for unselected loops."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "line": 1357,
+      "description": "FR-1b: Batch inspect task sleeps 5s then waits up to 5s for loop list changes, effectively updating every 5-10 seconds. The spec says 'Header updates every 2s in line with status polling.' The header cost/token data will be stale for several seconds relative to state changes.",
+      "suggestion": "Reduce the sleep interval to 2-3 seconds, or trigger a batch inspect refresh immediately when the status poller delivers new data."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/rounds_table.rs",
+      "line": 37,
+      "description": "model_implementor and model_reviewer are destructured as `_` (discarded) at lines 37-38, but then accessed via `cfg.model_implementor` and `cfg.model_reviewer` at line 93. While this compiles because `cfg` is a reference, the intent is confusing — the destructuring suggests these values are unused, but they are in fact used for cost calculation. This is a readability bug that could lead to future maintenance errors.",
+      "suggestion": "Bind them properly: change `model_implementor: _` to `model_implementor` and `model_reviewer: _` to `model_reviewer`, then use the local variables instead of `cfg.model_implementor`/`cfg.model_reviewer`."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/handlers.rs",
+      "line": 949,
+      "description": "FR-5b: Round-scoped diffing relies on `new_sha` field in round output. There is no guarantee that implement/revise stage output contains this exact field name. If the field is named differently (e.g., 'commit_sha', 'head_sha', 'branch_tip'), the lookup silently fails and returns a BadRequest error. The actual output schema should be verified.",
+      "suggestion": "Verify the implement/revise stage output schema to confirm `new_sha` is the correct field. Consider also checking alternative field names as fallbacks, or document the expected format."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "description": "FR-4b: Desktop notifications are behind a cargo feature flag `desktop-notifications` that is not enabled by default. There is no way for a user to enable this feature without recompiling with `--features desktop-notifications`. The spec says it should be gated by config `[helm] desktop_notifications = true`, implying the feature should be available at runtime without special compilation.",
+      "suggestion": "Either make `desktop-notifications` a default feature, or document in the README/config how to compile with the feature enabled. Alternatively, make notify-rust non-optional and use a runtime config check only."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/summary.rs",
+      "description": "FR-1a: The header omits zero-count stages. The spec example shows '0 harden' — while omitting zeros is arguably better UX, it technically deviates from the spec format. More importantly, when ALL stages are zero (e.g., loops in PAUSED or AWAITING_REAUTH state), the stage breakdown section will be empty, producing an awkward double-separator in the header.",
+      "suggestion": "Handle the edge case where no stages have counts > 0 by either showing '0 active stages' or always including at least the implementing count."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "description": "FR-4a: The spec says FAILED transitions should also trigger notifications, but a loop can transition directly from PENDING to FAILED (e.g., if the initial job fails before any state was recorded). On the first status poll, `previous_states` is empty so no FAILED loops will trigger notifications. On subsequent polls, only transitions from a known state to FAILED will trigger. This is generally correct but worth noting that initial FAILED loops won't bell.",
+      "suggestion": "This is likely acceptable behavior — initial state population shouldn't trigger bells. No action needed, just noting the edge case."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/helm/mod.rs",
+      "line": 867,
+      "description": "Log lines stored as Arc<String> but render_logs clones via `line.as_str().to_owned()` on every render frame, creating a fresh String allocation per line per frame. This defeats the purpose of Arc sharing for the rendering path.",
+      "suggestion": "Consider caching rendered Text or using Cow to avoid per-frame cloning."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/helm/themes.rs",
+      "description": "ThemeName has `from_str_opt` as an inherent method but doesn't implement the standard `FromStr` trait. This is slightly unconventional in Rust.",
+      "suggestion": "Consider implementing `FromStr` for ThemeName for idiomatic Rust."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/helm/actions.rs",
+      "description": "Duplicate `is_terminal_state` function exists in actions.rs, rounds_table.rs, summary.rs, and multi_view.rs. Should be consolidated.",
+      "suggestion": "Extract `is_terminal_state` into a shared utility, e.g., in mod.rs or a shared helpers module."
+    }
+  ]
+}
