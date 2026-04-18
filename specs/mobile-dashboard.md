@@ -83,7 +83,15 @@ Today's approve / cancel / extend require the CLI. If the operator is AFK and a 
 
 **FR-3d.** Card grid auto-refreshes every 5s via a small vanilla-JS poll that fetches `/status` and re-renders card fields in place (no full page reload). State transitions animate with a 1s color fade on the badge.
 
-**FR-3e.** Filter/segment chips at the top of the grid: `Active (N)`, `Converged (N)`, `Failed (N)`, `All`. Tapping a chip filters the grid.
+**FR-3e.** Two rows of filter/segment chips at the top of the grid:
+- **State row**: `Active (N)`, `Converged (N)`, `Failed (N)`, `All`. Tapping filters by state.
+- **Engineer row**: one chip per engineer with at least one loop in the current view, plus `Mine` (default) and `Team`. `Mine` scopes to the viewer's own loops (derived from API-key → engineer mapping). `Team` flips the `/dashboard/state?team=true` query and shows all engineers. Individual-engineer chips scope to one engineer.
+
+Chips are independent: selecting `Active` + `alice` shows Alice's active loops. Default landing state is `Active` + `Mine` — engineers see their own work first.
+
+**FR-3f.** In team view (or any time a card belongs to a non-viewer engineer), every card displays an **engineer badge**: a small colored chip at the top-left with initials or short handle. Stable per-engineer color derived from a hash of the engineer name — alice is always the same color. Lets the CTO scan a team dashboard and see at a glance whose loop is whose without reading every label.
+
+**FR-3g.** Auth model clarification: `team=true` is a **view filter, not a permission boundary**. The cluster has a single shared API key today; any dashboard user authenticated with that key can flip `Team` on and see every engineer's loops. Matches existing CLI behavior (`nemo status --team`). Appropriate for small, trusted teams. Per-engineer keys with an `admin` role are the path for strict RBAC — noted in Out of Scope.
 
 ### FR-4: Loop detail view
 
@@ -183,7 +191,8 @@ A reviewer can verify by:
 
 ## Out of Scope
 
-- **User accounts / multi-tenancy.** Single API key, single operator. Multi-engineer teams view the same loops — matches the CLI model.
+- **Per-engineer API keys + role-based access.** v1 uses the single shared cluster API key; `Mine` vs `Team` is a view filter on top of full visibility. Strict RBAC (engineer A truly cannot see engineer B's loops, admin can see everyone) requires per-engineer keys with claims + handler-level enforcement; punted to a follow-up spec once a real team demands it.
+- **User accounts with password / SSO / SAML.** Not in v1. Tailscale + shared API key is the model.
 - **Push notifications** (web push, SMS, Slack). Future spec; dashboard v1 is a pull-to-refresh world.
 - **Spec editor / upload via web.** Specs live in the repo; the dashboard is observation + light actions.
 - **Historical analytics** (convergence over time, cost per engineer per week). Separate spec once the data is accumulated.
