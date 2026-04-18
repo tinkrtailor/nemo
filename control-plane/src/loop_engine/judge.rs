@@ -118,6 +118,54 @@ pub struct RoundSummaryForJudge {
     pub duration_secs: Option<i64>,
 }
 
+/// Lightweight summary of JudgeContext for storage in judge_decisions.input_json.
+/// Excludes spec_content (can be tens of KB) and round verdicts (O(n²) cumulative)
+/// to keep the table from growing excessively.
+#[derive(Debug, Clone, Serialize)]
+struct JudgeContextSummary {
+    loop_id: Uuid,
+    spec_path: String,
+    spec_content_len: usize,
+    phase: String,
+    round: i32,
+    max_rounds: i32,
+    round_stages: Vec<RoundStageSummary>,
+    current_verdict: serde_json::Value,
+    recurring_findings: Vec<RecurringFinding>,
+}
+
+/// Minimal per-round info for storage (stage + duration only, no verdict blob).
+#[derive(Debug, Clone, Serialize)]
+struct RoundStageSummary {
+    round: i32,
+    stage: String,
+    duration_secs: Option<i64>,
+}
+
+impl JudgeContextSummary {
+    fn from_context(ctx: &JudgeContext) -> Self {
+        Self {
+            loop_id: ctx.loop_id,
+            spec_path: ctx.spec_path.clone(),
+            spec_content_len: ctx.spec_content.as_ref().map_or(0, |s| s.len()),
+            phase: ctx.phase.clone(),
+            round: ctx.round,
+            max_rounds: ctx.max_rounds,
+            round_stages: ctx
+                .rounds
+                .iter()
+                .map(|r| RoundStageSummary {
+                    round: r.round,
+                    stage: r.stage.clone(),
+                    duration_secs: r.duration_secs,
+                })
+                .collect(),
+            current_verdict: ctx.current_verdict.clone(),
+            recurring_findings: ctx.recurring_findings.clone(),
+        }
+    }
+}
+
 /// Trait for the judge model client, enabling mock testing (NFR-5).
 #[async_trait]
 pub trait JudgeModelClient: Send + Sync + 'static {
@@ -237,7 +285,12 @@ impl OrchestratorJudge {
             return None;
         }
 
-        // FR-1b: determine trigger
+        // FR-1b: determine trigger.
+        // Priority order (highest → lowest): RecurringFindings > MaxRounds > NotClean.
+        // RecurringFindings takes precedence because it's the most specific signal —
+        // it tells the judge exactly which findings are stuck, enabling churn detection.
+        // The judge receives full context regardless of trigger, so priority only
+        // affects the `trigger` label logged to judge_decisions for Stage 2 analysis.
         if !recurring_findings.is_empty()
             && recurring_findings
                 .iter()
@@ -346,7 +399,8 @@ impl OrchestratorJudge {
             round: context.round,
             phase: context.phase.clone(),
             trigger: trigger.to_string(),
-            input_json: serde_json::to_value(context).unwrap_or_default(),
+            input_json: serde_json::to_value(JudgeContextSummary::from_context(context))
+                .unwrap_or_default(),
             decision: output.decision.to_string(),
             confidence: output.confidence,
             reasoning: output.reasoning.clone(),
@@ -861,6 +915,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_invoke_timeout_returns_none() {
+        // Pause time so the 30s timeout resolves instantly in virtual time
+        tokio::time::pause();
+
         let store = Arc::new(MemoryStateStore::new());
         let judge = OrchestratorJudge::new(
             test_config(),
@@ -868,7 +925,6 @@ mod tests {
             store,
         );
 
-        // Use a shorter timeout for tests
         let ctx = test_context();
         let output = judge.invoke(&ctx, &JudgeTrigger::NotClean).await;
         // The SlowJudgeClient sleeps 60s but the judge has a 30s timeout

@@ -639,21 +639,20 @@ impl ConvergentLoopDriver {
 
                         match judge_decision {
                             Some(ref output) if output.decision == JudgeDecision::ExitClean => {
-                                let already_used = self
-                                    .exit_clean_used
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .contains(&record.id);
-                                if already_used {
+                                // FR-7a: atomic check-and-insert to prevent TOCTOU race
+                                let is_new = {
+                                    let mut guard = self
+                                        .exit_clean_used
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    guard.insert(record.id)
+                                };
+                                if !is_new {
                                     tracing::warn!(
                                         loop_id = %record.id,
                                         "Judge returned exit_clean a second time in harden; treating as continue (FR-7a)"
                                     );
                                 } else {
-                                    self.exit_clean_used
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .insert(record.id);
                                     tracing::info!(
                                         loop_id = %record.id,
                                         round = record.round,
@@ -694,7 +693,20 @@ impl ConvergentLoopDriver {
                             _ => {}
                         }
 
-                        // Heuristic / judge-continue: dispatch revise with findings
+                        // Heuristic / judge-continue: check max rounds before dispatching
+                        if record.round >= record.max_rounds {
+                            record.state = LoopState::Failed;
+                            record.sub_state = None;
+                            record.failure_reason = Some(format!(
+                                "Max harden rounds ({}) exceeded",
+                                record.max_rounds
+                            ));
+                            record.active_job_name = None;
+                            record.failed_from_state = Some(LoopState::Hardening);
+                            self.store.update_loop(record).await?;
+                            return Ok(LoopState::Failed);
+                        }
+
                         // Extract hint from judge decision if present (FR-3)
                         let hint = judge_decision.and_then(|o| o.hint);
                         self.dispatch_revise(record, &v, hint).await
@@ -955,23 +967,21 @@ impl ConvergentLoopDriver {
                 // Handle judge override decisions
                 match judge_decision {
                     Some(ref output) if output.decision == JudgeDecision::ExitClean => {
-                        // FR-7a: exit_clean one-shot guard
-                        let already_used = self
-                            .exit_clean_used
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .contains(&record.id);
-                        if already_used {
+                        // FR-7a: atomic check-and-insert to prevent TOCTOU race
+                        let is_new = {
+                            let mut guard = self
+                                .exit_clean_used
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            guard.insert(record.id)
+                        };
+                        if !is_new {
                             tracing::warn!(
                                 loop_id = %record.id,
                                 "Judge returned exit_clean a second time; treating as continue (FR-7a)"
                             );
                             // Fall through to continue logic below
                         } else {
-                            self.exit_clean_used
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .insert(record.id);
                             tracing::info!(
                                 loop_id = %record.id,
                                 round = record.round,
