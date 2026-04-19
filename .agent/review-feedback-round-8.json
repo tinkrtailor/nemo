@@ -1,0 +1,86 @@
+{
+  "round": 8,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "cli/src/commands/help_ai.md",
+      "line": 22,
+      "description": "ASCII state machine diagram is incorrect: both arrows from HARDENING (start mode AND harden_only) point down to AWAITING_APPROVAL. The harden_only arrow should go to HARDENED, not AWAITING_APPROVAL. The HARDENED state does not appear anywhere in the ASCII diagram. Additionally, the HARDENING → FAILED transition is not shown. The spec (FR-1a) requires 'all transitions above must be represented' in the ASCII diagram. The transitions table below the diagram is correct, but the visual diagram — which is what LLMs will read first — teaches the wrong mental model.",
+      "suggestion": "Redraw the ASCII diagram to include: (1) a HARDENED box with an arrow from HARDENING labeled '(harden_only)', (2) a FAILED box with arrows from HARDENING, IMPLEMENTING, TESTING, and REVIEWING. The current diagram misleads LLMs into thinking harden_only flows through AWAITING_APPROVAL."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/help_ai.md",
+      "line": 13,
+      "description": "The ASCII diagram omits the FAILED state entirely — no box, no incoming arrows. The spec's transition table requires IMPLEMENTING→FAILED, TESTING→FAILED, REVIEWING→FAILED, and HARDENING→FAILED transitions to be visually represented. The FAILED→IMPLEMENTING (via nemo extend) transition is also missing. An LLM reading only the diagram gets no visual indication of how loops fail.",
+      "suggestion": "Add a FAILED box to the diagram with incoming arrows from IMPLEMENTING, TESTING, REVIEWING, and HARDENING, and an outgoing arrow back to IMPLEMENTING labeled '(nemo extend)'."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/help_ai.md",
+      "line": 13,
+      "description": "The ASCII diagram omits the PAUSED and AWAITING_REAUTH states. The spec's transition table includes transitions from 'Any non-terminal → PAUSED', 'PAUSED → (previous state)', 'Any active → AWAITING_REAUTH', and 'AWAITING_REAUTH → (previous state)'. These are important operational states that LLMs need to understand. The CANCELLED state is also absent from the diagram.",
+      "suggestion": "Add at minimum a footnote under the diagram noting that PAUSED, AWAITING_REAUTH, and CANCELLED can be reached from any active state and referencing the full transitions table. Alternatively, add these as satellite boxes."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/main.rs",
+      "line": 1068,
+      "description": "The --no-hints check uses raw `std::env::args().any(|a| a == \"--no-hints\")` instead of accessing `cli.no_hints` from the parsed Cli struct. This works in the common case but has a subtle issue: `run()` calls `Cli::parse()` internally, which consumes the process args. If clap parsing fails (e.g., unknown flag), it exits before `run()` returns an Err, so the hint system never fires. More importantly, the raw args check bypasses clap's validation — if `--no-hints` appears as a positional value in a future command, the raw check would incorrectly suppress hints. This is fragile compared to restructuring to expose the parsed flag.",
+      "suggestion": "Consider restructuring: parse `Cli` in main(), pass it into `run(cli)`, and access `cli.no_hints` directly. This keeps the hint check and the parsed state in the same scope."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/error_hints.rs",
+      "line": 40,
+      "description": "The 404 'not found' hint pattern is overly broad — it matches ANY 404 response containing 'not found', not just spec-not-found errors. A 404 for a non-existent loop ID (e.g., `nemo inspect nonexistent-branch`) would trigger the hint 'The spec path was not found in the git repository', which is misleading. The spec says this hint targets the server-side NautiloopError::SpecNotFound specifically.",
+      "suggestion": "Narrow the pattern to 'spec not found' or 'spec_not_found' to avoid false matches on other 404 errors. If the server's SpecNotFound message is generic, consider adding a more specific hint or using a broader message like 'The requested resource was not found.'"
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/help_ai.rs",
+      "line": 229,
+      "description": "The LoopState drift guard test uses a hardcoded manual list of state names rather than importing LoopState from control-plane/src/types/mod.rs. The spec says 'assert that every variant of the LoopState enum (imported from control-plane/src/types/mod.rs) appears by name'. With a manual list, if a new state is added to the enum but someone forgets to update BOTH the test's manual list AND the template, the drift goes undetected — exactly the scenario the test is supposed to prevent.",
+      "suggestion": "Import LoopState from the control-plane crate (add it as a dev-dependency if needed) and iterate over its variants using strum::IntoEnumIterator or a similar mechanism. If cross-crate dependency is undesirable, add a separate test in the control-plane crate that asserts its LoopState variants match a known list, so at least one test breaks when the enum changes."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/main.rs",
+      "line": 710,
+      "description": "`nemo help ai extra_token` silently ignores extra tokens after 'ai'/'llm'. The code checks `topic[0] == \"ai\"` and renders the AI primer regardless of additional tokens. This means `nemo help ai approve` renders the AI primer instead of erroring, which is inconsistent with the flag interaction table that defines specific behavior for each invocation pattern.",
+      "suggestion": "Add a check: if `topic.len() > 1` and `topic[0]` is 'ai' or 'llm', bail with an error like 'nemo help ai does not accept additional arguments'."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/main.rs",
+      "line": 1056,
+      "description": "`use clap::CommandFactory;` import is placed between `run()` and `main()` at line 1056, outside the module's top-level import block. This is unusual Rust style — imports are conventionally grouped at the top of the file.",
+      "suggestion": "Move `use clap::CommandFactory;` to the top of the file with the other imports."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/help_ai.md",
+      "line": 163,
+      "description": "The stale kubectl context recovery playbook suggests using `--server` flag, but the actual stale-context issue is about kubectl context, not the nemo server URL. Using `--server` would only help if the nemo control plane URL changed, not if the kubectl context for pod operations is stale. The spec says 'Stale kubectl context? Don't switch, use `--context=<name>` per command' but the implementation uses `--server`.",
+      "suggestion": "Clarify that `--server` overrides the nemo control plane URL (which indirectly handles cluster targeting), or update to match the spec's `--context` suggestion if such a flag exists."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/main.rs",
+      "line": 758,
+      "description": "In `handle_help`, when resolving a subcommand via `find_subcommand`, the found subcommand is cloned (`current = sub.clone()`) and then cloned again at line 758 (`let mut help_cmd = current.clone()`). The second clone is unnecessary — `current` is already owned at this point.",
+      "suggestion": "Change `let mut help_cmd = current.clone()` to `let mut help_cmd = current` since `current` is already an owned `Command` after the loop."
+    }
+  ]
+}
