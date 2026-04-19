@@ -1,0 +1,78 @@
+{
+  "round": 10,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 432,
+      "description": "build_dashboard_state calls store.get_loops_for_engineer() which has a LIMIT 100 in the Postgres implementation. The card grid aggregates (counts_by_state, total_tokens, total_cost, total_loops) are computed from this truncated dataset. For team-mode deployments with >100 loops, filter chip counts will be silently incorrect. The trait comment explicitly says 'Limited to 100 results for CLI/UI display. For aggregation, use get_all_loops instead.' — but the dashboard aggregation still uses get_loops_for_engineer. Note: the MemoryStateStore has no such limit, so all tests pass despite this production bug.",
+      "suggestion": "Use get_all_loops(include_terminal, Some(cutoff_24h)) for computing aggregates. Continue using get_loops_for_engineer for the actual card list rendering (or apply a display limit after aggregation). Alternatively, add a get_loops_for_dashboard() method that computes aggregates server-side without the LIMIT."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/state/postgres.rs",
+      "line": 855,
+      "description": "get_terminal_loops interpolates `limit` directly into the SQL string via format!() instead of using a bind parameter: `LIMIT {limit}`. While usize prevents SQL injection, this violates the project guideline of 'Compile-time query checking where possible' and is inconsistent with other queries in the file that bind limit values as parameters (e.g., get_recent_logs uses .bind(limit as i64)).",
+      "suggestion": "Change to 'ORDER BY updated_at DESC, id DESC LIMIT ${param_idx}' and add q = q.bind(limit as i64) to the bind chain."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/state/postgres.rs",
+      "line": 462,
+      "description": "get_all_loops uses runtime sqlx::query() for all three query branches instead of compile-time sqlx::query!(). The (true, Some(cutoff)) branch has no LIMIT clause, meaning for a 14-day window with many loops, the result set is bounded only by the time filter. While the fleet_summary caches results for 60s, a cache miss still triggers this potentially expensive query. The project guidelines specify 'compile-time query checking where possible.'",
+      "suggestion": "Add a safety LIMIT (e.g., 50000) to the (true, Some(cutoff)) branch as a safeguard. Consider using sqlx::query!() with separate static queries for each branch where feasible."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 256,
+      "description": "The dashboard_stream SSE handler for active loops sends an initial batch of recent logs, then tails new logs. But the initial batch and the tail use different cursor bases: the initial batch uses get_recent_logs (last 200 by timestamp DESC), and the tail starts from the last log's timestamp. If new logs arrive between the get_recent_logs call and the SSE stream starting, they could be missed (race window). Additionally, the seen_ids set from the initial batch is used for dedup, but if the initial 200 logs span many different timestamps, the seen_ids set could grow large.",
+      "suggestion": "This is a minor race window that's acceptable for a dashboard log tail. Document it as a known limitation. The dedup set size is bounded by the initial 200 logs, so it's not a memory concern."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 654,
+      "description": "build_feed_response passes since=None to get_terminal_loops, meaning no time bound on the query. While the SQL LIMIT prevents returning too many rows, the database still needs to scan and sort potentially thousands of terminal loops by updated_at DESC before applying the LIMIT. For long-lived deployments, this full-table scan runs on every feed page load.",
+      "suggestion": "Pass a reasonable default since value (e.g., 90 days) to bound the query. The feed is for recent terminal events; historical events older than 90 days are unlikely to be relevant."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 625,
+      "description": "FeedResponse includes an 'engineers' field that is not in the spec's response schema for /dashboard/feed. While this field is necessary for rendering per-engineer filter chips (FR-12b), it's an undocumented deviation from the spec schema.",
+      "suggestion": "Update the spec's /dashboard/feed response schema to include the 'engineers' field, or document it as an implementation extension."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/state/postgres.rs",
+      "line": 671,
+      "description": "get_rounds_batch uses runtime sqlx::query() instead of compile-time sqlx::query!(). The project guidelines say 'Compile-time query checking where possible.' However, since ANY($1) with a dynamic array makes compile-time checking awkward, runtime query is acceptable here.",
+      "suggestion": "Add a comment explaining why runtime query is used (dynamic array input)."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/api/dashboard/templates.rs",
+      "line": 27,
+      "description": "The layout function uses format!() to build the outer HTML shell, bypassing maud's auto-escaping for the body content. While html_escape is applied to title and viewer, the extra_attrs parameter is not escaped — it's trusted to be safe because it's constructed from UUID strings and booleans. This pattern is fragile if future callers pass user-controlled data.",
+      "suggestion": "Add a comment documenting that extra_attrs must only contain trusted values, or validate/escape it."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 427,
+      "description": "restoreFeedFilter checks feedList.querySelectorAll('.feed-item').length === 0 to detect empty results when a stale filter is active. This correctly checks for .feed-item elements (not all children). However, the redirect to /dashboard/feed to clear the filter causes a full page reload, which could be jarring if the user intentionally set an engineer filter that has no results yet.",
+      "suggestion": "Consider only clearing the filter after the user has been on the page for a moment, or show a 'No results for this filter — clear?' prompt instead of auto-redirecting."
+    }
+  ]
+}
