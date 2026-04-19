@@ -1,0 +1,77 @@
+{
+  "round": 11,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/state/postgres.rs",
+      "line": 470,
+      "description": "get_all_loops SQL uses `created_at > $1` to bound terminal loops, but build_dashboard_state needs loops that *terminated* recently (updated_at within 24h). A loop created 3 days ago that converged 2 hours ago has created_at outside the 24h cutoff and is terminal, so it's excluded by SQL — even though updated_at is within 24h. The Rust filter in build_dashboard_state checks `l.updated_at > cutoff` but never sees these loops because the SQL already dropped them. This causes recently-converged long-running loops to disappear from the Converged/Failed filter chips.",
+      "suggestion": "Change the SQL for (true, Some(cutoff)) to: `WHERE (created_at > $1 OR updated_at > $1) OR state NOT IN (terminal states) ORDER BY created_at DESC LIMIT 10000`. This catches terminal loops that finished recently regardless of when they were created."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 271,
+      "description": "Acceptance Criteria #6 requires a confirm modal for the Extend +10 action: 'Tap a FAILED-max-rounds loop's Extend button. Confirm modal → +10 rounds → loop resumes.' The JS directly calls actionFetch without showing a confirm modal, unlike the Cancel action which correctly shows one.",
+      "suggestion": "Wrap the extend actionFetch in a showConfirmModal call: `showConfirmModal('Extend +10 rounds?', 'This will add 10 rounds and resume the loop.', function() { actionFetch(...) })`"
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/state/postgres.rs",
+      "line": 830,
+      "description": "get_terminal_loops builds the cursor WHERE clause as `(updated_at < $N OR (updated_at = $N AND id < $N+1))` where $N is bound to cursor_ts. However, the parameter index variable `param_idx` is used for the LIMIT clause at the end. If the cursor is present, `param_idx` is incremented by 2 (for cursor_ts and cursor_id), but cursor_ts is referenced TWICE in the SQL ($N appears in both `<` and `=` comparisons). While PostgreSQL allows referencing the same $N multiple times, this pattern is fragile and should be verified — if a future refactor changes the bind order, it silently produces wrong results.",
+      "suggestion": "Add a comment documenting that $N is intentionally referenced twice in the cursor clause and that the bind order is: states, [since], [engineer], [cursor_ts, cursor_id], limit."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 656,
+      "description": "build_feed_response computes `extensions` as `((record.max_rounds - default_max) / 10).max(0)` but max_rounds and default_max are both i32. If max_rounds < default_max (e.g., if the config was changed to increase the default after the loop was created), the subtraction would be negative, and integer division of negative values in Rust rounds toward zero. The .max(0) handles this, but the division result could also be negative before .max(0). This is correct but worth noting.",
+      "suggestion": "No change needed — .max(0) handles the edge case correctly."
+    },
+    {
+      "severity": "medium",
+      "category": "performance",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 741,
+      "description": "build_specs_response calls get_loops_by_spec_path with a hardcoded limit of 10000, then iterates all results to compute aggregates. For specs with many historical runs, this loads up to 10000 LoopRecords into memory and fetches all their rounds via get_rounds_batch. While 10000 runs per spec is unlikely, the unbounded round fetch could be expensive if each loop has many rounds.",
+      "suggestion": "Consider adding a comment documenting the 10000 limit as a safety bound, or use a more targeted aggregate query that computes totals in SQL."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 101,
+      "description": "FeedResponse includes an 'engineers' field that is not in the spec's /dashboard/feed response schema. While functionally needed for rendering per-engineer filter chips (FR-12b), it's an undocumented deviation from the specified JSON contract.",
+      "suggestion": "Update the spec's /dashboard/feed response schema to include the 'engineers' field, or document it as an implementation extension."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/state/postgres.rs",
+      "line": 462,
+      "description": "get_all_loops, get_rounds_batch, get_recent_logs, get_loops_by_spec_path, and get_terminal_loops all use runtime sqlx::query() instead of compile-time sqlx::query!(). The project guidelines say 'Compile-time query checking where possible.' While acceptable given dynamic query conditions, this is a significant surface area without compile-time SQL validation.",
+      "suggestion": "Add inline comments on each runtime query explaining why compile-time checking is not feasible (dynamic array inputs, conditional WHERE clauses)."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 499,
+      "description": "Web audio bell on convergence (FR-7a) creates a new AudioContext on every bell event. Browsers limit the number of AudioContext instances (typically 6-8). If many loops converge in quick succession, new AudioContext creation will fail silently. While the try/catch handles this, it's wasteful.",
+      "suggestion": "Create a single AudioContext lazily on first use and reuse it for subsequent bell plays."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "control-plane/src/api/dashboard/templates.rs",
+      "description": "No docs/dashboard-setup.md was created. The spec's 'Files Likely Touched' section and FR-2d both reference this document for covering the security model (Tailscale as default, explicit warning about public exposure).",
+      "suggestion": "Create docs/dashboard-setup.md with security model documentation as specified in the spec."
+    }
+  ]
+}
