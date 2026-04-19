@@ -1,0 +1,77 @@
+{
+  "round": 7,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/state/postgres.rs",
+      "line": 447,
+      "description": "PgStateStore::get_loops_for_engineer has LIMIT 100, but all dashboard aggregation functions (fleet_summary, feed, specs, stats) call this method expecting ALL loops. With >100 loops in a 7-day window, fleet_summary.total_loops, converge_rate, avg_rounds, and top_spender will be computed from a truncated dataset, producing silently incorrect numbers. The MemoryStateStore has no such limit, so all tests pass despite this production bug.",
+      "suggestion": "Either (a) add a separate method like get_all_loops_in_window(cutoff: DateTime) without LIMIT for aggregation use cases, or (b) remove the LIMIT 100 from get_loops_for_engineer and add pagination at the caller level where needed (CLI status), or (c) at minimum raise the limit significantly for the include_terminal=true path used by dashboard aggregations."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 488,
+      "description": "Multiple async tests modify the NAUTILOOP_API_KEY env var via unsafe { std::env::set_var() }. Since cargo test runs tests in parallel within the same process, concurrent tests can race on this shared mutable state. One test setting the key while another test's auth middleware reads it can cause intermittent 401 failures.",
+      "suggestion": "Either (a) use #[serial_test::serial] to run these tests sequentially, (b) use a mutex around env var access, or (c) refactor auth to accept the expected key as a parameter/config rather than reading from env."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 656,
+      "description": "Feed cursor pagination applies the state/engineer filter AFTER collecting engineers into engineers_set but BEFORE the cursor exclusion. This means: on page 2 with filter=converged, loops that are Failed (filtered out) still contribute to engineers_set. This is actually correct behavior (show all available engineers regardless of filter). However, the cursor exclusion also runs before the filter, meaning cursor-excluded items that match the filter are permanently skipped even though they should have been on page 1. If page 1's last item shares a timestamp with a filtered-out item, the cursor skips both.",
+      "suggestion": "Reorder: apply cursor exclusion before engineers collection so that cursor-excluded loops don't pollute the engineers list unnecessarily. The filter should be applied independently."
+    },
+    {
+      "severity": "medium",
+      "category": "performance",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 535,
+      "description": "build_fleet_summary calls get_loops_for_engineer(None, true, true) which loads ALL loops, then partitions into current and previous 7-day windows. Each window then calls get_rounds_batch for ALL loop IDs in that window. On a cache miss (every 60s), this fetches potentially hundreds of loops and thousands of rounds from the database. Meanwhile, /dashboard/state is polled every 5s and also calls get_loops_for_engineer, meaning loops are re-fetched on every poll even though only the fleet_summary is cached.",
+      "suggestion": "Cache the loops query result for the fleet_summary computation, or compute fleet_summary in a background task on a 60s interval rather than on-demand during the poll handler."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/templates.rs",
+      "line": 919,
+      "description": "Time series bar widths use integer division: day.converged * 100 / max_val. When max_val is large and day.converged is 1, this evaluates to 0 (since 1*100/8 = 12, but 1*100/101 = 0 for edge cases). More critically, when day.started == 0 (which shouldn't happen since loops must be started to exist), max_val would be max(0, 1) = 1, but if somehow started is 0, there's no division by zero since max_val = day.started.max(1). The real issue is that the 'other' bar computation day.started.saturating_sub(day.converged + day.failed) could underflow if converged + failed > started (possible if a loop converged in a different time window than it was started).",
+      "suggestion": "Guard the 'other' calculation and handle the case where converged + failed > started by clamping to 0 (saturating_sub already does this). Also consider using float division for bar widths to avoid zero-width bars for small counts."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 247,
+      "description": "StatsCache::get uses serde_json::to_value/from_value to clone the cached StatsResponse, which is O(n) in the size of the response and allocates intermediate JSON values. This is called on every /dashboard/stats request within the 60s cache window.",
+      "suggestion": "Derive Clone on StatsResponse (and its component types) to avoid the serialization round-trip. All field types (String, u64, f64, Option<f64>, Vec) already implement Clone."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/templates.rs",
+      "line": 17,
+      "description": "The html_escape function does not escape single quotes (') to &#39;. While currently safe because all HTML attributes in the layout function use double quotes, this is fragile — any future use of single-quoted attributes with user-controlled values would be an XSS vector.",
+      "suggestion": "Add .replace('\\'', '&#39;') to html_escape for defense in depth."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 427,
+      "description": "Feed page localStorage filter restore (restoreFeedFilter) triggers a full page navigation via location.href redirect on load. If the user has a stale filter saved (e.g., an engineer who no longer exists), they'll always see an empty feed page with no way to clear the filter without manually editing localStorage.",
+      "suggestion": "Add a 'clear filter' affordance on the feed page, or reset the localStorage value when the feed returns empty results with a saved filter."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/api/dashboard/auth.rs",
+      "description": "Cookie parsing functions (extract_cookie_value, extract_bearer) are duplicated between dashboard/auth.rs and api/auth.rs. Both modules implement identical cookie and bearer extraction logic.",
+      "suggestion": "The api/auth.rs already imports from crate::util. Move the cookie/bearer extraction helpers to crate::util as well and reference from both modules."
+    }
+  ]
+}
