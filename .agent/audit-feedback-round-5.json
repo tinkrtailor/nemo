@@ -1,0 +1,48 @@
+{
+  "round": 5,
+  "source": "audit",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/path/to/spec.md",
+      "description": "The spec does not explicitly state that `nemo help` and `nemo capabilities` must bypass config loading and API key checks. Currently, `main()` calls `config::load_config()` and bails with an error if `api_key` is missing (main.rs:260-272). Only `Init` and `Config` are special-cased before this gate. If `nemo help ai` or `nemo capabilities` hits this check, it fails for unconfigured users/agents — exactly the audience these commands are designed for.",
+      "suggestion": "Add an explicit note in the Implementation Note section (or as a new NFR) that `help` and `capabilities` commands must be dispatched before config loading and API key validation, similar to the existing `Init` and `Config` early-exit pattern in main.rs:249-258."
+    },
+    {
+      "severity": "medium",
+      "category": "clarity",
+      "file": "specs/path/to/spec.md",
+      "description": "FR-4c specifies `error_hints::find_hint(status_code, error_message)` with two separate parameters, but the current client.rs error path produces a single anyhow string: `\"API error ({status}): {body}\"`. The spec doesn't clarify how the status code is extracted from the anyhow error chain. The implementer must either: (a) change `client.rs` to use a custom error type carrying structured data, (b) parse the status code from the error string with a regex, or (c) use anyhow's downcast mechanism. Option (a) changes client.rs behavior (possibly violating NFR-1), option (b) is fragile, option (c) requires a new error type.",
+      "suggestion": "Specify the approach: recommend introducing a structured `ApiError { status: u16, body: String }` error type in client.rs that is wrapped in anyhow. The hint system downcasts to `ApiError` to get structured fields. Note that this internal refactor does not affect external CLI behavior and is compatible with NFR-1."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/path/to/spec.md",
+      "description": "`nemo auth --json` behavior when provider-specific flags are used (e.g., `nemo auth --claude --json`) is not specified. Should the JSON output include only the requested provider, or all three providers with the unrequested ones showing status 'skipped'? The current `auth.rs` implementation conditionally processes providers based on flags.",
+      "suggestion": "Clarify that when provider-specific flags are passed, only those providers appear in the `results` array. When no flags are passed (default: all providers), all three appear."
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/path/to/spec.md",
+      "description": "The flag interaction table for the `help` subcommand does not explicitly cover `nemo help <cmd> --format=json` (e.g., `nemo help approve --format=json`). It is implied to be an error by the rule '`--format` requires `--all` or a topic (e.g., `ai`)', but a reader could interpret `approve` as a valid 'topic'. The distinction between a 'topic' (ai/llm) and a 'command name' is implicit.",
+      "suggestion": "Add a row to the flag interaction table: `nemo help <cmd> --format=json` → Error: `--format is only supported with --all or 'ai'`. Or rename 'topic' to 'special topic' to distinguish from command names."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/path/to/spec.md",
+      "description": "The spec lists `logs`, `ps`, `helm`, `start`, `ship`, `harden`, `init`, and `config` as commands that do NOT get `--json` (FR-3a only lists stateful commands). However, there is no explicit rationale for excluding `ps` (which returns structured pod/process data that agents might want to parse). This is not necessarily wrong, but an agent trying to parse `nemo ps` output programmatically would have no JSON option.",
+      "suggestion": "Either add a brief note explaining why `ps` is excluded from `--json` (e.g., 'ps output is ephemeral and not useful for agent automation'), or consider adding it to the --json list."
+    },
+    {
+      "severity": "low",
+      "category": "consistency",
+      "file": "specs/path/to/spec.md",
+      "description": "The `Ship` command in the codebase treats `--harden` as an opt-in flag (default false), while `Start` treats hardening as the default (opt-out via `--no-harden`). The mega-primer's workflow 3 (ship) says '(no approval, no human) → auto-merged PR' but doesn't mention the harden opt-in. An LLM reading the mega-primer might not realize `ship` skips hardening by default, which differs from `start`'s behavior.",
+      "suggestion": "In the FR-1a ship workflow description, add a note: 'Ship skips hardening by default. Use `nemo ship --harden spec.md` to harden first.'"
+    }
+  ]
+}
