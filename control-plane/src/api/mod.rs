@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cache;
+pub mod dashboard;
 pub mod handlers;
 pub mod introspect;
 pub mod sse;
@@ -36,10 +37,12 @@ pub struct AppState {
 /// The /health endpoint is outside the auth layer so K8s probes work without an API key.
 pub fn build_router(state: AppState) -> Router {
     let authed = build_routes(state.clone()).layer(middleware::from_fn(auth::auth_middleware));
+    let dashboard = dashboard::build_dashboard_router();
 
     Router::new()
         .route("/health", get(health))
         .merge(authed)
+        .merge(dashboard)
         .with_state(state)
 }
 

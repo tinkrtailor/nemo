@@ -52,6 +52,7 @@ futures = "0.3"
 toml = "0.8"
 async-trait = "0.1"
 async-stream = "0.3"
+maud = { version = "0.26", features = ["axum"] }
 
 # Release profile — tuned for the sidecar binary per specs/rust-sidecar.md.
 #
