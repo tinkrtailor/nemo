@@ -276,22 +276,26 @@ See also: nemo status (find loop IDs), nemo logs (watch after approve).
 {
   "providers": [
     {
-      "name": "claude",
+      "provider": "claude",
       "models": ["claude-opus-4", "claude-sonnet-4", "claude-haiku-4"],
       "valid": true,
       "updated_at": "2025-01-15T10:30:00Z"
     },
     {
-      "name": "openai",
+      "provider": "openai",
       "models": ["gpt-5.4", "gpt-4o", "o1-preview", "o1-mini"],
       "valid": false,
-      "updated_at": null
+      "updated_at": ""
     }
   ]
 }
 ```
 
-> **Provider naming**: Uses `"claude"` (not `"anthropic"`) to match the codebase's internal provider naming convention (consistent with `nemo auth --claude`). Models are listed as flat string arrays from the hardcoded `CLAUDE_MODELS` / `OPENAI_MODELS` constants — there is no per-model role assignment since any model can serve any role. The `valid` and `updated_at` fields are passed through directly from the server's `ProviderInfo` struct (flat fields, not nested) — consistent with the spec's principle of avoiding translation layers between server responses and CLI JSON output.
+> **Provider naming**: Uses `"claude"` (not `"anthropic"`) to match the codebase's internal provider naming convention (consistent with `nemo auth --claude`). The `provider` field key matches the `ProviderInfo` struct's field name (not `"name"`), consistent with the spec's principle of avoiding translation layers. The `valid` and `updated_at` fields are also passed through directly from the server's `ProviderInfo` struct (flat fields, not nested). Note: `updated_at` is typed as `String` (not `Option<String>`) in both the CLI and control-plane `ProviderInfo` structs, so it serializes as `""` (empty string) when no value is set, not `null`. This spec does not require changing the server-side type.
+
+> **Model list construction**: The `models` array does not exist in the server's `ProviderInfo` struct — it is enriched CLI-side from the hardcoded `CLAUDE_MODELS` / `OPENAI_MODELS` constants. The CLI constructs a `ModelsJsonProvider` output struct that merges `ProviderInfo` fields (`provider`, `valid`, `updated_at`) from the server response with the client-side model list. This is an intentional exception to the pass-through principle because the server does not return model lists. There is no per-model role assignment since any model can serve any role.
+
+> **Omitted fields**: The server's `CredentialsResponse` struct also includes an `engineer: String` field. This field is intentionally omitted from the `models --json` output because the command's purpose is to report provider/model availability, not engineer identity. The `engineer` value is available via `nemo config` if needed.
 
 **`nemo auth --json`:**
 ```json
@@ -323,16 +327,18 @@ See also: nemo status (find loop IDs), nemo logs (watch after approve).
 | 409 | "Cannot approve: loop is in PENDING" | "Wait ~5s for the reconciler to advance PENDING → AWAITING_APPROVAL, then retry." |
 | 401 | "Authentication failed" | "Check your API key with `nemo config`. If expired, regenerate and update ~/.nemo/config.toml." |
 | 401 | "Unknown engineer" | "Run `nemo auth` to register your engineer identity with the cluster." |
-| 404 | "Spec not found" / "not found" (on start/ship) | "Ensure the spec file exists at the given path. Run `nemo start --help` for usage." |
+| 404 | "Spec not found" / "not found" (on start/ship) | "The spec path was not found in the git repository. Verify the branch and path are correct. Run `nemo start --help` for usage." |
+
+> **Note on 404 "Spec not found"**: This hint targets the **server-side** 404 returned by `NautiloopError::SpecNotFound`, which means the spec path does not exist in the git repository on the server. Local file-not-found errors (e.g., `Failed to read spec file`) are caught before the API call in `start.rs` / `ship.rs` and are not API errors — they do not pass through the `ApiError`-based hint system. If local file-not-found errors should also get hints, that should be handled in the command handler itself, not in `error_hints.rs`.
 
 > **Note on Claude token expiry**: The server error "Claude token expired" is internal to the loop engine's auth-error detection (in `driver.rs`) and surfaces as an AWAITING_REAUTH state transition, not as a 401 HTTP error to the CLI. Recovery for token expiry is covered in the AWAITING_REAUTH recovery playbook in FR-1a, not here.
 
 **FR-4b.** Recovery hints are CLI-side; server doesn't change. Each hint lives in `cli/src/commands/error_hints.rs` as `(pattern, hint)` pairs. Unknown errors pass through unchanged.
 
 Matching rules:
-- Patterns are **case-insensitive substring** matches against the error message body.
-- Patterns are checked **in definition order**; **first match wins** (no accumulation).
-- Where possible, combine substring matching with HTTP status code (e.g., 409 + "approve" → state conflict hint) to reduce fragility.
+- The function signature is `find_hint(status: u16, body: &str) -> Option<&'static str>`.
+- Each hint rule is a `(Option<u16>, &str, &str)` tuple of `(optional_status_code, body_substring, hint_text)`. A rule matches when: (a) the status code matches the rule's status (if the rule specifies one), AND (b) the body contains the rule's substring (case-insensitive).
+- Rules are checked **in definition order**; **first match wins** (no accumulation).
 - If the server changes its error message format in a future version, hints gracefully degrade: unmatched errors pass through with no hint rather than showing a wrong hint.
 
 > **Fragility note**: String-based pattern matching is inherently coupled to server error message wording. This is acceptable for v1 since the server and CLI are co-versioned. If the server adds structured error codes in the future, hints should migrate to code-based matching.
@@ -394,6 +400,22 @@ Matching rules:
 - `long`: the full `long_about` text (including examples, see-also).
 - `options`: array of flag/option descriptors. `short` is null if no short flag. `type` is one of `"bool"` or `"string"` — derived from clap's `ArgAction`: `SetTrue`/`SetFalse` → `"bool"`, everything else (`Set`, `Append`, `Count`) → `"string"`. There is no `"integer"` type; distinguishing integers from strings would require inspecting clap's value parser internals, which do not reliably expose type names at runtime. `Count` actions (e.g., verbosity flags like `-v`) are also mapped to `"string"` since they are rare — no current nemo commands use `Count`. Consumers that need numeric types should parse based on the argument name and context.
 - `positional_args`: array of positional argument descriptors. Omitted (or empty array) if the command takes no positional args.
+- **Global flags** (`--server`, `--insecure`, `--no-hints`) are defined on the parent `Cli` struct and are NOT included in each subcommand's `options` array. They are listed in a separate top-level `global_options` key using the same option descriptor format:
+
+```json
+{
+  "global_options": [
+    {
+      "name": "--server",
+      "short": "-s",
+      "type": "string",
+      "required": false,
+      "description": "Control plane server URL"
+    }
+  ],
+  "commands": { ... }
+}
+```
 
 ### FR-6: Version + capability report
 
@@ -478,6 +500,7 @@ All existing command invocations produce identical stdout/stderr, except that `n
 ### NFR-3: Tests
 
 - **Unit** (`cli/src/commands/help_ai.rs`): `nemo help ai` renders with no errors; contains section headings for state machine, workflows, recovery.
+- **Unit** (`cli/src/commands/help_ai.rs`): **LoopState drift guard** — assert that every variant of the `LoopState` enum (imported from `control-plane/src/types/mod.rs`) appears by name in the `help_ai.md` template. This prevents silent drift when new states are added to the enum without updating the template. The test should iterate over `LoopState` variant names (e.g., via `strum::IntoEnumIterator` or a manual list) and assert each appears as a substring in the embedded template string.
 - **Unit** (`cli/src/commands/*.rs`): each command's `long_about` contains "Example:" substring.
 - **Integration**: `nemo help --all --format=json` parses as valid JSON with expected keys.
 - **Unit** (`cli/src/commands/error_hints.rs`): for each `(pattern, hint)` pair, assert that a synthetic error message containing the pattern produces the expected hint. Also assert that an unrecognized error message produces no hint (passthrough).
