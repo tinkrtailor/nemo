@@ -1,0 +1,132 @@
+{
+  "round": 1,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 615,
+      "description": "Fleet summary `total_cost` is hardcoded to `0.0` — the `compute_fleet_summary` function never computes actual token costs because it doesn't fetch round data. The comment says 'computed properly in the dashboard_state endpoint with round data' but neither `grid_page` nor `dashboard_state` overrides the `total_cost` field before using it. FR-9a requires '$X.XX — total token cost' in the fleet summary, which will always render as '$0.00'.",
+      "suggestion": "Pass round data into `compute_fleet_summary` (or fetch it inside the function) so that `total_cost` is computed from actual `token_usage` data. Alternatively, compute it at the call site and patch the returned `FleetSummary`."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 628,
+      "description": "Fleet summary `top_spender` uses loop count × $0.25 as a cost proxy instead of actual token cost. FR-9a requires 'top: <engineer> ($X.XX)' showing the highest-spender's real cost. This will display fabricated dollar amounts.",
+      "suggestion": "Compute actual per-engineer cost by summing `compute_round_metrics` for each engineer's loops within the 7-day window."
+    },
+    {
+      "severity": "high",
+      "category": "performance",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 310,
+      "description": "N+1 query problem in `dashboard_state`: iterates all loops and calls `get_rounds()` per loop, plus `resolve_current_stage()` which may call `get_rounds()` again for Hardening state. For 50 active loops this is 50-100 DB queries. NFR-2 requires <200ms for 50 active loops. The whole point of FR-8b's `/dashboard/state` endpoint was to avoid N+1 patterns.",
+      "suggestion": "Add a bulk `get_rounds_for_loops(loop_ids: &[Uuid])` method to the state store, or cache rounds fetched for `compute_round_metrics` so `resolve_current_stage` doesn't re-fetch."
+    },
+    {
+      "severity": "high",
+      "category": "performance",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 529,
+      "description": "In `compute_stats`, loops are iterated TWICE with `get_rounds()` called per loop each time (once for per-engineer aggregation, once for per-spec aggregation). For N loops in the window this is 2N round queries. Combined with the 60s cache, this is expensive on cache miss.",
+      "suggestion": "Fetch rounds once per loop, compute both per-engineer and per-spec aggregates in a single pass."
+    },
+    {
+      "severity": "high",
+      "category": "performance",
+      "file": "control-plane/src/api/dashboard/render.rs",
+      "line": 7,
+      "description": "CSS and JS assets are included twice in the binary: once in `render.rs` (inlined into every HTML page via <style>/<script> tags) and once in `handlers.rs` (served as static files). Each page carries ~30KB of inline assets that are never cached by the browser. This likely violates NFR-2's '<100 KB uncompressed, <30 KB gzipped' page weight target and wastes bandwidth on every navigation.",
+      "suggestion": "Remove inline CSS/JS from `render.rs`. Use `<link rel=\"stylesheet\" href=\"/dashboard/static/dashboard.css\">` and `<script src=\"/dashboard/static/dashboard.js\"></script>` in the layout template instead, leveraging the static file handlers that already exist with `max-age=86400` caching."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 115,
+      "description": "In `grid_page`, loops are fetched twice from the store with identical parameters — once for building cards and once for computing filter counts (`all_loops`). This doubles DB load unnecessarily.",
+      "suggestion": "Compute counts from the original `loops` vec before applying the state filter, eliminating the second query."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "description": "FR-9b requires trend indicators comparing current vs prior 7-day window (e.g., '82% ↑8% converged'). The implementation has no prior-period comparison logic — trend indicators are completely missing.",
+      "suggestion": "Compute prior-window aggregates (days -14 to -7) alongside the current window and render delta arrows when prior data exists."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/render.rs",
+      "line": 510,
+      "description": "FR-12b requires per-engineer filter chips on the feed page. The implementation only has 'All events' / 'Converged only' / 'Failed only' chips, missing individual engineer filtering.",
+      "suggestion": "Add per-engineer chips to the feed page, similar to the grid page's engineer chip bar."
+    },
+    {
+      "severity": "medium",
+      "category": "security",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 47,
+      "description": "The raw API key is interpolated into the Set-Cookie header via `format!()` without any encoding or validation of characters. If the API key contains semicolons, newlines, or other special characters, this enables cookie attribute injection or HTTP header injection.",
+      "suggestion": "URL-encode the API key value before placing it in the cookie, or validate that the key contains only safe ASCII characters before setting the cookie."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 1505,
+      "description": "Multiple tests use `unsafe { std::env::set_var() }` which is unsound in multi-threaded contexts (and formally UB since Rust 1.66+ when multiple threads exist). Tokio tests run on a multi-threaded runtime by default. Different tests setting different values for NAUTILOOP_API_KEY can race with each other.",
+      "suggestion": "Use `#[tokio::test(flavor = \"current_thread\")]` for these tests, or refactor auth to accept the expected key as a parameter/config instead of reading from env var directly in the hot path."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 441,
+      "description": "The stats cache (`STATS_CACHE`) is a process-global `OnceLock<RwLock<StatsCache>>` that is shared across all tests. Tests manually clear it but this is fragile — concurrent test execution can still interfere. The cache also doesn't distinguish by `AppState`, so cached data from one test leaks into another.",
+      "suggestion": "Move the cache into `AppState` so each test gets its own cache instance."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/auth.rs",
+      "line": 14,
+      "description": "Auth middleware reads `NAUTILOOP_API_KEY` from environment on every request. If the env var is unset, it returns 500 Internal Server Error. This is the correct behavior, but in the existing API auth (`auth.rs`), the key may be loaded differently (e.g., from config). The dashboard auth is inconsistent with whatever the main API auth does.",
+      "suggestion": "Load the expected API key from `AppState.config` instead of directly from the environment, matching how the main API auth works."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "Cargo.lock",
+      "description": "The `maud` crate with `features = [\"axum\"]` pulls in `axum-core 0.4.5` alongside the app's `axum-core 0.5.6`. While the code works around this by calling `.into_string()` instead of relying on maud's `IntoResponse` impl, the axum feature flag is unnecessary overhead that introduces a duplicate semver-incompatible dependency.",
+      "suggestion": "Remove `features = [\"axum\"]` from the maud dependency in `Cargo.toml` since the axum integration trait isn't used — all rendering goes through `.into_string()` wrapped in `Html()`."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/render.rs",
+      "line": 168,
+      "description": "FR-9c says tapping any individual field in the fleet summary should navigate to `/dashboard/stats` with that field pre-focused. The implementation wraps the entire summary in a single `<a href=\"/dashboard/stats\">` link without field-level targeting.",
+      "suggestion": "Wrap each metric field in its own link with a query param or anchor (e.g., `/dashboard/stats?focus=cost`)."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/render.rs",
+      "line": 507,
+      "description": "FR-12b specifies filter selection should persist in localStorage across visits. The implementation uses URL query params and `<a>` links instead. Technically a spec deviation, though URL params are arguably better UX.",
+      "suggestion": "Add JS to save filter selection to localStorage and restore it on page load when no URL param is present."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 42,
+      "description": "FR-2b says the login form should validate the key 'by making an internal `/status` call'. The implementation validates directly against the env var. Functionally equivalent and arguably better, but doesn't exercise the same code path a real API consumer would.",
+      "suggestion": "Consider this acceptable as-is; the direct check is simpler and avoids a self-referential HTTP call."
+    }
+  ]
+}
