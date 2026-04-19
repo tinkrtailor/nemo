@@ -1,0 +1,70 @@
+{
+  "round": 9,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/main.rs",
+      "line": 658,
+      "description": "FR-5b spec violation: `build_help_all_markdown` only outputs `get_long_about()` text per command, but the spec says 'Same prose as individual `nemo help <cmd>` but concatenated.' Individual `nemo help <cmd>` uses `cmd.print_long_help()` which renders the full clap help including options, arguments, and usage — not just the long_about prose. An agent using `--all` gets degraded output compared to calling `help <cmd>` per command.",
+      "suggestion": "Use `sub.render_long_help().to_string()` instead of `sub.get_long_about()` to match the output of individual `nemo help <cmd>`. This renders the same full help clap produces for `--help`, including flags, positional args, and usage lines."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/main.rs",
+      "line": 748,
+      "description": "Borrow conflict in `handle_help` subcommand resolution loop: `for token in topic` borrows `topic`, but inside the `None` arm, `topic.join(\" \")` also borrows `topic`. This compiles because both are shared borrows. However, the error message shows ALL tokens including already-resolved ones, which is actually fine. The real issue: if the first token resolves but a later one doesn't (e.g., `nemo help cache nonexistent`), the error says 'Unknown command: cache nonexistent' — which is helpful. But if the very first token fails (e.g., `nemo help nonexistent`), `topic_str` is just 'nonexistent'. Both cases produce sensible output, so this is not a bug, just noting the behavior is correct.",
+      "suggestion": "No change needed — behavior is correct."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/help_ai.md",
+      "line": 155,
+      "description": "The stale cluster recovery playbook says to use `--server` to override the control plane URL, but the spec's FR-1a says 'Stale kubectl context? Don't switch, use `--context=<name>` per command.' These are different concepts: `--server` overrides the nemo API URL, while `--context` is a kubectl flag for selecting a k8s cluster context. The spec's guidance about kubectl contexts is not addressed by `--server`.",
+      "suggestion": "Either update the recovery playbook to address actual kubectl context staleness (which is outside nemo's scope — nemo communicates via its API, not kubectl directly), or reframe the playbook around what `--server` actually solves: 'If the control plane URL has changed or you manage multiple clusters, use `--server` per command.' The current text is reasonable for what nemo can actually control; the spec's mention of `--context` appears to be a spec error since nemo has no such flag."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/main.rs",
+      "line": 1069,
+      "description": "When `run()` returns a non-ApiError error (e.g., config load failure, network error), the hint system correctly skips it. However, when an ApiError occurs but `no_hints` is true, the code falls through to the generic `eprintln!(\"Error: {err}\")` path. The `err` here is the original `anyhow::Error` wrapping the `ApiError`, and its Display format is `\"API error (409): {body}\"`. This is correct and consistent with NFR-1. No issue here.",
+      "suggestion": "No change needed."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/help_ai.rs",
+      "line": 229,
+      "description": "The LoopState drift guard test manually lists all 13 variants and asserts `all_states.len() == 13`. While this catches additions to the enum (count mismatch), it does NOT catch renames. If `LoopState::Pending` is renamed to `LoopState::Queued` but the Display impl changes to output 'QUEUED', the test would fail because 'QUEUED' isn't in the template — which is correct. However, since the test uses `LoopState::to_string()` and the Display impl outputs SCREAMING_SNAKE_CASE, it would correctly detect the mismatch. The manual list is slightly fragile (could get out of sync with enum) but the count guard mitigates this. The spec suggests using `strum::IntoEnumIterator` for automatic iteration — the current approach is acceptable but not as robust.",
+      "suggestion": "Consider adding strum's EnumIter derive to LoopState and using `LoopState::iter()` instead of a manual list, eliminating the need for the count assertion and making the test fully automatic. This is optional since the current approach works."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/help_ai.rs",
+      "line": 12,
+      "description": "The help_ai.md Markdown template and the help_ai.rs JSON output are maintained independently with no test verifying consistency between them. If someone updates the template (e.g., adds a new workflow) but forgets to update the JSON builder, they diverge silently. The spec says FR-1c JSON should contain 'the same information' as the Markdown.",
+      "suggestion": "Add a test asserting key content parity — e.g., that the JSON `workflows` array has the same count and names as workflow headings found in the Markdown template, or that all state names in the JSON match those in the template."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/main.rs",
+      "line": 750,
+      "description": "In the subcommand resolution loop, `sub.clone()` is called on each iteration to convert the borrowed `&Command` to an owned `Command`. While necessary due to the borrow checker (the previous `current` must be dropped before reassignment), this creates unnecessary allocations for multi-level lookups. In practice, only `cache show` (2 levels) triggers multiple iterations, so the cost is negligible.",
+      "suggestion": "No change needed — the cost is negligible for the current command tree depth."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/auth.rs",
+      "line": 35,
+      "description": "The `#[allow(clippy::too_many_arguments)]` annotation was added to accommodate the new `json` parameter. The function now has 7 parameters. Consider using an options struct to group related parameters.",
+      "suggestion": "This is a minor style concern. If more parameters are added in the future, refactor to an AuthOptions struct. Acceptable for now."
+    }
+  ]
+}
