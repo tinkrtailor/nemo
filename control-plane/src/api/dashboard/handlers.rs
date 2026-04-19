@@ -357,6 +357,14 @@ pub async fn dashboard_stream(
 pub struct FeedQuery {
     pub cursor: Option<String>,
     pub limit: Option<usize>,
+    /// State filter: "converged" or "failed". Separate from engineer filter
+    /// to avoid ambiguity if an engineer is named "converged" or "failed".
+    pub state_filter: Option<String>,
+    /// Engineer name filter.
+    pub engineer_filter: Option<String>,
+    /// Legacy combined filter param — maps to state_filter if "converged"/"failed",
+    /// otherwise maps to engineer_filter. Kept for backwards compatibility with
+    /// bookmarked URLs and localStorage-persisted filters.
     pub filter: Option<String>,
 }
 
@@ -381,21 +389,63 @@ pub async fn feed_page(
     });
     let limit = query.limit.unwrap_or(50).min(100);
 
+    // Resolve filter parameters: prefer explicit state_filter/engineer_filter,
+    // fall back to legacy `filter` param for backwards compat.
+    let (state_filter, engineer_filter) = resolve_feed_filters(
+        query.state_filter.as_deref(),
+        query.engineer_filter.as_deref(),
+        query.filter.as_deref(),
+    );
+
     let data = aggregate::build_feed_response(
         state.app.store.as_ref(),
         &state.app.config,
         cursor,
         limit,
-        query.filter.as_deref(),
+        state_filter.as_deref(),
+        engineer_filter.as_deref(),
     )
     .await?;
+
+    // Build a canonical filter string for template rendering (active chip highlighting).
+    let canonical_filter = canonical_feed_filter(state_filter.as_deref(), engineer_filter.as_deref());
 
     if accepts_json {
         Ok(Json(data).into_response())
     } else {
         let viewer = extract_cookie_value(&headers, "nautiloop_engineer")
             .unwrap_or_else(|| "unknown".to_string());
-        Ok(Html(templates::render_feed(&data, &viewer, query.filter.as_deref())).into_response())
+        Ok(Html(templates::render_feed(&data, &viewer, canonical_filter.as_deref())).into_response())
+    }
+}
+
+/// Resolve feed filter query params into separate state and engineer filters.
+/// Prefers explicit `state_filter`/`engineer_filter` over legacy `filter`.
+fn resolve_feed_filters(
+    state_filter: Option<&str>,
+    engineer_filter: Option<&str>,
+    legacy_filter: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    if state_filter.is_some() || engineer_filter.is_some() {
+        return (
+            state_filter.map(|s| s.to_string()),
+            engineer_filter.map(|s| s.to_string()),
+        );
+    }
+    // Legacy: "converged"/"failed" → state filter; anything else → engineer filter.
+    match legacy_filter {
+        Some("converged") | Some("failed") => (legacy_filter.map(|s| s.to_string()), None),
+        Some(eng) if !eng.is_empty() => (None, Some(eng.to_string())),
+        _ => (None, None),
+    }
+}
+
+/// Build a canonical filter string for template rendering (chip highlighting + load-more data attr).
+fn canonical_feed_filter(state_filter: Option<&str>, engineer_filter: Option<&str>) -> Option<String> {
+    if let Some(sf) = state_filter {
+        Some(sf.to_string())
+    } else {
+        engineer_filter.map(|ef| ef.to_string())
     }
 }
 
@@ -1034,5 +1084,151 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("accept", "text/html".parse().unwrap());
         assert!(!wants_json(&headers));
+    }
+
+    #[tokio::test]
+    async fn test_stream_terminal_loop_returns_json() {
+        let _guard = set_test_api_key("test-secret-key");
+        let (app, store) = build_test_app();
+
+        // Create a terminal loop with some logs
+        let mut loop_rec = make_test_loop("alice", LoopState::Converged);
+        let loop_id = loop_rec.id;
+        loop_rec.state = LoopState::Converged;
+        loop_rec.sub_state = None;
+        store.create_loop(&loop_rec).await.unwrap();
+
+        // Add some log lines
+        for i in 0..5 {
+            let log = crate::types::LogEvent {
+                id: Uuid::new_v4(),
+                loop_id,
+                round: 1,
+                stage: "implement".to_string(),
+                timestamp: chrono::Utc::now() + chrono::Duration::milliseconds(i),
+                line: format!("log line {}", i),
+            };
+            store.append_log(&log).await.unwrap();
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/dashboard/stream/{}", loop_id))
+                    .header("cookie", "nautiloop_api_key=test-secret-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let ct = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("application/json"), "terminal loops return JSON, got: {}", ct);
+
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let lines: Vec<String> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0], "log line 0");
+        assert_eq!(lines[4], "log line 4");
+    }
+
+    #[tokio::test]
+    async fn test_stream_active_loop_returns_sse() {
+        let _guard = set_test_api_key("test-secret-key");
+        let (app, store) = build_test_app();
+
+        // Create an active loop with some logs
+        let loop_rec = make_test_loop("alice", LoopState::Implementing);
+        let loop_id = loop_rec.id;
+        store.create_loop(&loop_rec).await.unwrap();
+
+        for i in 0..3 {
+            let log = crate::types::LogEvent {
+                id: Uuid::new_v4(),
+                loop_id,
+                round: 1,
+                stage: "implement".to_string(),
+                timestamp: chrono::Utc::now() + chrono::Duration::milliseconds(i),
+                line: format!("active line {}", i),
+            };
+            store.append_log(&log).await.unwrap();
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/dashboard/stream/{}", loop_id))
+                    .header("cookie", "nautiloop_api_key=test-secret-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let ct = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ct.contains("text/event-stream"),
+            "active loops return SSE, got: {}",
+            ct
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stream_terminal_loop_caps_at_200_lines() {
+        let _guard = set_test_api_key("test-secret-key");
+        let (app, store) = build_test_app();
+
+        let mut loop_rec = make_test_loop("alice", LoopState::Failed);
+        loop_rec.sub_state = None;
+        let loop_id = loop_rec.id;
+        store.create_loop(&loop_rec).await.unwrap();
+
+        // Add 250 log lines
+        for i in 0..250 {
+            let log = crate::types::LogEvent {
+                id: Uuid::new_v4(),
+                loop_id,
+                round: 1,
+                stage: "implement".to_string(),
+                timestamp: chrono::Utc::now() + chrono::Duration::milliseconds(i),
+                line: format!("line {}", i),
+            };
+            store.append_log(&log).await.unwrap();
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/dashboard/stream/{}", loop_id))
+                    .header("cookie", "nautiloop_api_key=test-secret-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let lines: Vec<String> = serde_json::from_slice(&body).unwrap();
+        // Should cap at 200 lines, showing the last 200
+        assert_eq!(lines.len(), 200);
+        assert_eq!(lines[0], "line 50");
+        assert_eq!(lines[199], "line 249");
     }
 }

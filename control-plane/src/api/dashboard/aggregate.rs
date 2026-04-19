@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use chrono::{DateTime, Duration, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -523,9 +523,10 @@ async fn build_fleet_summary(
     let cutoff = now - window;
     let prev_cutoff = cutoff - window;
 
-    // Get all loops (including terminal) for the window
+    // Get loops since the previous window cutoff (14 days back) to compute
+    // both current and prior-period summaries without loading the full table.
     let all_loops = store
-        .get_all_loops(true)
+        .get_all_loops(true, Some(prev_cutoff))
         .await?;
 
     let current_window: Vec<&LoopRecord> = all_loops
@@ -646,10 +647,12 @@ pub async fn build_feed_response(
     config: &NautiloopConfig,
     cursor: Option<(DateTime<Utc>, Uuid)>,
     limit: usize,
-    filter: Option<&str>,
+    state_filter: Option<&str>,
+    engineer_filter: Option<&str>,
 ) -> crate::error::Result<FeedResponse> {
+    // Feed shows terminal events. No time window: pagination handles bounding.
     let all_loops = store
-        .get_all_loops(true)
+        .get_all_loops(true, None)
         .await?;
 
     // Collect distinct engineers from all terminal loops for feed filter chips (FR-12b).
@@ -674,16 +677,21 @@ pub async fn build_feed_response(
             if !l.state.is_terminal() {
                 return false;
             }
-            // Apply content filter
-            let passes_filter = match filter {
+            // Apply state filter and engineer filter independently.
+            // Both must pass (AND semantics) when both are specified.
+            let passes_state = match state_filter {
                 Some("converged") => matches!(
                     l.state,
                     LoopState::Converged | LoopState::Hardened | LoopState::Shipped
                 ),
                 Some("failed") => matches!(l.state, LoopState::Failed | LoopState::Cancelled),
+                _ => true,
+            };
+            let passes_engineer = match engineer_filter {
                 Some(eng) => l.engineer == eng,
                 None => true,
             };
+            let passes_filter = passes_state && passes_engineer;
             if !passes_filter {
                 return false;
             }
@@ -753,8 +761,9 @@ pub async fn build_specs_response(
     spec_path: &str,
     limit: usize,
 ) -> crate::error::Result<SpecsResponse> {
+    // Specs page shows all runs of a specific spec — no time window.
     let all_loops = store
-        .get_all_loops(true)
+        .get_all_loops(true, None)
         .await?;
 
     let mut matching: Vec<&LoopRecord> = all_loops
@@ -848,8 +857,9 @@ pub async fn build_stats_response(
     };
     let cutoff = now - Duration::days(window_days);
 
+    // Pass the window cutoff to SQL so we don't load the entire loops table.
     let all_loops = store
-        .get_all_loops(true)
+        .get_all_loops(true, Some(cutoff))
         .await?;
 
     let window_loops: Vec<&LoopRecord> = all_loops
@@ -923,18 +933,22 @@ pub async fn build_stats_response(
             spec.4 += record.round as i64;
         }
 
-        // Time series
-        let day = record.created_at.format("%Y-%m-%d").to_string();
-        let ds = day_map.entry(day).or_default();
-        ds.0 += 1;
+        // Time series: bucket "started" by created_at, outcomes by updated_at.
+        // This way the "started" count reflects when work began, and
+        // "converged"/"failed" reflect when outcomes were reached.
+        let start_day = record.created_at.format("%Y-%m-%d").to_string();
+        day_map.entry(start_day).or_default().0 += 1;
+
         if matches!(
             record.state,
             LoopState::Converged | LoopState::Hardened | LoopState::Shipped
         ) {
-            ds.1 += 1;
+            let outcome_day = record.updated_at.format("%Y-%m-%d").to_string();
+            day_map.entry(outcome_day).or_default().1 += 1;
         }
         if matches!(record.state, LoopState::Failed | LoopState::Cancelled) {
-            ds.2 += 1;
+            let outcome_day = record.updated_at.format("%Y-%m-%d").to_string();
+            day_map.entry(outcome_day).or_default().2 += 1;
         }
     }
 
@@ -1009,93 +1023,6 @@ pub async fn build_stats_response(
     })
 }
 
-// Need Deserialize for cache clone via serde
-impl<'de> Deserialize<'de> for StatsResponse {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Inner {
-            window: String,
-            headline: InnerHeadline,
-            per_engineer: Vec<InnerEngineerStats>,
-            per_spec: Vec<InnerSpecStats>,
-            time_series: Vec<InnerDayStats>,
-        }
-        #[derive(Deserialize)]
-        struct InnerHeadline {
-            total_loops: u64,
-            total_cost: Option<f64>,
-            converge_rate: Option<f64>,
-            avg_rounds: Option<f64>,
-        }
-        #[derive(Deserialize)]
-        struct InnerEngineerStats {
-            engineer: String,
-            loops: u64,
-            cost: Option<f64>,
-            converge_rate: Option<f64>,
-        }
-        #[derive(Deserialize)]
-        struct InnerSpecStats {
-            spec_path: String,
-            runs: u64,
-            cost: Option<f64>,
-            converge_rate: Option<f64>,
-            avg_rounds: Option<f64>,
-        }
-        #[derive(Deserialize)]
-        struct InnerDayStats {
-            date: String,
-            started: u64,
-            converged: u64,
-            failed: u64,
-        }
-
-        let inner = Inner::deserialize(deserializer)?;
-        Ok(StatsResponse {
-            window: inner.window,
-            headline: StatsHeadline {
-                total_loops: inner.headline.total_loops,
-                total_cost: inner.headline.total_cost,
-                converge_rate: inner.headline.converge_rate,
-                avg_rounds: inner.headline.avg_rounds,
-            },
-            per_engineer: inner
-                .per_engineer
-                .into_iter()
-                .map(|e| EngineerStats {
-                    engineer: e.engineer,
-                    loops: e.loops,
-                    cost: e.cost,
-                    converge_rate: e.converge_rate,
-                })
-                .collect(),
-            per_spec: inner
-                .per_spec
-                .into_iter()
-                .map(|s| SpecStats {
-                    spec_path: s.spec_path,
-                    runs: s.runs,
-                    cost: s.cost,
-                    converge_rate: s.converge_rate,
-                    avg_rounds: s.avg_rounds,
-                })
-                .collect(),
-            time_series: inner
-                .time_series
-                .into_iter()
-                .map(|d| DayStats {
-                    date: d.date,
-                    started: d.started,
-                    converged: d.converged,
-                    failed: d.failed,
-                })
-                .collect(),
-        })
-    }
-}
 
 #[cfg(test)]
 mod tests {

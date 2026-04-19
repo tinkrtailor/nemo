@@ -1,6 +1,7 @@
 pub mod postgres;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -38,10 +39,16 @@ pub trait StateStore: Send + Sync + 'static {
         include_terminal: bool,
     ) -> Result<Vec<LoopRecord>>;
 
-    /// Get all loops without a row limit, for aggregation endpoints that must
-    /// compute over the full dataset (fleet summary, stats, feed, specs).
+    /// Get all loops for aggregation endpoints.
     /// If `include_terminal` is false, only returns active (non-terminal) loops.
-    async fn get_all_loops(&self, include_terminal: bool) -> Result<Vec<LoopRecord>>;
+    /// If `since` is provided, only returns loops created after that timestamp
+    /// (plus all active loops regardless of creation time). This limits the
+    /// result set for long-lived deployments with thousands of historical loops.
+    async fn get_all_loops(
+        &self,
+        include_terminal: bool,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<Vec<LoopRecord>>;
 
     /// Update loop state and sub-state. Also updates `updated_at`.
     async fn update_loop_state(
@@ -272,11 +279,22 @@ pub mod memory {
                 .collect())
         }
 
-        async fn get_all_loops(&self, include_terminal: bool) -> Result<Vec<LoopRecord>> {
+        async fn get_all_loops(
+            &self,
+            include_terminal: bool,
+            since: Option<DateTime<Utc>>,
+        ) -> Result<Vec<LoopRecord>> {
             let loops = self.loops.read().await;
             Ok(loops
                 .values()
-                .filter(|l| include_terminal || !l.state.is_terminal())
+                .filter(|l| {
+                    let terminal_ok = include_terminal || !l.state.is_terminal();
+                    let time_ok = match since {
+                        Some(cutoff) => l.created_at > cutoff || !l.state.is_terminal(),
+                        None => true,
+                    };
+                    terminal_ok && time_ok
+                })
                 .cloned()
                 .collect())
         }

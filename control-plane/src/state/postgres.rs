@@ -459,17 +459,41 @@ impl StateStore for PgStateStore {
         rows.iter().map(row_to_loop_record).collect()
     }
 
-    async fn get_all_loops(&self, include_terminal: bool) -> Result<Vec<LoopRecord>> {
-        let terminal_filter = if include_terminal {
-            ""
-        } else {
-            " AND state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED')"
+    async fn get_all_loops(
+        &self,
+        include_terminal: bool,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<Vec<LoopRecord>> {
+        // Use separate static queries for each combination instead of
+        // runtime format!() string interpolation.
+        let rows = match (include_terminal, since) {
+            (true, Some(cutoff)) => {
+                // All loops created after cutoff, plus all active loops regardless of age.
+                sqlx::query(
+                    "SELECT * FROM loops WHERE created_at > $1 \
+                     OR state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED') \
+                     ORDER BY created_at DESC",
+                )
+                .bind(cutoff)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (true, None) => {
+                sqlx::query("SELECT * FROM loops ORDER BY created_at DESC")
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+            (false, _) => {
+                // Active only — `since` is irrelevant when excluding terminal loops.
+                sqlx::query(
+                    "SELECT * FROM loops \
+                     WHERE state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED') \
+                     ORDER BY created_at DESC",
+                )
+                .fetch_all(&self.pool)
+                .await?
+            }
         };
-
-        let q = format!(
-            "SELECT * FROM loops WHERE true{terminal_filter} ORDER BY created_at DESC"
-        );
-        let rows = sqlx::query(&q).fetch_all(&self.pool).await?;
         rows.iter().map(row_to_loop_record).collect()
     }
 

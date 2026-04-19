@@ -734,7 +734,8 @@ pub fn render_feed(data: &FeedResponse, viewer: &str, current_filter: Option<&st
         @if data.has_more {
             div class="load-more" {
                 button #feed-load-more class="btn"
-                    data-cursor=(data.events.last().map(|e| format!("{}|{}", e.updated_at.to_rfc3339(), e.id)).unwrap_or_default()) {
+                    data-cursor=(data.events.last().map(|e| format!("{}|{}", e.updated_at.to_rfc3339(), e.id)).unwrap_or_default())
+                    data-filter=(current_filter.unwrap_or("")) {
                     "Load more"
                 }
             }
