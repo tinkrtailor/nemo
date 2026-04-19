@@ -479,9 +479,21 @@ impl StateStore for PgStateStore {
                 .await?
             }
             (true, None) => {
-                sqlx::query("SELECT * FROM loops ORDER BY created_at DESC")
-                    .fetch_all(&self.pool)
-                    .await?
+                // Safety LIMIT to prevent unbounded queries on long-lived deployments.
+                // Callers needing filtered subsets should use get_loops_by_spec_path or
+                // get_terminal_loops instead. 10000 is well above any reasonable deployment.
+                let rows = sqlx::query(
+                    "SELECT * FROM loops ORDER BY created_at DESC LIMIT 10000",
+                )
+                .fetch_all(&self.pool)
+                .await?;
+                if rows.len() >= 10000 {
+                    tracing::warn!(
+                        "get_all_loops(true, None) hit 10000-row safety limit; \
+                         consider using a time-bounded query"
+                    );
+                }
+                rows
             }
             (false, _) => {
                 // Active only — `since` is irrelevant when excluding terminal loops.
@@ -744,6 +756,26 @@ impl StateStore for PgStateStore {
         Ok(rows.iter().map(row_to_log_event).collect())
     }
 
+    async fn get_recent_logs(
+        &self,
+        loop_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<LogEvent>> {
+        // Fetch the last N logs by ordering DESC with LIMIT, then reverse in Rust.
+        let rows = sqlx::query(
+            "SELECT * FROM log_events WHERE loop_id = $1 \
+             ORDER BY timestamp DESC, id DESC LIMIT $2",
+        )
+        .bind(loop_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut logs: Vec<LogEvent> = rows.iter().map(row_to_log_event).collect();
+        logs.reverse();
+        Ok(logs)
+    }
+
     async fn get_logs_after(&self, loop_id: Uuid, after: DateTime<Utc>) -> Result<Vec<LogEvent>> {
         let rows = sqlx::query(
             "SELECT * FROM log_events WHERE loop_id = $1 AND timestamp >= $2 ORDER BY timestamp ASC, id ASC",
@@ -754,6 +786,97 @@ impl StateStore for PgStateStore {
         .await?;
 
         Ok(rows.iter().map(row_to_log_event).collect())
+    }
+
+    async fn get_loops_by_spec_path(
+        &self,
+        spec_path: &str,
+        limit: usize,
+    ) -> Result<Vec<LoopRecord>> {
+        let rows = sqlx::query(
+            "SELECT * FROM loops WHERE spec_path = $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(spec_path)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_loop_record).collect()
+    }
+
+    async fn get_terminal_loops(
+        &self,
+        since: Option<DateTime<Utc>>,
+        state_filter: Option<&str>,
+        engineer_filter: Option<&str>,
+        limit: usize,
+        cursor: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Result<Vec<LoopRecord>> {
+        // Build a parameterized query for the feed endpoint.
+        // We use a single query with conditional WHERE clauses via COALESCE/boolean logic
+        // to avoid dynamic SQL string building while keeping it efficient.
+        let terminal_states = vec!["CONVERGED", "FAILED", "CANCELLED", "HARDENED", "SHIPPED"];
+
+        let state_whitelist: Option<Vec<&str>> = match state_filter {
+            Some("converged") => Some(vec!["CONVERGED", "HARDENED", "SHIPPED"]),
+            Some("failed") => Some(vec!["FAILED", "CANCELLED"]),
+            _ => None, // all terminal
+        };
+        let filter_states = state_whitelist.as_deref().unwrap_or(&terminal_states);
+
+        // Build query dynamically but safely with bind parameters.
+        // sqlx doesn't natively support IN ($1...) with Vec, so we use ANY($1).
+        let mut query_str = String::from(
+            "SELECT * FROM loops WHERE state::text = ANY($1)",
+        );
+        let mut param_idx = 2;
+
+        if since.is_some() {
+            query_str.push_str(&format!(" AND updated_at >= ${param_idx}"));
+            param_idx += 1;
+        }
+        if engineer_filter.is_some() {
+            query_str.push_str(&format!(" AND engineer = ${param_idx}"));
+            param_idx += 1;
+        }
+        if cursor.is_some() {
+            query_str.push_str(&format!(
+                " AND (updated_at < ${} OR (updated_at = ${} AND id < ${}))",
+                param_idx,
+                param_idx,
+                param_idx + 1,
+            ));
+            param_idx += 2;
+        }
+        let _ = param_idx; // suppress unused warning
+        query_str.push_str(&format!(" ORDER BY updated_at DESC, id DESC LIMIT {limit}"));
+
+        let filter_states_strings: Vec<String> = filter_states.iter().map(|s| s.to_string()).collect();
+        let mut q = sqlx::query(&query_str).bind(&filter_states_strings);
+
+        if let Some(cutoff) = since {
+            q = q.bind(cutoff);
+        }
+        if let Some(eng) = engineer_filter {
+            q = q.bind(eng);
+        }
+        if let Some((cursor_ts, cursor_id)) = cursor {
+            q = q.bind(cursor_ts);
+            q = q.bind(cursor_id);
+        }
+
+        let rows = q.fetch_all(&self.pool).await?;
+        rows.iter().map(row_to_loop_record).collect()
+    }
+
+    async fn get_terminal_engineers(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT engineer FROM loops \
+             WHERE state IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED') \
+             ORDER BY engineer",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     async fn get_credentials(&self, engineer: &str) -> Result<Vec<EngineerCredential>> {

@@ -204,15 +204,9 @@ pub async fn loop_detail_page(
 
     let rounds = state.app.store.get_rounds(id).await?;
 
-    // Get last 200 log lines for the log pane
-    let logs = state.app.store.get_logs(id, None, None).await?;
-    let log_lines: Vec<String> = logs
-        .iter()
-        .rev()
-        .take(200)
-        .rev()
-        .map(|l| l.line.clone())
-        .collect();
+    // Get last 200 log lines for the log pane (uses LIMIT query, not full load)
+    let recent_logs = state.app.store.get_recent_logs(id, 200).await?;
+    let log_lines: Vec<String> = recent_logs.iter().map(|l| l.line.clone()).collect();
 
     Ok(Html(templates::render_loop_detail(
         &record,
@@ -237,24 +231,14 @@ pub async fn dashboard_stream(
         .ok_or(NautiloopError::LoopNotFound { id })?;
 
     if record.state.is_terminal() {
-        // Return last 200 lines as JSON
-        let logs = state.app.store.get_logs(id, None, None).await?;
-        let lines: Vec<String> = logs
-            .iter()
-            .rev()
-            .take(200)
-            .rev()
-            .map(|l| l.line.clone())
-            .collect();
+        // Return last 200 lines as JSON (uses LIMIT query, not full load)
+        let recent = state.app.store.get_recent_logs(id, 200).await?;
+        let lines: Vec<String> = recent.iter().map(|l| l.line.clone()).collect();
         Ok(Json(lines).into_response())
     } else {
         // SSE stream for active loops: send last 200 lines first, then tail new lines.
-        // Get recent logs to determine the SSE start offset.
-        let logs = state.app.store.get_logs(id, None, None).await?;
-        let skip = logs.len().saturating_sub(200);
-        // Clone into owned data that the stream can capture with 'static lifetime.
-        let recent_logs: Vec<crate::types::LogEvent> =
-            logs.into_iter().skip(skip).collect();
+        // Get recent logs to determine the SSE start offset (uses LIMIT query, not full load).
+        let recent_logs = state.app.store.get_recent_logs(id, 200).await?;
 
         // Determine the cursor timestamp: start SSE from the last recent log's
         // timestamp so we only get new lines going forward (no re-sending).
@@ -407,15 +391,17 @@ pub async fn feed_page(
     )
     .await?;
 
-    // Build a canonical filter string for template rendering (active chip highlighting).
-    let canonical_filter = canonical_feed_filter(state_filter.as_deref(), engineer_filter.as_deref());
-
     if accepts_json {
         Ok(Json(data).into_response())
     } else {
         let viewer = extract_cookie_value(&headers, "nautiloop_engineer")
             .unwrap_or_else(|| "unknown".to_string());
-        Ok(Html(templates::render_feed(&data, &viewer, canonical_filter.as_deref())).into_response())
+        Ok(Html(templates::render_feed(
+            &data,
+            &viewer,
+            state_filter.as_deref(),
+            engineer_filter.as_deref(),
+        )).into_response())
     }
 }
 
@@ -437,15 +423,6 @@ fn resolve_feed_filters(
         Some("converged") | Some("failed") => (legacy_filter.map(|s| s.to_string()), None),
         Some(eng) if !eng.is_empty() => (None, Some(eng.to_string())),
         _ => (None, None),
-    }
-}
-
-/// Build a canonical filter string for template rendering (chip highlighting + load-more data attr).
-fn canonical_feed_filter(state_filter: Option<&str>, engineer_filter: Option<&str>) -> Option<String> {
-    if let Some(sf) = state_filter {
-        Some(sf.to_string())
-    } else {
-        engineer_filter.map(|ef| ef.to_string())
     }
 }
 

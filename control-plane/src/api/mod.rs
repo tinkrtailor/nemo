@@ -204,11 +204,38 @@ mod tests {
         ) -> crate::error::Result<Vec<LogEvent>> {
             unimplemented!()
         }
+        async fn get_recent_logs(
+            &self,
+            _: Uuid,
+            _: usize,
+        ) -> crate::error::Result<Vec<LogEvent>> {
+            unimplemented!()
+        }
         async fn get_logs_after(
             &self,
             _: Uuid,
             _: chrono::DateTime<chrono::Utc>,
         ) -> crate::error::Result<Vec<LogEvent>> {
+            unimplemented!()
+        }
+        async fn get_loops_by_spec_path(
+            &self,
+            _: &str,
+            _: usize,
+        ) -> crate::error::Result<Vec<LoopRecord>> {
+            unimplemented!()
+        }
+        async fn get_terminal_loops(
+            &self,
+            _: Option<chrono::DateTime<chrono::Utc>>,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+            _: Option<(chrono::DateTime<chrono::Utc>, Uuid)>,
+        ) -> crate::error::Result<Vec<LoopRecord>> {
+            unimplemented!()
+        }
+        async fn get_terminal_engineers(&self) -> crate::error::Result<Vec<String>> {
             unimplemented!()
         }
         async fn get_credentials(

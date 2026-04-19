@@ -650,67 +650,14 @@ pub async fn build_feed_response(
     state_filter: Option<&str>,
     engineer_filter: Option<&str>,
 ) -> crate::error::Result<FeedResponse> {
-    // Feed shows terminal events. No time window: pagination handles bounding.
-    let all_loops = store
-        .get_all_loops(true, None)
+    // Fetch distinct engineers for filter chips (independent of current page/filter).
+    let engineers_list = store.get_terminal_engineers().await?;
+
+    // Fetch limit+1 terminal loops with filters pushed to SQL (avoids loading entire table).
+    let terminal = store
+        .get_terminal_loops(None, state_filter, engineer_filter, limit + 1, cursor)
         .await?;
 
-    // Collect distinct engineers from all terminal loops for feed filter chips (FR-12b).
-    // Engineers are collected independently of cursor/filter so chips always show
-    // all available engineers regardless of the current page or filter selection.
-    let mut engineers_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for l in &all_loops {
-        if l.state.is_terminal() {
-            engineers_set.insert(l.engineer.clone());
-        }
-    }
-
-    // Step 1: filter to terminal loops only
-    // Step 2: apply content filter (state/engineer)
-    // Step 3: apply cursor exclusion (pagination)
-    // This ordering ensures that cursor-excluded items that match the filter
-    // are only those already shown on previous pages, not items filtered out
-    // by a different criterion.
-    let mut terminal: Vec<&LoopRecord> = all_loops
-        .iter()
-        .filter(|l| {
-            if !l.state.is_terminal() {
-                return false;
-            }
-            // Apply state filter and engineer filter independently.
-            // Both must pass (AND semantics) when both are specified.
-            let passes_state = match state_filter {
-                Some("converged") => matches!(
-                    l.state,
-                    LoopState::Converged | LoopState::Hardened | LoopState::Shipped
-                ),
-                Some("failed") => matches!(l.state, LoopState::Failed | LoopState::Cancelled),
-                _ => true,
-            };
-            let passes_engineer = match engineer_filter {
-                Some(eng) => l.engineer == eng,
-                None => true,
-            };
-            let passes_filter = passes_state && passes_engineer;
-            if !passes_filter {
-                return false;
-            }
-            // Apply cursor exclusion after filter
-            if let Some((cursor_ts, cursor_id)) = cursor {
-                if l.updated_at > cursor_ts {
-                    return false;
-                }
-                if l.updated_at == cursor_ts && l.id >= cursor_id {
-                    return false;
-                }
-            }
-            true
-        })
-        .collect();
-
-    terminal.sort_by(|a, b| {
-        b.updated_at.cmp(&a.updated_at).then_with(|| b.id.cmp(&a.id))
-    });
     let has_more = terminal.len() > limit;
     let events_slice = &terminal[..terminal.len().min(limit)];
 
@@ -743,13 +690,10 @@ pub async fn build_feed_response(
         });
     }
 
-    let mut engineers: Vec<String> = engineers_set.into_iter().collect();
-    engineers.sort();
-
     Ok(FeedResponse {
         events,
         has_more,
-        engineers,
+        engineers: engineers_list,
     })
 }
 
@@ -761,16 +705,11 @@ pub async fn build_specs_response(
     spec_path: &str,
     limit: usize,
 ) -> crate::error::Result<SpecsResponse> {
-    // Specs page shows all runs of a specific spec — no time window.
-    let all_loops = store
-        .get_all_loops(true, None)
+    // Push WHERE spec_path = $1 to SQL instead of loading all loops and filtering in Rust.
+    // Use a generous limit for aggregate computation; the response is truncated to `limit`.
+    let matching = store
+        .get_loops_by_spec_path(spec_path, 10000)
         .await?;
-
-    let mut matching: Vec<&LoopRecord> = all_loops
-        .iter()
-        .filter(|l| l.spec_path == spec_path)
-        .collect();
-    matching.sort_by_key(|r| std::cmp::Reverse(r.created_at));
 
     let total_runs = matching.len() as u64;
     let mut converged = 0u64;

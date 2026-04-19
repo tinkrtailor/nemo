@@ -180,7 +180,7 @@
     // Show/hide kill switch (FR-10d)
     const killBtn = document.getElementById("kill-switch-btn");
     if (killBtn) {
-      killBtn.style.display = engineerFilter === "team" || engineerFilter !== "mine" ? "" : "none";
+      killBtn.style.display = engineerFilter === "team" ? "" : "none";
     }
   }
 
@@ -504,17 +504,22 @@
   function bindFeedFilters() {
     const feedList = document.getElementById("feed-list");
     if (!feedList) return;
-    // Intercept filter chip clicks within the feed page filter bar to persist in localStorage.
-    document.querySelectorAll(".filter-bar .chip[onclick]").forEach(function(chip) {
-      const originalOnclick = chip.getAttribute("onclick");
-      chip.removeAttribute("onclick");
+    // Wire feed filter chips via data attributes (no inline onclick).
+    document.querySelectorAll(".filter-bar [data-feed-filter-type]").forEach(function(chip) {
       chip.addEventListener("click", function() {
-        // Extract filter value from the onclick URL
-        const match = originalOnclick.match(/filter=([^'"]*)/);
-        const filter = match ? match[1] : "";
-        try { localStorage.setItem("nautiloop_feed_filter", filter); } catch(e) {}
-        // Execute original navigation
-        (new Function(originalOnclick))();
+        var filterType = chip.getAttribute("data-feed-filter-type");
+        var filterVal = chip.getAttribute("data-feed-filter");
+        var url = "/dashboard/feed";
+        if (filterType === "state" && filterVal) {
+          url += "?state_filter=" + encodeURIComponent(filterVal);
+        } else if (filterType === "engineer" && filterVal) {
+          url += "?engineer_filter=" + encodeURIComponent(filterVal);
+        }
+        // Persist for restore on next visit
+        try {
+          localStorage.setItem("nautiloop_feed_filter", filterType + ":" + (filterVal || ""));
+        } catch(e) {}
+        location.href = url;
       });
     });
   }
@@ -523,22 +528,29 @@
   // If the restored filter yields an empty feed, clear the localStorage value
   // and redirect to the unfiltered view so the user is not stuck.
   function restoreFeedFilter() {
-    const feedList = document.getElementById("feed-list");
+    var feedList = document.getElementById("feed-list");
     if (!feedList) return;
-    const params = new URLSearchParams(location.search);
-    // If we navigated with a saved filter and the feed is empty, clear it.
-    if (params.has("filter") && feedList.children.length === 0) {
+    var params = new URLSearchParams(location.search);
+    var hasFilter = params.has("state_filter") || params.has("engineer_filter") || params.has("filter");
+    // If we navigated with a filter and the feed has no items, clear the stale filter.
+    if (hasFilter && feedList.querySelectorAll(".feed-item").length === 0) {
       try { localStorage.removeItem("nautiloop_feed_filter"); } catch(e) {}
-      // Redirect to unfiltered feed so user sees content
       location.href = "/dashboard/feed";
       return;
     }
-    // Only restore if user navigated to /dashboard/feed without a filter param.
-    if (!params.has("filter") && !params.has("cursor")) {
+    // Only restore if user navigated to /dashboard/feed without any filter param.
+    if (!hasFilter && !params.has("cursor")) {
       try {
-        const saved = localStorage.getItem("nautiloop_feed_filter");
+        var saved = localStorage.getItem("nautiloop_feed_filter");
         if (saved) {
-          location.href = "/dashboard/feed?filter=" + encodeURIComponent(saved);
+          var parts = saved.split(":");
+          var type = parts[0];
+          var val = parts.slice(1).join(":");
+          if (type === "state" && val) {
+            location.href = "/dashboard/feed?state_filter=" + encodeURIComponent(val);
+          } else if (type === "engineer" && val) {
+            location.href = "/dashboard/feed?engineer_filter=" + encodeURIComponent(val);
+          }
         }
       } catch(e) {}
     }
@@ -549,10 +561,12 @@
     if (!btn) return;
     btn.addEventListener("click", function() {
       const cursor = btn.dataset.cursor;
-      const filter = btn.dataset.filter || "";
+      const stateFilter = btn.dataset.stateFilter || "";
+      const engineerFilter = btn.dataset.engineerFilter || "";
       let url = "/dashboard/feed?limit=50";
       if (cursor) url += "&cursor=" + encodeURIComponent(cursor);
-      if (filter) url += "&filter=" + encodeURIComponent(filter);
+      if (stateFilter) url += "&state_filter=" + encodeURIComponent(stateFilter);
+      if (engineerFilter) url += "&engineer_filter=" + encodeURIComponent(engineerFilter);
       fetch(url, { credentials: "same-origin" })
         .then(r => r.json())
         .then(data => {

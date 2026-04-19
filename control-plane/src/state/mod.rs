@@ -97,6 +97,15 @@ pub trait StateStore: Send + Sync + 'static {
         stage: Option<&str>,
     ) -> Result<Vec<LogEvent>>;
 
+    /// Get the most recent N log events for a loop (ordered ASC).
+    /// Uses `ORDER BY timestamp DESC, id DESC LIMIT N` in SQL then reverses,
+    /// avoiding loading the entire log history for loops with thousands of lines.
+    async fn get_recent_logs(
+        &self,
+        loop_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<LogEvent>>;
+
     /// Get log events at or after a given timestamp for SSE tailing.
     /// Uses inclusive `>=` query; caller deduplicates by seen IDs.
     async fn get_logs_after(
@@ -104,6 +113,29 @@ pub trait StateStore: Send + Sync + 'static {
         loop_id: Uuid,
         after: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<LogEvent>>;
+
+    /// Get loops filtered by spec_path, ordered by created_at DESC, with a limit.
+    /// Pushes the WHERE clause to SQL instead of loading all loops and filtering in Rust.
+    async fn get_loops_by_spec_path(
+        &self,
+        spec_path: &str,
+        limit: usize,
+    ) -> Result<Vec<LoopRecord>>;
+
+    /// Get terminal loops ordered by updated_at DESC for the feed endpoint.
+    /// Accepts optional state and engineer filters pushed to SQL.
+    /// `since` bounds the query to a reasonable time window.
+    async fn get_terminal_loops(
+        &self,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        state_filter: Option<&str>,
+        engineer_filter: Option<&str>,
+        limit: usize,
+        cursor: Option<(chrono::DateTime<chrono::Utc>, Uuid)>,
+    ) -> Result<Vec<LoopRecord>>;
+
+    /// Get distinct engineer names from terminal loops (for feed filter chips).
+    async fn get_terminal_engineers(&self) -> Result<Vec<String>>;
 
     /// Get or create engineer credentials.
     async fn get_credentials(&self, engineer: &str) -> Result<Vec<EngineerCredential>>;
@@ -424,6 +456,22 @@ pub mod memory {
                 .collect())
         }
 
+        async fn get_recent_logs(
+            &self,
+            loop_id: Uuid,
+            limit: usize,
+        ) -> Result<Vec<LogEvent>> {
+            let logs = self.logs.read().await;
+            let mut matching: Vec<LogEvent> = logs
+                .iter()
+                .filter(|l| l.loop_id == loop_id)
+                .cloned()
+                .collect();
+            matching.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then_with(|| a.id.cmp(&b.id)));
+            let skip = matching.len().saturating_sub(limit);
+            Ok(matching.into_iter().skip(skip).collect())
+        }
+
         async fn get_logs_after(
             &self,
             loop_id: Uuid,
@@ -435,6 +483,87 @@ pub mod memory {
                 .filter(|l| l.loop_id == loop_id && l.timestamp >= after)
                 .cloned()
                 .collect())
+        }
+
+        async fn get_loops_by_spec_path(
+            &self,
+            spec_path: &str,
+            limit: usize,
+        ) -> Result<Vec<LoopRecord>> {
+            let loops = self.loops.read().await;
+            let mut matching: Vec<LoopRecord> = loops
+                .values()
+                .filter(|l| l.spec_path == spec_path)
+                .cloned()
+                .collect();
+            matching.sort_by_key(|r| std::cmp::Reverse(r.created_at));
+            matching.truncate(limit);
+            Ok(matching)
+        }
+
+        async fn get_terminal_loops(
+            &self,
+            since: Option<chrono::DateTime<chrono::Utc>>,
+            state_filter: Option<&str>,
+            engineer_filter: Option<&str>,
+            limit: usize,
+            cursor: Option<(chrono::DateTime<chrono::Utc>, Uuid)>,
+        ) -> Result<Vec<LoopRecord>> {
+            let loops = self.loops.read().await;
+            let mut matching: Vec<LoopRecord> = loops
+                .values()
+                .filter(|l| {
+                    if !l.state.is_terminal() {
+                        return false;
+                    }
+                    if let Some(cutoff) = since
+                        && l.updated_at < cutoff
+                    {
+                        return false;
+                    }
+                    let passes_state = match state_filter {
+                        Some("converged") => matches!(
+                            l.state,
+                            LoopState::Converged | LoopState::Hardened | LoopState::Shipped
+                        ),
+                        Some("failed") => matches!(l.state, LoopState::Failed | LoopState::Cancelled),
+                        _ => true,
+                    };
+                    let passes_engineer = match engineer_filter {
+                        Some(eng) => l.engineer == eng,
+                        None => true,
+                    };
+                    if !passes_state || !passes_engineer {
+                        return false;
+                    }
+                    if let Some((cursor_ts, cursor_id)) = cursor {
+                        if l.updated_at > cursor_ts {
+                            return false;
+                        }
+                        if l.updated_at == cursor_ts && l.id >= cursor_id {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
+            matching.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.id.cmp(&a.id)));
+            matching.truncate(limit);
+            Ok(matching)
+        }
+
+        async fn get_terminal_engineers(&self) -> Result<Vec<String>> {
+            let loops = self.loops.read().await;
+            let mut engineers: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for l in loops.values() {
+                if l.state.is_terminal() {
+                    engineers.insert(l.engineer.clone());
+                }
+            }
+            let mut result: Vec<String> = engineers.into_iter().collect();
+            result.sort();
+            Ok(result)
         }
 
         async fn get_credentials(&self, engineer: &str) -> Result<Vec<EngineerCredential>> {

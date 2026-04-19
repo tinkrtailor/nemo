@@ -30,9 +30,17 @@ pub fn build_dashboard_router(app_state: AppState) -> Router<AppState> {
         .route("/dashboard/static/dashboard.js", get(handlers::static_js));
 
     // Authed routes — HTML pages and JSON endpoints.
-    // Handlers extract State<DashboardState>; .with_state(dash_state) provides
-    // the DashboardState and converts Router<DashboardState> → Router<AppState>
-    // since the parent build_router() will call .with_state(state) at the top level.
+    //
+    // Type conversion chain:
+    //   Router<DashboardState>  (handlers extract State<DashboardState>)
+    //     → .with_state(dash_state) → Router<()>
+    //     → merged into public Router<AppState> which becomes Router<()> when
+    //       the parent build_router() calls .with_state(app_state).
+    //
+    // Note: public routes above are Router<AppState> but their handlers don't
+    // extract State, so they work after the parent .with_state() call. If a
+    // future public handler needs AppState, it must be given its own
+    // .with_state(app_state.clone()) to avoid confusing type errors.
     let authed = Router::new()
         .route("/dashboard", get(handlers::dashboard_page))
         .route("/dashboard/state", get(handlers::dashboard_state))

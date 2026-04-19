@@ -698,27 +698,33 @@ fn render_token_breakdown(
 
 // ── Feed Page ──
 
-pub fn render_feed(data: &FeedResponse, viewer: &str, current_filter: Option<&str>) -> String {
+pub fn render_feed(
+    data: &FeedResponse,
+    viewer: &str,
+    state_filter: Option<&str>,
+    engineer_filter: Option<&str>,
+) -> String {
+    let has_filter = state_filter.is_some() || engineer_filter.is_some();
     let body = html! {
         (nav_bar("feed", viewer))
 
         div class="filter-bar" {
-            button class=(if current_filter.is_none() { "chip active" } else { "chip" })
-                onclick="location.href='/dashboard/feed'" { "All events" }
-            button class=(if current_filter == Some("converged") { "chip active" } else { "chip" })
-                onclick="location.href='/dashboard/feed?filter=converged'" { "Converged" }
-            button class=(if current_filter == Some("failed") { "chip active" } else { "chip" })
-                onclick="location.href='/dashboard/feed?filter=failed'" { "Failed" }
+            button class=(if !has_filter { "chip active" } else { "chip" })
+                data-feed-filter="" data-feed-filter-type="clear" { "All events" }
+            button class=(if state_filter == Some("converged") { "chip active" } else { "chip" })
+                data-feed-filter="converged" data-feed-filter-type="state" { "Converged" }
+            button class=(if state_filter == Some("failed") { "chip active" } else { "chip" })
+                data-feed-filter="failed" data-feed-filter-type="state" { "Failed" }
             @for eng in &data.engineers {
-                button class=(if current_filter == Some(eng.as_str()) { "chip active" } else { "chip" })
-                    onclick=(format!("location.href='/dashboard/feed?filter={}'", urlencoding::encode(eng))) { (eng) }
+                button class=(if engineer_filter == Some(eng.as_str()) { "chip active" } else { "chip" })
+                    data-feed-filter=(eng) data-feed-filter-type="engineer" { (eng) }
             }
         }
 
         div #feed-list class="feed-list" {
             @if data.events.is_empty() {
                 div class="empty-state" {
-                    @if current_filter.is_some() {
+                    @if has_filter {
                         "No events match this filter. "
                         a href="/dashboard/feed" { "Clear filter" }
                     } @else {
@@ -735,7 +741,8 @@ pub fn render_feed(data: &FeedResponse, viewer: &str, current_filter: Option<&st
             div class="load-more" {
                 button #feed-load-more class="btn"
                     data-cursor=(data.events.last().map(|e| format!("{}|{}", e.updated_at.to_rfc3339(), e.id)).unwrap_or_default())
-                    data-filter=(current_filter.unwrap_or("")) {
+                    data-state-filter=(state_filter.unwrap_or(""))
+                    data-engineer-filter=(engineer_filter.unwrap_or("")) {
                     "Load more"
                 }
             }
