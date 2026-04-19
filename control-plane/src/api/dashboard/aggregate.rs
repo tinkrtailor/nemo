@@ -410,25 +410,25 @@ pub async fn build_dashboard_state(
     viewer_engineer: &str,
     fleet_cache: &FleetSummaryCache,
 ) -> crate::error::Result<DashboardStateResponse> {
-    let engineer_filter = if team {
-        None
-    } else {
-        Some(viewer_engineer)
-    };
-
-    // Get all loops (active + terminal for card grid)
-    let loops = store
-        .get_loops_for_engineer(engineer_filter, team, true)
-        .await?;
-
     let now = Utc::now();
     let cutoff = now - Duration::hours(24);
 
-    // Filter: active + recently-terminal (or all terminal if requested)
-    let filtered: Vec<&LoopRecord> = loops
+    // Use get_all_loops for aggregation instead of get_loops_for_engineer which
+    // has a LIMIT 100 in the Postgres implementation. The trait comment explicitly
+    // reserves get_loops_for_engineer for CLI/UI display. We filter by engineer
+    // in Rust after fetching.
+    let all_loops = store.get_all_loops(true, Some(cutoff)).await?;
+
+    // Apply engineer filter in Rust (matches get_loops_for_engineer semantics)
+    let filtered: Vec<&LoopRecord> = all_loops
         .iter()
         .filter(|l| {
-            !l.state.is_terminal() || include_all_terminal || l.updated_at > cutoff
+            // Engineer scoping
+            let eng_match = team || l.engineer == viewer_engineer;
+            // Time scoping: active + recently-terminal (or all terminal if requested)
+            let time_match =
+                !l.state.is_terminal() || include_all_terminal || l.updated_at > cutoff;
+            eng_match && time_match
         })
         .collect();
 
@@ -653,9 +653,20 @@ pub async fn build_feed_response(
     // Fetch distinct engineers for filter chips (independent of current page/filter).
     let engineers_list = store.get_terminal_engineers().await?;
 
+    // Default to 90-day time bound to prevent full-table scans on long-lived deployments.
+    // The feed shows recent terminal events; historical loops older than 90 days are
+    // unlikely to be relevant.
+    let default_since = Utc::now() - Duration::days(90);
+
     // Fetch limit+1 terminal loops with filters pushed to SQL (avoids loading entire table).
     let terminal = store
-        .get_terminal_loops(None, state_filter, engineer_filter, limit + 1, cursor)
+        .get_terminal_loops(
+            Some(default_since),
+            state_filter,
+            engineer_filter,
+            limit + 1,
+            cursor,
+        )
         .await?;
 
     let has_more = terminal.len() > limit;

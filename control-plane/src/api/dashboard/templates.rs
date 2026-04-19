@@ -19,6 +19,9 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// Build the outer HTML shell. `extra_attrs` is injected raw into the `<body>` tag —
+/// callers MUST only pass trusted values (e.g., data attributes derived from UUIDs or
+/// booleans). Never pass user-controlled strings without escaping.
 fn layout(title: &str, viewer: &str, body_content: Markup, extra_attrs: &str) -> String {
     // Build the full HTML string manually since maud doesn't support dynamic attributes
     let inner = html! {

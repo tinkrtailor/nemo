@@ -237,6 +237,10 @@ pub async fn dashboard_stream(
         Ok(Json(lines).into_response())
     } else {
         // SSE stream for active loops: send last 200 lines first, then tail new lines.
+        // Known limitation: there is a small race window between the get_recent_logs call
+        // and the SSE tail starting — logs arriving in that gap may be missed. This is
+        // acceptable for a dashboard log tail (not an audit log). The dedup set is bounded
+        // by the initial 200 logs so it's not a memory concern.
         // Get recent logs to determine the SSE start offset (uses LIMIT query, not full load).
         let recent_logs = state.app.store.get_recent_logs(id, 200).await?;
 

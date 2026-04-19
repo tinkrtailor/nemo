@@ -469,14 +469,23 @@ impl StateStore for PgStateStore {
         let rows = match (include_terminal, since) {
             (true, Some(cutoff)) => {
                 // All loops created after cutoff, plus all active loops regardless of age.
-                sqlx::query(
+                // Safety LIMIT of 10000 to prevent unbounded result sets on long-lived
+                // deployments with high loop throughput.
+                let rows = sqlx::query(
                     "SELECT * FROM loops WHERE created_at > $1 \
                      OR state NOT IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED') \
-                     ORDER BY created_at DESC",
+                     ORDER BY created_at DESC LIMIT 10000",
                 )
                 .bind(cutoff)
                 .fetch_all(&self.pool)
-                .await?
+                .await?;
+                if rows.len() >= 10000 {
+                    tracing::warn!(
+                        "get_all_loops(true, Some(cutoff)) hit 10000-row safety limit; \
+                         consider narrowing the time window"
+                    );
+                }
+                rows
             }
             (true, None) => {
                 // Safety LIMIT to prevent unbounded queries on long-lived deployments.
@@ -678,6 +687,8 @@ impl StateStore for PgStateStore {
         if loop_ids.is_empty() {
             return Ok(HashMap::new());
         }
+        // Runtime sqlx::query() instead of compile-time sqlx::query!() because
+        // ANY($1) with a dynamic array input makes compile-time checking awkward.
         let rows = sqlx::query(
             "SELECT * FROM rounds WHERE loop_id = ANY($1) ORDER BY round ASC, started_at ASC",
         )
@@ -847,8 +858,9 @@ impl StateStore for PgStateStore {
             ));
             param_idx += 2;
         }
-        let _ = param_idx; // suppress unused warning
-        query_str.push_str(&format!(" ORDER BY updated_at DESC, id DESC LIMIT {limit}"));
+        query_str.push_str(&format!(
+            " ORDER BY updated_at DESC, id DESC LIMIT ${param_idx}"
+        ));
 
         let filter_states_strings: Vec<String> = filter_states.iter().map(|s| s.to_string()).collect();
         let mut q = sqlx::query(&query_str).bind(&filter_states_strings);
@@ -863,6 +875,7 @@ impl StateStore for PgStateStore {
             q = q.bind(cursor_ts);
             q = q.bind(cursor_id);
         }
+        q = q.bind(limit as i64);
 
         let rows = q.fetch_all(&self.pool).await?;
         rows.iter().map(row_to_loop_record).collect()
