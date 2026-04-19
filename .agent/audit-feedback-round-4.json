@@ -1,0 +1,56 @@
+{
+  "round": 4,
+  "source": "audit",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "specs/llm-friendly-cli.md",
+      "line": 287,
+      "description": "FR-4a: The 401 / \"Claude token expired\" error hint pattern does not match any actual API error. The server returns \"Authentication failed\" (from NautiloopError::AuthenticationFailed) or \"Unknown engineer. Run `nemo auth` first\" (from NautiloopError::UnknownEngineer) for 401s. The \"Claude token expired\" message is internal to the loop engine's auth-error detection (driver.rs) and surfaces as an AWAITING_REAUTH state transition, not as a 401 HTTP error to the CLI. An implementer following this pattern would create a hint that never fires.",
+      "suggestion": "Replace the 401 pattern row with patterns that match actual 401 API errors: (401, \"Authentication failed\") → \"Check your API key with `nemo config`. If expired, regenerate and update ~/.nemo/config.toml.\" and (401, \"Unknown engineer\") → \"Run `nemo auth` to register your engineer identity with the cluster.\". For Claude token expiry, add guidance in the AWAITING_REAUTH recovery playbook in FR-1a instead, since that state is the actual surface where token expiry manifests."
+    },
+    {
+      "severity": "medium",
+      "category": "clarity",
+      "file": "specs/llm-friendly-cli.md",
+      "description": "Template rendering artifacts: '{{SPEC}}' tokens appear unresolved in two places. In FR-1a recovery playbooks: `nemo auth --claude {{SPEC}}{{SPEC}} nemo resume <id>` — the intended command separator (likely `&&` or a line break) is lost. In FR-4c: `error_hints::find_hint(status_code, {{SPEC}}error_message)` — the function signature is garbled. An implementer would have to guess intent.",
+      "suggestion": "Fix FR-1a to: `nemo auth --claude && nemo resume <id>` (or split into two separate lines). Fix FR-4c to: `error_hints::find_hint(status_code, &error_message)` or whatever the intended Rust signature is."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/llm-friendly-cli.md",
+      "description": "FR-5c: The JSON schema for `help --all --format=json` requires `options[].type` to be one of \"string\", \"bool\", \"integer\". Clap's runtime `Arg` API does not expose Rust types directly — `Arg` exposes `get_action()` (SetTrue/Set/Append/Count/etc.) and `get_num_args()`, but not a clean type string. The mapping from clap's `ArgAction` to the spec's type enum is non-trivial and unspecified. For example, `--tail-lines <N>` uses `ArgAction::Set` with a value parser — same action as `--server <URL>`, so distinguishing \"integer\" from \"string\" requires inspecting the value parser, which may not expose type names at runtime.",
+      "suggestion": "Either (a) simplify the type field to only distinguish \"bool\" vs \"string\" (derivable from ArgAction::SetTrue vs Set), or (b) specify the exact mapping rule: e.g., flags with no value → \"bool\", everything else → \"string\". The \"integer\" distinction is nice-to-have but hard to derive from clap's runtime API without manual annotation. Alternatively, add a manual type registry as a fallback."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/llm-friendly-cli.md",
+      "description": "The custom `help` subcommand's `help <cmd>` path uses `Cli::command().find_subcommand(name)` for lookup, but `cache show` is a nested subcommand — `find_subcommand(\"cache show\")` won't work, and `find_subcommand(\"cache\")` returns the parent without drilling into `show`. The spec lists `cache show` in FR-2c as needing `long_about` but doesn't specify how `nemo help cache show` (two positional tokens) is parsed or routed. Similarly, the flag interaction table doesn't cover `nemo help cache show`.",
+      "suggestion": "Define how nested subcommands are handled in the help system. Options: (a) `nemo help cache` shows cache's subcommand listing (including `show`), and `nemo help cache show` drills into the nested command via chained `find_subcommand` calls. This requires the positional arg to accept multiple values. (b) Only support single-level lookup and rely on `nemo cache show --help` for nested commands. Either way, specify the behavior."
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/llm-friendly-cli.md",
+      "description": "FR-3 JSON schemas include a `message` field (e.g., \"Approved loop — implementation will start on next reconciliation tick.\") that does not exist in the server response structs (ApproveResponse, CancelResponse, ResumeResponse, ExtendResponse). The field mapping notes say \"fields mirror the server's ApproveResponse struct directly\" (referring to `state` and `approve_requested`), which could be read as implying all fields are server-sourced. The implementer needs to know `message` is CLI-synthesized.",
+      "suggestion": "Add an explicit note: \"The `message` field is synthesized CLI-side and is not part of the server response. The CLI constructs this string after a successful API call.\" This removes ambiguity about where the field originates."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/llm-friendly-cli.md",
+      "description": "FR-1a specifies an ASCII state machine diagram but provides no example or guidance on what transitions to include. The LoopState enum has 13 states and numerous transitions (including conditional ones like FAILED → resume depending on failed_from_state). The implementer must reverse-engineer the transition graph from the loop engine driver code, which is complex (~900 lines of state handling).",
+      "suggestion": "Include the expected ASCII diagram in the spec (or at minimum enumerate all transitions as a table). The authoritative source is the loop engine driver's reconcile logic, and specifying the transitions here would prevent the implementer from missing edges or inventing incorrect ones."
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/llm-friendly-cli.md",
+      "description": "FR-1a lists terminal states as \"CONVERGED, HARDENED, FAILED, CANCELLED, SHIPPED\" but the LoopState::is_terminal() implementation returns true for exactly these five. FAILED is listed as terminal, yet the recovery playbooks describe extending/resuming FAILED loops. This isn't wrong (extend creates a new state), but the mega-primer should clearly distinguish \"terminal unless explicitly extended\" to avoid confusing LLM consumers.",
+      "suggestion": "In the mega-primer content guidance, note that FAILED is terminal but recoverable via `nemo extend` (which resets max_rounds and resumes). This nuance is important for LLM consumers who will reason about state reachability."
+    }
+  ]
+}
