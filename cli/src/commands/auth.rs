@@ -103,7 +103,27 @@ pub async fn run(
             _ => continue,
         };
 
-        if !std::path::Path::new(&cred_path).exists() {
+        // For claude on macOS: if the disk file is missing but the keychain has a
+        // fresh entry (Claude Code 2.x writes to keychain and only periodically
+        // flushes to disk), use the keychain as a fallback rather than erroring.
+        let claude_keychain_fallback: Option<String> = if *provider == "claude"
+            && !std::path::Path::new(&cred_path).exists()
+        {
+            let now = crate::claude_creds::now_ms();
+            match crate::claude_creds::extract_from_keychain() {
+                Some(kc) if !crate::claude_creds::is_bundle_stale(&kc, now) => {
+                    eprintln!(
+                        "Note: no disk credentials at {cred_path}; using fresh keychain entry."
+                    );
+                    Some(kc)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if !std::path::Path::new(&cred_path).exists() && claude_keychain_fallback.is_none() {
             if !json {
                 eprintln!("No {provider} credentials found at {cred_path}");
                 match *provider {
