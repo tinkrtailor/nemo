@@ -62,6 +62,9 @@ fn nav_bar(active: &str, viewer: &str) -> Markup {
                     button #kill-switch-btn data-action="cancel-all" style="display:none" {
                         "Cancel all active loops"
                     }
+                    button #bell-toggle style="color:var(--text)" {
+                        "Bell: off"
+                    }
                     form action="/dashboard/logout" method="post" style="margin:0" {
                         button type="submit" style="color:var(--text)" { "Logout (" (viewer) ")" }
                     }
@@ -234,13 +237,20 @@ fn render_card(l: &DashboardLoop, viewer: &str) -> Markup {
 
 fn render_fleet_summary_inline(fs: &super::aggregate::FleetSummary) -> Markup {
     html! {
-        a href="/dashboard/stats" {
-            "This week \u{00b7} " (fs.total_loops) " loops"
-            @if let Some(cost) = fs.total_cost {
-                " \u{00b7} " (format!("${:.2}", cost))
+        "This week \u{00b7} "
+        a href="/dashboard/stats#total-loops" class="fleet-link" {
+            (fs.total_loops) " loops"
+        }
+        @if let Some(cost) = fs.total_cost {
+            " \u{00b7} "
+            a href="/dashboard/stats#total-cost" class="fleet-link" {
+                (format!("${:.2}", cost))
             }
-            @if let Some(rate) = fs.converge_rate {
-                " \u{00b7} " (format!("{}%", (rate * 100.0).round() as i32))
+        }
+        @if let Some(rate) = fs.converge_rate {
+            " \u{00b7} "
+            a href="/dashboard/stats#converge-rate" class="fleet-link" {
+                (format!("{}%", (rate * 100.0).round() as i32))
                 @if let Some(ref trends) = fs.trends {
                     @if let Some(delta) = trends.converge_rate_delta {
                         @let d = (delta * 100.0).round() as i32;
@@ -253,11 +263,17 @@ fn render_fleet_summary_inline(fs: &super::aggregate::FleetSummary) -> Markup {
                 }
                 " converged"
             }
-            @if let Some(avg) = fs.avg_rounds {
-                " \u{00b7} avg " (format!("{:.1}", avg)) " rounds"
+        }
+        @if let Some(avg) = fs.avg_rounds {
+            " \u{00b7} "
+            a href="/dashboard/stats#avg-rounds" class="fleet-link" {
+                "avg " (format!("{:.1}", avg)) " rounds"
             }
-            @if let Some(ref ts) = fs.top_spender {
-                " \u{00b7} top: " (ts.engineer) " (" (format!("${:.2}", ts.cost)) ")"
+        }
+        @if let Some(ref ts) = fs.top_spender {
+            " \u{00b7} "
+            a href="/dashboard/stats#per-engineer" class="fleet-link" {
+                "top: " (ts.engineer) " (" (format!("${:.2}", ts.cost)) ")"
             }
         }
     }
@@ -383,6 +399,8 @@ fn render_rounds_table(
                     th { "#" }
                     th { "Stage" }
                     th { "Verdict" }
+                    th { "Issues" }
+                    th { "Confidence" }
                     th { "Tokens" }
                     th { "Cost" }
                     th { "Duration" }
@@ -416,6 +434,7 @@ fn render_round_row(
         .map(|t| format!("{}+{}", fmt_tokens(t.input), fmt_tokens(t.output)))
         .unwrap_or_else(|| "\u{2014}".to_string());
     let has_judge = check_judge_icon(r);
+    let (issues_count, confidence) = extract_review_metrics(r);
 
     let detail_html = render_round_detail(r);
 
@@ -429,15 +448,48 @@ fn render_round_row(
                     " " span class="judge-icon" title="Judge decision" { "\u{2696}" }
                 }
             }
+            td { (issues_count) }
+            td { (confidence) }
             td { (token_str) }
             td { (fmt_cost(cost)) }
             td { (duration) }
         }
         tr class="round-detail" {
-            td colspan="6" {
+            td colspan="8" {
                 (detail_html)
             }
         }
+    }
+}
+
+/// Extract issues count and confidence score from review/audit round output.
+/// Returns ("—", "—") for non-review stages.
+fn extract_review_metrics(r: &RoundRecord) -> (String, String) {
+    let dash = "\u{2014}".to_string();
+    let Some(ref output) = r.output else {
+        return (dash.clone(), dash);
+    };
+    match r.stage.as_str() {
+        "review" | "audit" => {
+            if let Ok(rd) = serde_json::from_value::<ReviewResultData>(output.clone()) {
+                let issues = rd
+                    .verdict
+                    .get("issues")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len().to_string())
+                    .unwrap_or_else(|| dash.clone());
+                let conf = rd
+                    .verdict
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .map(|c| format!("{:.0}%", c * 100.0))
+                    .unwrap_or_else(|| dash.clone());
+                (issues, conf)
+            } else {
+                (dash.clone(), dash)
+            }
+        }
+        _ => (dash.clone(), dash),
     }
 }
 
@@ -656,6 +708,10 @@ pub fn render_feed(data: &FeedResponse, viewer: &str, current_filter: Option<&st
                 onclick="location.href='/dashboard/feed?filter=converged'" { "Converged" }
             button class=(if current_filter == Some("failed") { "chip active" } else { "chip" })
                 onclick="location.href='/dashboard/feed?filter=failed'" { "Failed" }
+            @for eng in &data.engineers {
+                button class=(if current_filter == Some(eng.as_str()) { "chip active" } else { "chip" })
+                    onclick=(format!("location.href='/dashboard/feed?filter={}'", urlencoding::encode(eng))) { (eng) }
+            }
         }
 
         div #feed-list class="feed-list" {
@@ -670,7 +726,7 @@ pub fn render_feed(data: &FeedResponse, viewer: &str, current_filter: Option<&st
         @if data.has_more {
             div class="load-more" {
                 button #feed-load-more class="btn"
-                    data-cursor=(data.events.last().map(|e| e.updated_at.to_rfc3339()).unwrap_or_default()) {
+                    data-cursor=(data.events.last().map(|e| format!("{}|{}", e.updated_at.to_rfc3339(), e.id)).unwrap_or_default()) {
                     "Load more"
                 }
             }

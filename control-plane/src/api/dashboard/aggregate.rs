@@ -4,6 +4,7 @@ use std::time::Instant;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::config::{ModelPricing, NautiloopConfig, PricingConfig};
 use crate::state::StateStore;
@@ -84,6 +85,7 @@ pub struct Trends {
 pub struct FeedResponse {
     pub events: Vec<FeedEvent>,
     pub has_more: bool,
+    pub engineers: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -445,11 +447,15 @@ pub async fn build_dashboard_state(
     let mut has_cost = false;
     let mut engineers_set: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Batch-fetch all rounds in a single query to avoid N+1 (review feedback #5).
+    let loop_ids: Vec<Uuid> = filtered.iter().map(|r| r.id).collect();
+    let all_rounds = store.get_rounds_batch(&loop_ids).await?;
+
     for record in &filtered {
-        let rounds = store.get_rounds(record.id).await?;
-        let current_stage = current_stage_for_record(record, &rounds);
-        let last_verdict = extract_last_verdict(&rounds);
-        let (tokens, cost) = compute_loop_totals(&rounds, record, config);
+        let rounds = all_rounds.get(&record.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        let current_stage = current_stage_for_record(record, rounds);
+        let last_verdict = extract_last_verdict(rounds);
+        let (tokens, cost) = compute_loop_totals(rounds, record, config);
 
         *counts_by_state
             .entry(record.state.to_string())
@@ -590,9 +596,12 @@ async fn compute_window_summary(
     let mut rounds_sum = 0i64;
     let mut cost_by_engineer: HashMap<String, f64> = HashMap::new();
 
+    let loop_ids: Vec<Uuid> = loops.iter().map(|r| r.id).collect();
+    let all_rounds = store.get_rounds_batch(&loop_ids).await?;
+
     for record in loops {
-        let rounds = store.get_rounds(record.id).await?;
-        let (_, cost) = compute_loop_totals(&rounds, record, config);
+        let rounds = all_rounds.get(&record.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        let (_, cost) = compute_loop_totals(rounds, record, config);
         if let Some(c) = cost {
             total_cost += c;
             has_cost = true;
@@ -642,7 +651,7 @@ async fn compute_window_summary(
 pub async fn build_feed_response(
     store: &dyn StateStore,
     config: &NautiloopConfig,
-    cursor: Option<DateTime<Utc>>,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
     limit: usize,
     filter: Option<&str>,
 ) -> crate::error::Result<FeedResponse> {
@@ -650,19 +659,31 @@ pub async fn build_feed_response(
         .get_loops_for_engineer(None, true, true)
         .await?;
 
+    // Collect distinct engineers from all terminal loops for feed filter chips (FR-12b).
+    let mut engineers_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     let mut terminal: Vec<&LoopRecord> = all_loops
         .iter()
         .filter(|l| {
             if !l.state.is_terminal() {
                 return false;
             }
-            // Cursor-based pagination: exclude loops strictly after the cursor.
-            // Use `>` so that items sharing the cursor timestamp are included
-            // (potential minor duplication is preferable to losing events).
-            if let Some(c) = cursor
-                && l.updated_at > c {
+            engineers_set.insert(l.engineer.clone());
+            // Compound cursor pagination: exclude items at or before the cursor
+            // position. Items are sorted by (updated_at DESC, id DESC). An item
+            // is "before" the cursor when its timestamp is strictly later than the
+            // cursor timestamp, OR when timestamps match and its id is >= the
+            // cursor id (the cursor id itself was the last item on the prev page).
+            if let Some((cursor_ts, cursor_id)) = cursor {
+                if l.updated_at > cursor_ts {
+                    // Strictly after cursor in desc order — already shown
                     return false;
                 }
+                if l.updated_at == cursor_ts && l.id >= cursor_id {
+                    // Same timestamp: exclude the cursor item and anything "above" it
+                    return false;
+                }
+            }
             match filter {
                 Some("converged") => matches!(
                     l.state,
@@ -675,14 +696,19 @@ pub async fn build_feed_response(
         })
         .collect();
 
-    terminal.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+    terminal.sort_by(|a, b| {
+        b.updated_at.cmp(&a.updated_at).then_with(|| b.id.cmp(&a.id))
+    });
     let has_more = terminal.len() > limit;
     let events_slice = &terminal[..terminal.len().min(limit)];
 
+    let feed_ids: Vec<Uuid> = events_slice.iter().map(|r| r.id).collect();
+    let feed_rounds = store.get_rounds_batch(&feed_ids).await?;
+
     let mut events = Vec::with_capacity(events_slice.len());
     for record in events_slice {
-        let rounds = store.get_rounds(record.id).await?;
-        let (tokens, cost) = compute_loop_totals(&rounds, record, config);
+        let rounds = feed_rounds.get(&record.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        let (tokens, cost) = compute_loop_totals(rounds, record, config);
         // Count extensions: max_rounds above the configured default
         let default_max = if record.kind == crate::types::LoopKind::Harden {
             config.limits.max_rounds_harden as i32
@@ -705,7 +731,14 @@ pub async fn build_feed_response(
         });
     }
 
-    Ok(FeedResponse { events, has_more })
+    let mut engineers: Vec<String> = engineers_set.into_iter().collect();
+    engineers.sort();
+
+    Ok(FeedResponse {
+        events,
+        has_more,
+        engineers,
+    })
 }
 
 // ── Build specs response (FR-13) ──
@@ -733,11 +766,14 @@ pub async fn build_specs_response(
     let mut total_cost_sum = 0.0f64;
     let mut has_cost = false;
 
+    let spec_ids: Vec<Uuid> = matching.iter().map(|r| r.id).collect();
+    let spec_rounds = store.get_rounds_batch(&spec_ids).await?;
+
     // Single pass: compute rounds/cost once per loop, build both runs slice and aggregates
     let mut runs = Vec::with_capacity(matching.len().min(limit));
     for (i, record) in matching.iter().enumerate() {
-        let rounds = store.get_rounds(record.id).await?;
-        let (_, cost) = compute_loop_totals(&rounds, record, config);
+        let rounds = spec_rounds.get(&record.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        let (_, cost) = compute_loop_totals(rounds, record, config);
 
         // Build the runs response slice for the first `limit` items
         if i < limit {
@@ -831,9 +867,12 @@ pub async fn build_stats_response(
     // Time series
     let mut day_map: HashMap<String, (u64, u64, u64)> = HashMap::new(); // (started, converged, failed)
 
+    let stats_ids: Vec<Uuid> = window_loops.iter().map(|r| r.id).collect();
+    let stats_rounds = store.get_rounds_batch(&stats_ids).await?;
+
     for record in &window_loops {
-        let rounds = store.get_rounds(record.id).await?;
-        let (_, cost) = compute_loop_totals(&rounds, record, config);
+        let rounds = stats_rounds.get(&record.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        let (_, cost) = compute_loop_totals(rounds, record, config);
         let cost_val = cost.unwrap_or(0.0);
         if cost.is_some() {
             has_cost = true;

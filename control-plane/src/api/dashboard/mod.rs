@@ -30,9 +30,9 @@ pub fn build_dashboard_router(app_state: AppState) -> Router<AppState> {
         .route("/dashboard/static/dashboard.js", get(handlers::static_js));
 
     // Authed routes — HTML pages and JSON endpoints.
-    // The /dashboard/state, /dashboard/feed (JSON), /dashboard/specs (JSON),
-    // /dashboard/stats (JSON) endpoints are handled by dedicated handlers
-    // that always return JSON. The page variants are separate routes.
+    // Handlers extract State<DashboardState>; .with_state(dash_state) provides
+    // the DashboardState and converts Router<DashboardState> → Router<AppState>
+    // since the parent build_router() will call .with_state(state) at the top level.
     let authed: Router<AppState> = Router::new()
         .route("/dashboard", get(handlers::dashboard_page))
         .route("/dashboard/state", get(handlers::dashboard_state))

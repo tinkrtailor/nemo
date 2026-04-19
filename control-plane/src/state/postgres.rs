@@ -621,6 +621,28 @@ impl StateStore for PgStateStore {
         Ok(rows.iter().map(row_to_round_record).collect())
     }
 
+    async fn get_rounds_batch(
+        &self,
+        loop_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<RoundRecord>>> {
+        if loop_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = sqlx::query(
+            "SELECT * FROM rounds WHERE loop_id = ANY($1) ORDER BY round ASC, started_at ASC",
+        )
+        .bind(loop_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut result: HashMap<Uuid, Vec<RoundRecord>> = HashMap::new();
+        for row in &rows {
+            let record = row_to_round_record(row);
+            result.entry(record.loop_id).or_default().push(record);
+        }
+        Ok(result)
+    }
+
     async fn append_log(&self, event: &LogEvent) -> Result<()> {
         sqlx::query(
             "INSERT INTO log_events (id, loop_id, round, stage, timestamp, line) VALUES ($1, $2, $3, $4, $5, $6)",

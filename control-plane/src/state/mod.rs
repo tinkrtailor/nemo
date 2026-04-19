@@ -65,6 +65,13 @@ pub trait StateStore: Send + Sync + 'static {
     /// Get all rounds for a loop.
     async fn get_rounds(&self, loop_id: Uuid) -> Result<Vec<RoundRecord>>;
 
+    /// Get all rounds for multiple loops in a single query.
+    /// Returns a map of loop_id -> Vec<RoundRecord>.
+    async fn get_rounds_batch(
+        &self,
+        loop_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Vec<RoundRecord>>>;
+
     /// Append a log event.
     async fn append_log(&self, event: &LogEvent) -> Result<()>;
 
@@ -343,6 +350,20 @@ pub mod memory {
                 .filter(|r| r.loop_id == loop_id)
                 .cloned()
                 .collect())
+        }
+
+        async fn get_rounds_batch(
+            &self,
+            loop_ids: &[Uuid],
+        ) -> Result<HashMap<Uuid, Vec<RoundRecord>>> {
+            let rounds = self.rounds.read().await;
+            let mut result: HashMap<Uuid, Vec<RoundRecord>> = HashMap::new();
+            for r in rounds.iter() {
+                if loop_ids.contains(&r.loop_id) {
+                    result.entry(r.loop_id).or_default().push(r.clone());
+                }
+            }
+            Ok(result)
         }
 
         async fn append_log(&self, event: &LogEvent) -> Result<()> {

@@ -184,6 +184,12 @@ mod tests {
         async fn get_rounds(&self, _: Uuid) -> crate::error::Result<Vec<RoundRecord>> {
             unimplemented!()
         }
+        async fn get_rounds_batch(
+            &self,
+            _: &[Uuid],
+        ) -> crate::error::Result<std::collections::HashMap<Uuid, Vec<RoundRecord>>> {
+            unimplemented!()
+        }
         async fn append_log(&self, _: &LogEvent) -> crate::error::Result<()> {
             unimplemented!()
         }

@@ -78,6 +78,24 @@ pub async fn login_submit(
 
     let secure_flag = if is_localhost { "" } else { "; Secure" };
 
+    // Validate the API key contains only cookie-safe characters (RFC 6265 §4.1.1).
+    // Cookie-values must not contain semicolons, commas, spaces, backslash,
+    // double-quotes, or control characters.
+    if !form.api_key.bytes().all(|b| {
+        b > 0x20
+            && b < 0x7F
+            && b != b';'
+            && b != b','
+            && b != b' '
+            && b != b'\\'
+            && b != b'"'
+    }) {
+        return Html(templates::render_login(Some(
+            "API key contains characters not safe for cookies",
+        )))
+        .into_response();
+    }
+
     let key_cookie = format!(
         "nautiloop_api_key={}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800{}",
         form.api_key, secure_flag
@@ -230,12 +248,106 @@ pub async fn dashboard_stream(
             .collect();
         Ok(Json(lines).into_response())
     } else {
-        // SSE stream for active loops
-        Ok(
-            crate::api::sse::stream_logs(state.app.store.clone(), id, None, None)
-                .await
-                .into_response(),
-        )
+        // SSE stream for active loops: send last 200 lines first, then tail new lines.
+        // Get recent logs to determine the SSE start offset.
+        let logs = state.app.store.get_logs(id, None, None).await?;
+        let skip = logs.len().saturating_sub(200);
+        // Clone into owned data that the stream can capture with 'static lifetime.
+        let recent_logs: Vec<crate::types::LogEvent> =
+            logs.into_iter().skip(skip).collect();
+
+        // Determine the cursor timestamp: start SSE from the last recent log's
+        // timestamp so we only get new lines going forward (no re-sending).
+        let start_ts = recent_logs
+            .last()
+            .map(|l| l.timestamp)
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH);
+
+        // Collect seen IDs from recent logs for dedup in the tail phase.
+        let initial_seen: std::collections::HashSet<uuid::Uuid> =
+            recent_logs.iter().map(|l| l.id).collect();
+
+        let store = state.app.store.clone();
+        let stream = async_stream::stream! {
+            use axum::response::sse::Event;
+
+            // First, emit the recent log lines as SSE events
+            for log in &recent_logs {
+                let event = crate::types::api::LogEventResponse {
+                    timestamp: log.timestamp,
+                    stage: log.stage.clone(),
+                    round: log.round,
+                    line: log.line.clone(),
+                };
+                if let Ok(json) = serde_json::to_string(&event) {
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data(json));
+                }
+            }
+
+            // Now tail new lines using the same pattern as sse::stream_logs
+            let mut cursor_timestamp = start_ts;
+            let mut seen_ids = initial_seen.clone();
+            let poll_interval = std::time::Duration::from_millis(500);
+
+            loop {
+                let new_logs = match store.get_logs_after(id, cursor_timestamp).await {
+                    Ok(logs) => logs,
+                    Err(e) => {
+                        tracing::error!(error = %e, "Dashboard stream: failed to get logs");
+                        break;
+                    }
+                };
+
+                for log in &new_logs {
+                    if !seen_ids.insert(log.id) {
+                        continue;
+                    }
+                    if log.timestamp > cursor_timestamp {
+                        cursor_timestamp = log.timestamp;
+                        seen_ids.clear();
+                        seen_ids.insert(log.id);
+                    }
+
+                    let event = crate::types::api::LogEventResponse {
+                        timestamp: log.timestamp,
+                        stage: log.stage.clone(),
+                        round: log.round,
+                        line: log.line.clone(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        yield Ok(Event::default().data(json));
+                    }
+                }
+
+                // Check if loop is terminal
+                match store.get_loop(id).await {
+                    Ok(Some(rec)) if rec.state.is_terminal() => {
+                        yield Ok(Event::default().data(
+                            serde_json::json!({
+                                "type": "end",
+                                "state": rec.state,
+                            }).to_string()
+                        ));
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Dashboard stream: failed to check loop state");
+                        break;
+                    }
+                    _ => {}
+                }
+
+                tokio::time::sleep(poll_interval).await;
+            }
+        };
+
+        use axum::response::sse::Sse;
+        Ok(Sse::new(stream)
+            .keep_alive(
+                axum::response::sse::KeepAlive::new()
+                    .interval(std::time::Duration::from_secs(15))
+            )
+            .into_response())
     }
 }
 
@@ -254,10 +366,19 @@ pub async fn feed_page(
     Query(query): Query<FeedQuery>,
 ) -> Result<Response, NautiloopError> {
     let accepts_json = wants_json(&headers);
-    let cursor = query
-        .cursor
-        .as_deref()
-        .and_then(|c| c.parse::<DateTime<Utc>>().ok());
+    // Compound cursor: "timestamp|uuid" for deterministic pagination (no boundary duplication).
+    let cursor = query.cursor.as_deref().and_then(|c| {
+        let parts: Vec<&str> = c.splitn(2, '|').collect();
+        if parts.len() == 2 {
+            let ts = parts[0].parse::<DateTime<Utc>>().ok()?;
+            let id = parts[1].parse::<Uuid>().ok()?;
+            Some((ts, id))
+        } else {
+            // Fallback: legacy timestamp-only cursor (backwards compat during rollout)
+            let ts = c.parse::<DateTime<Utc>>().ok()?;
+            Some((ts, Uuid::nil()))
+        }
+    });
     let limit = query.limit.unwrap_or(50).min(100);
 
     let data = aggregate::build_feed_response(

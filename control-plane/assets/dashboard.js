@@ -152,6 +152,7 @@
       for (const loop of data.loops) {
         if (prevStates[loop.id] && !isTerminal(prevStates[loop.id]) && loop.state === "CONVERGED") {
           convergedSinceLastFocus++;
+          playBell();
         }
         prevStates[loop.id] = loop.state;
       }
@@ -227,8 +228,8 @@
     const f = data.fleet_summary;
     let parts = [];
     parts.push("This week");
-    parts.push("\u00b7 " + f.total_loops + " loops");
-    if (f.total_cost != null) parts.push("\u00b7 " + fmtCost(f.total_cost));
+    parts.push('\u00b7 <a href="/dashboard/stats#total-loops" class="fleet-link">' + f.total_loops + " loops</a>");
+    if (f.total_cost != null) parts.push('\u00b7 <a href="/dashboard/stats#total-cost" class="fleet-link">' + fmtCost(f.total_cost) + "</a>");
     const cr = f.converge_rate != null ? Math.round(f.converge_rate * 100) : null;
     if (cr != null) {
       let trend = "";
@@ -237,7 +238,7 @@
         if (d > 0) trend = ' <span class="trend-up">\u2191' + d + '%</span>';
         else if (d < 0) trend = ' <span class="trend-down">\u2193' + Math.abs(d) + '%</span>';
       }
-      parts.push("\u00b7 " + cr + "%" + trend + " converged");
+      parts.push('\u00b7 <a href="/dashboard/stats#converge-rate" class="fleet-link">' + cr + "%" + trend + " converged</a>");
     }
     if (f.avg_rounds != null) {
       let trend = "";
@@ -246,10 +247,10 @@
         if (d > 0.05) trend = ' <span class="trend-down">\u2191' + d.toFixed(1) + '</span>';
         else if (d < -0.05) trend = ' <span class="trend-up">\u2193' + Math.abs(d).toFixed(1) + '</span>';
       }
-      parts.push("\u00b7 avg " + f.avg_rounds.toFixed(1) + trend + " rounds");
+      parts.push('\u00b7 <a href="/dashboard/stats#avg-rounds" class="fleet-link">avg ' + f.avg_rounds.toFixed(1) + trend + " rounds</a>");
     }
     if (f.top_spender && f.top_spender.cost != null) {
-      parts.push("\u00b7 top: " + esc(f.top_spender.engineer) + " (" + fmtCost(f.top_spender.cost) + ")");
+      parts.push('\u00b7 <a href="/dashboard/stats#per-engineer" class="fleet-link">top: ' + esc(f.top_spender.engineer) + " (" + fmtCost(f.top_spender.cost) + ")</a>");
     }
     el.innerHTML = parts.join(" ");
   }
@@ -472,6 +473,20 @@
     });
   }
 
+  // --- Bell Toggle ---
+  function bindBellToggle() {
+    const btn = document.getElementById("bell-toggle");
+    if (!btn) return;
+    // Initialize label from current state
+    btn.textContent = bellEnabled ? "Bell: on" : "Bell: off";
+    btn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      bellEnabled = !bellEnabled;
+      btn.textContent = bellEnabled ? "Bell: on" : "Bell: off";
+      try { localStorage.setItem("nautiloop_bell", bellEnabled ? "on" : "off"); } catch(e) {}
+    });
+  }
+
   // --- Round Row Expand ---
   function bindRoundExpand() {
     document.querySelectorAll(".round-row").forEach(function(row) {
@@ -485,6 +500,41 @@
   }
 
   // --- Feed Page ---
+  // Persist feed filter selection in localStorage (FR-12b, progressive enhancement).
+  function bindFeedFilters() {
+    const feedList = document.getElementById("feed-list");
+    if (!feedList) return;
+    // Intercept filter chip clicks within the feed page filter bar to persist in localStorage.
+    document.querySelectorAll(".filter-bar .chip[onclick]").forEach(function(chip) {
+      const originalOnclick = chip.getAttribute("onclick");
+      chip.removeAttribute("onclick");
+      chip.addEventListener("click", function() {
+        // Extract filter value from the onclick URL
+        const match = originalOnclick.match(/filter=([^'"]*)/);
+        const filter = match ? match[1] : "";
+        try { localStorage.setItem("nautiloop_feed_filter", filter); } catch(e) {}
+        // Execute original navigation
+        (new Function(originalOnclick))();
+      });
+    });
+  }
+
+  // On feed page load, apply saved filter if no explicit filter is in the URL.
+  function restoreFeedFilter() {
+    const feedList = document.getElementById("feed-list");
+    if (!feedList) return;
+    const params = new URLSearchParams(location.search);
+    // Only restore if user navigated to /dashboard/feed without a filter param.
+    if (!params.has("filter") && !params.has("cursor")) {
+      try {
+        const saved = localStorage.getItem("nautiloop_feed_filter");
+        if (saved) {
+          location.href = "/dashboard/feed?filter=" + encodeURIComponent(saved);
+        }
+      } catch(e) {}
+    }
+  }
+
   function bindFeedLoadMore() {
     const btn = document.getElementById("feed-load-more");
     if (!btn) return;
@@ -503,7 +553,8 @@
             list.insertAdjacentHTML("beforeend", renderFeedItem(ev));
           }
           if (data.has_more && data.events.length > 0) {
-            btn.dataset.cursor = data.events[data.events.length - 1].updated_at;
+            const last = data.events[data.events.length - 1];
+            btn.dataset.cursor = last.updated_at + "|" + last.id;
           } else {
             btn.style.display = "none";
           }
@@ -535,6 +586,28 @@
         window.location.href = "/dashboard/stats?window=" + w;
       });
     });
+  }
+
+  // --- Web Audio Bell (Progressive Enhancement, FR-7a) ---
+  // Opt-in notification bell when a loop converges. Preference stored in localStorage.
+  let bellEnabled = false;
+  try { bellEnabled = localStorage.getItem("nautiloop_bell") === "on"; } catch(e) {}
+
+  function playBell() {
+    if (!bellEnabled) return;
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "sine";
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.3);
+    } catch(e) {}
   }
 
   // --- Focus Tracking (Progressive Enhancement) ---
@@ -584,7 +657,10 @@
 
     bindActions();
     bindHeaderMenu();
+    bindBellToggle();
     bindRoundExpand();
+    restoreFeedFilter();
+    bindFeedFilters();
     bindFeedLoadMore();
     bindStatsWindow();
     highlightHash();
