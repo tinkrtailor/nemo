@@ -1,0 +1,85 @@
+{
+  "round": 6,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 662,
+      "description": "Feed cursor pagination causes boundary-item duplication. The cursor is the `updated_at` of the last item on the current page. The filter uses `l.updated_at > c` to exclude items, so items with `updated_at == cursor` are included. After sorting DESC and slicing, the last item from the previous page reappears as the first item on the next page. The comment acknowledges this ('potential minor duplication') but the spec describes clean pagination with no duplicates.",
+      "suggestion": "Use a compound cursor (updated_at + loop ID) for deterministic pagination, or document the duplication as intentional and let the client deduplicate by ID."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/templates.rs",
+      "line": 380,
+      "description": "Rounds table is missing 'issues count' and 'confidence score' columns that FR-4a specifies. The spec says columns should be: round number, stage, verdict, issues count, confidence score, tokens, cost, duration. The implementation only has: #, Stage, Verdict, Tokens, Cost, Duration — omitting issues count and confidence score.",
+      "suggestion": "Add 'Issues' and 'Confidence' columns to the rounds table header and render them from the review/audit verdict data (issues array length and confidence field). For non-review stages, display '—'."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/templates.rs",
+      "line": 648,
+      "description": "Feed page is missing per-engineer filter chips. FR-12b specifies filters: 'All events / Converged only / Failed only / per-engineer'. The implementation only renders 'All events', 'Converged', and 'Failed' chips — no per-engineer chips. Engineers cannot filter the feed by specific team member.",
+      "suggestion": "Add per-engineer chips to the feed page filter bar, similar to the card grid's engineer row. This requires passing the list of engineers (from the feed data or a separate query) to the feed template."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/templates.rs",
+      "line": 214,
+      "description": "Fleet summary (FR-9c) does not provide field-specific anchor links. The spec says 'Tapping any field of the summary navigates to /dashboard/stats with that field pre-focused' with anchor fragments. The implementation wraps the entire summary in a single link to '/dashboard/stats' — all fields link to the same URL without distinguishing anchors (#total-loops, #converge-rate, etc.).",
+      "suggestion": "Break the fleet summary into individual clickable spans/links, each pointing to '/dashboard/stats#total-loops', '/dashboard/stats#total-cost', '/dashboard/stats#converge-rate', '/dashboard/stats#avg-rounds' respectively."
+    },
+    {
+      "severity": "medium",
+      "category": "performance",
+      "file": "control-plane/src/api/dashboard/aggregate.rs",
+      "line": 449,
+      "description": "N+1 query pattern: `build_dashboard_state` calls `store.get_rounds(record.id)` for every loop in the filtered set. With 50 active loops polled every 5 seconds, this is 50 DB queries per poll cycle. The fleet_summary additionally queries rounds for ALL loops in the 7-day window on every cache miss (potentially hundreds of round queries).",
+      "suggestion": "Add a batch `get_rounds_for_loops(ids: &[Uuid])` method to StateStore that returns all rounds in a single query, or pre-compute token aggregates as materialized columns on the loops table."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/mod.rs",
+      "line": 36,
+      "description": "Router state type annotation `Router<AppState>` for the authed routes is incorrect. The handlers extract `State<DashboardState>`, so the router is `Router<DashboardState>`. After `.with_state(dash_state)` it becomes `Router<()>`, not `Router<AppState>`. This either fails to compile (in which case the code is broken) or the annotation is misleading and works through type inference ignoring the explicit annotation (which Rust does not do).",
+      "suggestion": "Change the type annotation to `let authed: Router<()> = Router::new()...` since `.with_state(dash_state)` converts the router from `Router<DashboardState>` to `Router<()>`. Similarly, public routes that don't extract state should have their annotation adjusted, or remove explicit annotations and let the compiler infer."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 256,
+      "description": "Dashboard stream SSE for active loops streams the complete log from the beginning (via the existing stream_logs function), not just the last 200 lines as FR-1a specifies. The spec says '/dashboard/stream/:id' should return 'the last 200 lines as SSE for active loops'. The server-side handler for active loops delegates to `crate::api::sse::stream_logs` which streams all logs, not just the tail.",
+      "suggestion": "Either modify the dashboard_stream handler to start the SSE stream from a recent offset (e.g., last 200 log entries), or create a dashboard-specific stream function that only emits recent lines plus new lines going forward."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 393,
+      "description": "Feed filter chip selection does not persist in localStorage across visits. FR-12b says 'Persists selection in localStorage across visits.' FR-16a classifies this as progressive enhancement. The current implementation uses page navigation (onclick changes URL) but doesn't save/restore the selection from localStorage.",
+      "suggestion": "On page load, check localStorage for a saved feed filter value and apply it. On filter chip click, save the selection to localStorage before navigating."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "description": "Web audio bell on convergence is not implemented. FR-7a specifies 'Play a \\a bell equivalent via web audio when a loop converges (opt-in, off by default).' FR-16a classifies this as progressive enhancement. Not blocking but noted.",
+      "suggestion": "Add an opt-in web audio notification triggered when a loop transitions to CONVERGED state during polling. Store the opt-in preference in localStorage."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 81,
+      "description": "The raw API key is interpolated directly into the Set-Cookie header value without URL-encoding. While the validation rejects non-alphanumeric characters for engineer_name, the api_key value itself could theoretically contain characters that are problematic in cookie values (though in practice API keys are typically alphanumeric). RFC 6265 restricts cookie values to a subset of ASCII.",
+      "suggestion": "Consider URL-encoding or base64-encoding the API key value in the cookie, or validate that it only contains cookie-safe characters before setting it."
+    }
+  ]
+}
