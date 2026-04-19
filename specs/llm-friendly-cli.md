@@ -8,10 +8,10 @@ Goal: `nemo help ai` is the single command an agent runs to understand what naut
 
 ## Baseline
 
-Main at PR #159 merge.
+Main at PR #159 merge. Implementation should begin after #159 is merged to main. If starting earlier, rebase onto main after #159 lands.
 
 Current state:
-- `nemo --help` / `nemo -h` / `nemo help` — flat list of 17 commands with one-line descriptions. (This spec adds `capabilities` as a new top-level command, bringing the count to 18 plus the custom `help` subcommand.)
+- `nemo --help` / `nemo -h` / `nemo help` — flat list of 17 commands with one-line descriptions. (This spec adds `capabilities` as a new top-level command and replaces clap's built-in `help` with a custom `help` subcommand, bringing the user-visible count to 19: 17 existing + `capabilities` + custom `help`. This matches the FR-6b `commands` array.)
 - `nemo <command> --help` — shows flags + positional args for that command. No examples. No context.
 - `nemo help <command>` — same as `nemo <command> --help` (clap's default).
 - No machine-readable output. No workflow-level documentation. No mental-model primer.
@@ -75,13 +75,17 @@ An LLM can parse that. But a friendlier error would name the recovery path: "Loo
   |---|---|---|
   | PENDING | HARDENING | Reconciler picks up loop (harden mode) |
   | PENDING | AWAITING_APPROVAL | Reconciler picks up loop (no-harden mode) |
-  | HARDENING | AWAITING_APPROVAL | Harden job completes |
+  | PENDING | IMPLEMENTING | Reconciler picks up loop (ship mode / auto-approve) |
+  | HARDENING | AWAITING_APPROVAL | Harden job completes (start mode — proceed to implement) |
+  | HARDENING | HARDENED | Harden job completes (harden_only mode — terminal) |
+  | HARDENING | FAILED | Harden job fails / max rounds exceeded / audit issues |
   | AWAITING_APPROVAL | IMPLEMENTING | Engineer approves (`nemo approve`) |
   | IMPLEMENTING | TESTING | Implementation job completes |
   | TESTING | REVIEWING | Test job completes (tests pass) |
   | TESTING | IMPLEMENTING | Test job completes (tests fail) |
   | REVIEWING | CONVERGED | Reviewer approves |
   | REVIEWING | IMPLEMENTING | Reviewer requests changes |
+  | REVIEWING | AWAITING_APPROVAL | Judge escalates during review (requires engineer re-approval) |
   | IMPLEMENTING | FAILED | Max rounds exceeded |
   | REVIEWING | FAILED | Max rounds exceeded |
   | TESTING | FAILED | Max rounds exceeded |
@@ -98,6 +102,7 @@ An LLM can parse that. But a friendlier error would name the recovery path: "Loo
 - **Typical workflow 1 (implement)**: `nemo start spec.md` → `nemo approve <id>` → `nemo logs <id>` → wait → PR.
 - **Typical workflow 2 (harden-first)**: `nemo start spec.md` → review hardened spec PR → `nemo approve <id>` → watch → PR. (Harden is the default; use `--no-harden` to skip it. The `--harden` flag is deprecated and emits a warning.)
 - **Typical workflow 3 (ship)**: `nemo ship spec.md` → (no approval, no human) → auto-merged PR. Ship skips hardening by default. Use `nemo ship --harden spec.md` to harden first. (This differs from `start`, which hardens by default.)
+- **Typical workflow 4 (harden-only)**: `nemo harden spec.md` → loop hardens the spec → review hardened spec PR → loop terminates at HARDENED. Use this for spec refinement without implementation. The lifecycle is PENDING → HARDENING → HARDENED (terminal).
 - **Recovery playbooks**: AWAITING_REAUTH → `nemo auth --claude` then `nemo resume <id>` (Claude token expiry surfaces as this state, not as an HTTP error — the loop engine detects it internally and transitions the loop). PAUSED → `nemo resume`. FAILED (max rounds) → `nemo extend --add 10 <id>` OR investigate. Stale kubectl context? Don't switch, use `--context=<name>` per command.
 - **Config hierarchy**: engineer (`~/.nemo/config.toml`) > repo (`nemo.toml` on main) > cluster (control plane ConfigMap). Explain which lives where.
 - **Command catalog**: full list with one-line descriptions, same as `nemo --help`, but grouped into categories: loop lifecycle, observability, identity, config.
@@ -273,18 +278,20 @@ See also: nemo status (find loop IDs), nemo logs (watch after approve).
     {
       "name": "claude",
       "models": ["claude-opus-4", "claude-sonnet-4", "claude-haiku-4"],
-      "credential_status": { "valid": true, "updated_at": "2025-01-15T10:30:00Z" }
+      "valid": true,
+      "updated_at": "2025-01-15T10:30:00Z"
     },
     {
       "name": "openai",
       "models": ["gpt-5.4", "gpt-4o", "o1-preview", "o1-mini"],
-      "credential_status": { "valid": false, "updated_at": null }
+      "valid": false,
+      "updated_at": null
     }
   ]
 }
 ```
 
-> **Provider naming**: Uses `"claude"` (not `"anthropic"`) to match the codebase's internal provider naming convention (consistent with `nemo auth --claude`). Models are listed as flat string arrays from the hardcoded `CLAUDE_MODELS` / `OPENAI_MODELS` constants — there is no per-model role assignment since any model can serve any role. `credential_status` is included because it is the primary value of the `models` command (showing whether credentials are configured and valid); it is sourced from the control plane's `ProviderInfo` data.
+> **Provider naming**: Uses `"claude"` (not `"anthropic"`) to match the codebase's internal provider naming convention (consistent with `nemo auth --claude`). Models are listed as flat string arrays from the hardcoded `CLAUDE_MODELS` / `OPENAI_MODELS` constants — there is no per-model role assignment since any model can serve any role. The `valid` and `updated_at` fields are passed through directly from the server's `ProviderInfo` struct (flat fields, not nested) — consistent with the spec's principle of avoiding translation layers between server responses and CLI JSON output.
 
 **`nemo auth --json`:**
 ```json
@@ -385,7 +392,7 @@ Matching rules:
 - `commands` is a map from command name to command descriptor.
 - `short`: the one-line `about` string.
 - `long`: the full `long_about` text (including examples, see-also).
-- `options`: array of flag/option descriptors. `short` is null if no short flag. `type` is one of `"bool"` or `"string"` — derived from clap's `ArgAction`: `SetTrue`/`SetFalse` → `"bool"`, everything else (`Set`, `Append`, `Count`) → `"string"`. There is no `"integer"` type; distinguishing integers from strings would require inspecting clap's value parser internals, which do not reliably expose type names at runtime. Consumers that need numeric types should parse based on the argument name and context.
+- `options`: array of flag/option descriptors. `short` is null if no short flag. `type` is one of `"bool"` or `"string"` — derived from clap's `ArgAction`: `SetTrue`/`SetFalse` → `"bool"`, everything else (`Set`, `Append`, `Count`) → `"string"`. There is no `"integer"` type; distinguishing integers from strings would require inspecting clap's value parser internals, which do not reliably expose type names at runtime. `Count` actions (e.g., verbosity flags like `-v`) are also mapped to `"string"` since they are rare — no current nemo commands use `Count`. Consumers that need numeric types should parse based on the argument name and context.
 - `positional_args`: array of positional argument descriptors. Omitted (or empty array) if the command takes no positional args.
 
 ### FR-6: Version + capability report
@@ -415,6 +422,15 @@ Matching rules:
 **FR-6c.** Lets an agent check `nemo capabilities` once at startup and know what it can and cannot rely on in this CLI version. Avoids version-sniffing via `nemo --version` + external lookup.
 
 > **Implementation note**: Feature flags in `cli/src/capabilities.rs` are hardcoded boolean constants, updated manually when features ship. They are NOT Cargo feature gates — they represent server-side/product-level capability presence, not compile-time conditional compilation. The `commands` array is derived from the clap `Command` definition at runtime (iterate `Cli::command().get_subcommands()`), so it is always self-consistent and automatically includes new subcommands like `capabilities` itself. The clap `Command` tree is constructed at runtime via the derive macro's generated code — this is runtime iteration, not a build script or proc macro.
+
+> **Feature flag definitions**:
+> - `qa_stage`: true when a dedicated QA/testing stage exists as a separate loop phase (not yet shipped)
+> - `orchestrator_judge`: true when the judge-based review escalation path is active in the loop engine (judge can escalate REVIEWING → AWAITING_APPROVAL)
+> - `pluggable_cache`: true when the cache backend is configurable (not hardcoded to a single provider)
+> - `harden_by_default`: true when `nemo start` hardens specs before implementation by default
+> - `nemo_extend`: true when the `nemo extend` command is available to resume failed loops with additional rounds
+> - `pod_introspect`: true when `nemo ps` can inspect individual pod state and logs
+> - `dashboard`: true when a web-based dashboard UI is available (not yet shipped)
 
 ### Implementation Note: Custom Help Subcommand
 
@@ -498,4 +514,4 @@ All existing command invocations produce identical stdout/stderr, except that `n
 
 ## Baseline Branch
 
-`main` at PR #159 merge.
+`main` at PR #159 merge. Implementation should begin after #159 is merged to main. If starting earlier, rebase onto main after #159 lands.
