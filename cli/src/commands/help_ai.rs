@@ -292,6 +292,99 @@ mod tests {
                 "JSON recovery playbook state {state} not found in Markdown template"
             );
         }
+
+        // Verify transition count parity: JSON transitions array should match
+        // the number of data rows in the Markdown "### All Transitions" table.
+        let json_transitions = json["state_machine"]["transitions"].as_array().unwrap();
+        let md_transition_rows = {
+            let mut in_transitions_table = false;
+            let mut count = 0usize;
+            for line in HELP_AI_TEMPLATE.lines() {
+                if line.starts_with("### All Transitions") {
+                    in_transitions_table = true;
+                    continue;
+                }
+                if in_transitions_table {
+                    // Stop at the next heading or end of table
+                    if line.starts_with('#') || (line.is_empty() && count > 0) {
+                        // Empty line after table rows signals end; but skip the
+                        // separator line (|---|) and header row.
+                        break;
+                    }
+                    // Count lines that look like table data rows: start with |,
+                    // are not the header separator (|--)
+                    if line.starts_with('|') && !line.starts_with("|--") && !line.starts_with("| From") {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
+        assert_eq!(
+            json_transitions.len(),
+            md_transition_rows,
+            "JSON has {} transitions but Markdown 'All Transitions' table has {} data rows",
+            json_transitions.len(),
+            md_transition_rows,
+        );
+
+        // Verify recovery playbook count parity: JSON playbooks should match
+        // the number of ### headings under ## Recovery Playbooks in Markdown.
+        let md_recovery_count = {
+            let mut in_recovery = false;
+            let mut count = 0usize;
+            for line in HELP_AI_TEMPLATE.lines() {
+                if line.starts_with("## Recovery Playbooks") {
+                    in_recovery = true;
+                    continue;
+                }
+                if in_recovery {
+                    if line.starts_with("## ") {
+                        break; // Next top-level section
+                    }
+                    if line.starts_with("### ") {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
+        assert_eq!(
+            json_playbooks.len(),
+            md_recovery_count,
+            "JSON has {} recovery playbooks but Markdown has {} recovery headings",
+            json_playbooks.len(),
+            md_recovery_count,
+        );
+
+        // Verify config hierarchy level count parity.
+        let json_config_levels = json["config_hierarchy"]["levels"].as_array().unwrap();
+        let md_config_rows = {
+            let mut in_config = false;
+            let mut count = 0usize;
+            for line in HELP_AI_TEMPLATE.lines() {
+                if line.starts_with("## Configuration Hierarchy") {
+                    in_config = true;
+                    continue;
+                }
+                if in_config {
+                    if line.starts_with("## ") {
+                        break;
+                    }
+                    if line.starts_with('|') && !line.starts_with("|--") && !line.starts_with("| Level") {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
+        assert_eq!(
+            json_config_levels.len(),
+            md_config_rows,
+            "JSON has {} config levels but Markdown config table has {} data rows",
+            json_config_levels.len(),
+            md_config_rows,
+        );
     }
 
     #[test]

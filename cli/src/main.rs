@@ -732,7 +732,7 @@ fn handle_help(topic: &[String], all: bool, format: Option<&str>) -> anyhow::Res
     // nemo help (no args) — same as nemo --help
     if topic.is_empty() {
         let mut cmd = Cli::command();
-        cmd.print_help()?;
+        cmd.print_long_help()?;
         return Ok(());
     }
 

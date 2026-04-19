@@ -18,53 +18,54 @@ show transitions and their triggers.
                 (harden)  │  (no-harden) │  (ship/auto)  │
                           ▼              │               │
                     ┌───────────┐        │               │
-                    │ HARDENING │────────│───────────────│──────▶─┐
-                    └──┬────┬───┘        │               │        │
-           (start mode)│    │            │               │        │
-                       │    │(harden     │               │        │
-                       │    │ _only)     │               │        │
-                       │    ▼            │               │        │
-                       │  ┌──────────┐  │               │        │
-                       │  │ HARDENED  │  │               │        │
-                       │  │(terminal) │  │               │        │
-                       │  └──────────┘  │               │        │
-                       ▼                ▼               ▼        │
-            ┌─────────────────────────────────────────────────┐  │
-            │             AWAITING_APPROVAL                    │  │
-            │  (engineer runs `nemo approve`)                  │  │
-            └──────────────────┬──────────────────────────────┘  │
-                               │              ▲                   │
-                               ▼              │ (judge escalates) │
-    ┌───────────────────────────────────────────────────────┐    │
-    │                    IMPLEMENTING                        │──┐ │
-    │  (agent writes code in isolated pod)                   │  │ │
-    └──────────┬────────────────────────────────────────────┘  │ │
-               │                          ▲          ▲         │ │
-               ▼                          │          │         │ │
-    ┌────────────────┐    (tests fail) ───┘          │         │ │
-    │    TESTING      │──────────────────────────────────────┐ │ │
-    └───────┬────────┘                               │       │ │ │
-            │ (tests pass)                           │       │ │ │
-            ▼                                        │       │ │ │
-    ┌────────────────┐   (reviewer requests changes) │       │ │ │
-    │   REVIEWING     │──────────────────────────────┘       │ │ │
-    └───┬───┬────────┘                                       │ │ │
-        │   │ (reviewer approves)                            │ │ │
-        │   ▼                                                │ │ │
-        │ ┌────────────────┐   `nemo ship`   ┌──────────┐   │ │ │
-        │ │   CONVERGED     │──────────────▶ │ SHIPPED   │   │ │ │
-        │ └────────────────┘                 └──────────┘   │ │ │
-        │                                                    │ │ │
-        │ (max rounds exceeded from IMPLEMENTING,            │ │ │
-        │  TESTING, REVIEWING, or HARDENING)                 ▼ ▼ ▼
-        │                                        ┌────────────────────┐
-        └───────────────────────────────────────▶│       FAILED       │
-                                                 │  (terminal, but    │
-                                                 │   recoverable via  │
-                                                 │   `nemo extend`)   │
-                                                 └────────┬───────────┘
-                                                          │
-                                        (nemo extend) ────┘──▶ IMPLEMENTING
+                    │ HARDENING │──────┐ │               │
+                    └──┬────┬───┘      │ │               │
+           (start mode)│    │          │ │               │
+                       │    │(harden   │ │               │
+                       │    │ _only)   │ │               │
+                       │    ▼          │ │               │
+                       │  ┌──────────┐ │ │               │
+                       │  │ HARDENED  │ │ │               │
+                       │  │(terminal) │ │ │               │
+                       │  └──────────┘ │ │               │
+                       ▼               ▼ ▼               │
+            ┌─────────────────────────────────┐          │
+            │       AWAITING_APPROVAL          │          │
+            │  (engineer runs `nemo approve`)  │          │
+            └──────────────┬──────────────────┘          │
+                           │              ▲               │
+                           ▼              │ (judge        │
+                                          │  escalates)   │
+    ┌───────────────────────────────────────────────────┐ │
+    │                    IMPLEMENTING                    │◀┘
+    │  (agent writes code in isolated pod)              │──┐
+    └──────────┬───────────────────────────────────────┘  │
+               │                          ▲          ▲     │
+               ▼                          │          │     │
+    ┌────────────────┐    (tests fail) ───┘          │     │
+    │    TESTING      │──────────────────────────────────┐ │
+    └───────┬────────┘                               │   │ │
+            │ (tests pass)                           │   │ │
+            ▼                                        │   │ │
+    ┌────────────────┐   (reviewer requests changes) │   │ │
+    │   REVIEWING     │──────────────────────────────┘   │ │
+    └───┬───┬────────┘                                   │ │
+        │   │ (reviewer approves)                        │ │
+        │   ▼                                            │ │
+        │ ┌────────────────┐   `nemo ship`   ┌────────┐ │ │
+        │ │   CONVERGED     │──────────────▶ │SHIPPED │ │ │
+        │ └────────────────┘                 └────────┘ │ │
+        │                                                │ │
+        │ (max rounds exceeded from IMPLEMENTING,        │ │
+        │  TESTING, REVIEWING, or HARDENING)             ▼ ▼
+        │                                    ┌────────────────────┐
+        └───────────────────────────────────▶│       FAILED       │
+                                             │  (terminal, but    │
+                                             │   recoverable via  │
+                                             │   `nemo extend`)   │
+                                             └────────┬───────────┘
+                                                      │
+                                    (nemo extend) ────┘──▶ IMPLEMENTING
 
     ┌─────────────────────────────────────────────────────────────────────┐
     │  PAUSED, AWAITING_REAUTH, CANCELLED — reachable from any active    │
@@ -185,15 +186,6 @@ $ nemo extend --add 10 <id>          # Add 10 more rounds and resume
   # OR investigate the root cause in the spec/tests
 ```
 
-### Stale cluster connection
-
-If the control plane URL has changed or you manage multiple clusters, use `--server`
-to override the control plane URL per command instead of editing your config:
-
-```
-$ nemo status --server https://my-other-cluster:8080
-```
-
 ## Configuration Hierarchy
 
 Configuration is resolved in priority order (highest first):
@@ -205,6 +197,10 @@ Configuration is resolved in priority order (highest first):
 | Cluster  | Control plane ConfigMap   | Cluster-wide defaults set by the platform admin. |
 
 Engineer-level settings override repo-level, which override cluster-level.
+
+**Tip: multiple clusters.** If the control plane URL has changed or you manage
+multiple clusters, use `--server` to target a specific control plane per command
+instead of editing your config: `nemo status --server https://my-other-cluster:8080`.
 
 ## Command Catalog
 
