@@ -78,10 +78,33 @@ nemo logs <id>               # stream agent output
 | Command | What happens | Result |
 |---------|-------------|--------|
 | `nemo harden spec.md` | OpenAI audits the spec, Claude revises. Loop until clean. | Hardened spec merged |
-| `nemo start spec.md` | Claude implements, tests run, OpenAI reviews. Loop until clean. | PR created |
+| `nemo start spec.md` | Hardens the spec first, then Claude implements, tests run, OpenAI reviews. Loop until clean. | PR created |
 | `nemo ship spec.md` | Same as start + auto-merge when the loop converges | Code shipped |
 
-Add `--harden` to `start` or `ship` to harden the spec before implementing.
+`nemo start` hardens by default (cheap on already-clean specs, high-value on soft ones). Add `--no-harden` to skip the harden phase.
+
+## Watching loops
+
+```bash
+nemo status                  # list your running loops
+nemo helm                    # K9s-style TUI with rounds table, diff pane, live logs
+nemo logs <id>               # stream agent output (SSE)
+nemo ps <id>                 # live process table inside the agent pod
+nemo inspect <branch>        # full round history + per-round verdicts
+```
+
+Dashboard (web, Tailscale-native): `/dashboard` on the control plane. Card grid on mobile, loop detail with rounds table + token/cost + actions. See [docs/dashboard-setup.md](docs/dashboard-setup.md).
+
+## Recovery
+
+```bash
+nemo approve <id>            # unblock a PENDING or AWAITING_APPROVAL loop
+nemo resume <id>              # resume a PAUSED or AWAITING_REAUTH loop
+nemo extend <id> --add 10     # bump max_rounds on a FAILED loop, resume where it stopped
+nemo cancel <id>              # terminate a running loop
+```
+
+LLM-friendly CLI: `nemo help ai` prints a comprehensive primer an agent can read to operate the system; every command has `--json` output for scripting.
 
 ## Configuration
 
@@ -173,10 +196,12 @@ Nemo was built through the exact process it automates. Three parallel implementa
 
 ## Documentation
 
-- [Deployment guide](docs/deploy.md) -- full setup, module reference, examples
-- [Architecture](docs/architecture.md) -- system design and component interaction
-- [Design document](docs/design.md) -- product decisions and rationale
-- [Convergence data](docs/convergence-learnings.md) -- what we learned from 81 rounds
+- [Local dev quickstart](docs/local-dev-quickstart.md) — 10-min k3d setup, no cloud required
+- [Deployment guide](docs/deploy.md) — production setup, terraform module reference, examples
+- [Dashboard setup](docs/dashboard-setup.md) — Tailscale-native web dashboard
+- [Architecture](docs/architecture.md) — system design and component interaction
+- [Design document](docs/design.md) — product decisions and rationale
+- [Convergence data](docs/convergence-learnings.md) — what we learned from 81 rounds
 
 ## Contributing
 
