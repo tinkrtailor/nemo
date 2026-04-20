@@ -52,8 +52,8 @@
     --surface-raised: #FFFFFF;
     --border: #D2D0CD;       /* aligned with helm light theme */
     --text-primary: #1E1E1C; /* aligned with helm light theme */
-    --text-secondary: #5C5A57; /* ~6.6:1 vs #FAFAF8, passes WCAG AA */
-    --text-tertiary: #5C5A57;  /* bumped from #8A8784 (~3.5:1) to ~6.6:1 vs #FAFAF8 */
+    --text-secondary: #5C5A57; /* verified 6.58:1 vs #FAFAF8, passes WCAG AA 4.5:1 */
+    --text-tertiary: #5C5A57;  /* bumped from #8A8784 (~3.5:1) to 6.58:1 vs #FAFAF8; same as --text-secondary (known limitation) */
   }
 }
 
@@ -265,7 +265,7 @@ a:hover { color: var(--primary-hover); }
 .badge-reviewing { background: var(--accent-muted); color: var(--accent); }
 /* Badge contrast overrides — theme-aware per FR-3c.
    Dark: #3A9A65 ≈5.0:1 vs #1A1918 (dark --surface). #E0564C ≈4.7:1 vs #1A1918.
-   Light: var(--success) #2D7A4F ≈5.2:1 vs #F0EFED (light --surface). var(--error) #C4392D ≈4.5:1 vs #F0EFED. */
+   Light: var(--success) #2D7A4F ≈4.6:1 vs #F0EFED (light --surface). var(--error) #C4392D ≈4.6:1 vs #F0EFED. */
 .badge-converged, .badge-hardened, .badge-shipped { background: rgba(45,122,79,0.2); color: #3A9A65; }
 .badge-failed { background: rgba(196,57,45,0.2); color: #E0564C; }
 /* Light theme: revert badge text to semantic variables which pass 4.5:1 against light --surface */
@@ -275,6 +275,10 @@ a:hover { color: var(--primary-hover); }
 }
 [data-theme="light"] .badge-converged, [data-theme="light"] .badge-hardened, [data-theme="light"] .badge-shipped { color: var(--success); }
 [data-theme="light"] .badge-failed { color: var(--error); }
+/* Explicit dark overrides — needed when OS=light + data-theme="dark" so the media query
+   (specificity 0,1,1) doesn't revert dark badge colors back to insufficient-contrast semantic vars */
+[data-theme="dark"] .badge-converged, [data-theme="dark"] .badge-hardened, [data-theme="dark"] .badge-shipped { color: #3A9A65; }
+[data-theme="dark"] .badge-failed { color: #E0564C; }
 .badge-cancelled { background: rgba(92,90,87,0.2); color: var(--text-tertiary); }
 .badge-pending { background: rgba(59,123,192,0.2); color: var(--info); }
 .badge-awaiting-approval, .badge-paused, .badge-awaiting-reauth { background: rgba(196,132,29,0.2); color: var(--warning); }
