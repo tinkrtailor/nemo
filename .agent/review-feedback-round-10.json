@@ -1,0 +1,77 @@
+{
+  "round": 10,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 1172,
+      "description": "Fleet cache counts (active/converged/failed) are computed from loops within a 14-day window (`get_loops_for_aggregation(since)` where `since = now - 14 days`). Active loops created more than 14 days ago (e.g., a stuck loop running for 3 weeks) will not appear in the counts. The `dashboard_state` endpoint (polled every 5s) returns these cached counts for the filter chip badges (`Active (N)`), so the chip will show wrong numbers. FR-9a bounds fleet summary to 7 days, but the counts should reflect ALL current-state loops.",
+      "suggestion": "Compute counts separately from the fleet summary: use `get_loops_for_engineer(None, true, true)` (or a lightweight count-only query) for the counts, bounded only by a 10s cache. Keep the 14-day window for the fleet summary and trend computation."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/tests/",
+      "description": "NFR-6 requires integration tests in `control-plane/tests/dashboard_integration.rs`: 'end-to-end login → card grid → detail page → action button → verify API side effect.' No integration test file exists. Only unit tests in `handlers.rs` which test individual handlers via `oneshot()`. These don't test the full middleware chain with a real (even in-memory) state store end-to-end across multiple sequential requests simulating a user session.",
+      "suggestion": "Create `control-plane/tests/dashboard_integration.rs` with tests covering: (1) login flow with cookie propagation, (2) authenticated card grid with loop data, (3) detail page with rounds/logs, (4) action button side effects verified in state store, (5) unauthenticated redirect chain."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 37,
+      "description": "The kill-switch cancel-all modal fetches `/dashboard/state?team=true` to discover active loops, but this uses the `dashboard_state` handler which defaults `state_filter=active` and thus `include_terminal=false`. Only non-terminal loops are returned in `d.loops`, which is correct for identifying cancellable targets. However, the fleet cache used for counts has a 10s TTL — if the cache was populated when there were fewer active loops, the kill switch may report 'Cancelled N/M loops' where M is stale. More importantly, the handler applies the `effective_engineer` filter from cookies. If the user's `nautiloop_engineer` cookie identifies them as 'alice', `dashboard/state?team=true` still scopes to all engineers (correct), but if the cookie is missing, the handler falls through to `viewer_engineer = None` and `!show_team` is false (team=true), so `effective_engineer = None` — this works. Edge case: if `team=true` is set but `effective_engineer` resolves to a non-None value due to the `query.engineer` param, the cancel-all would only cancel that engineer's loops. But the modal hardcodes `?team=true` with no engineer param, so this is safe.",
+      "suggestion": "No critical change needed, but consider adding `&state_filter=all` to the kill-switch fetch URL to ensure no loops are missed due to the default active filter (currently safe since active IS the right filter for cancel targets, but `all` would be more explicit)."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 62,
+      "description": "The login form has two input fields (engineer_name + api_key) but FR-2b specifies 'a trivial form: one input (api_key), one submit.' The engineer_name field was added to support FR-3e's 'Mine' filter since the single shared API key can't derive engineer identity. This is a spec deviation — the spec expected API-key → engineer mapping (FR-3e) which doesn't exist with a shared key. The workaround is reasonable but undocumented.",
+      "suggestion": "Document in docs/dashboard-setup.md that the login form collects both an engineer name and the API key, explaining that the engineer name is used for the 'Mine' view filter since a single shared key can't identify engineers."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 33,
+      "description": "Kill switch visibility (`tks()`) shows the cancel-all button when `p.get('team')==='true' || !!p.get('engineer')`. FR-10d says 'gated behind the team toggle (only visible when viewing team mode, NOT in Mine)'. When viewing an individual engineer's loops (e.g., `?engineer=alice`), the kill switch is visible even though this is not 'team mode'. An operator tapping 'Cancel all active loops' while filtered to Alice's view might expect it to cancel only Alice's loops, but the modal fetches `?team=true` and cancels ALL engineers' active loops.",
+      "suggestion": "Only show the kill switch when `p.get('team')==='true'`, not when an individual engineer is selected. This matches FR-10d and prevents confusion about the blast radius."
+    },
+    {
+      "severity": "medium",
+      "category": "performance",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 1004,
+      "description": "specs_page fetches ALL active loops via `get_loops_for_engineer(None, true, false)` to find active loops matching the spec_path, then filters in memory. While active loops are typically a small set, this is called on every spec history page load. For deployments with many concurrent active loops (e.g., 50), this fetches 50 full LoopRecord rows when only 0-2 might match the spec_path.",
+      "suggestion": "Add a spec_path parameter to `get_loops_for_engineer` or create a dedicated `get_active_loops_for_spec(spec_path)` method that filters at the DB level."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/render.rs",
+      "line": 505,
+      "description": "FR-12b specifies feed filter selection should persist in localStorage across visits. The implementation uses localStorage but restores via `location.replace()` which triggers a full page reload rather than applying the filter client-side. Minor UX friction on mobile.",
+      "suggestion": "Apply the filter client-side by hiding/showing feed items based on the stored filter, or accept the current behavior."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 1,
+      "description": "The JS file is hand-minified with single-letter variable names (pt, sse, lfc, csf, etc.) and no build-time minification step. While within the <10KB budget at ~3KB minified-equivalent, this makes the code very difficult to maintain and debug. The variable map comment helps but doesn't fully compensate for readability loss.",
+      "suggestion": "Maintain a readable source file (e.g., dashboard.src.js) as the source of truth and add a build.rs step to minify, or write readable code and rely on gzip compression to meet the size budget."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 24,
+      "description": "When new loops appear in polled data that aren't in the current DOM, a 'tap to refresh' banner is shown instead of rendering new cards. FR-3d says 'auto-refreshes every 5s via a small vanilla-JS poll that fetches /status and re-renders card fields in place.' New loops requiring manual interaction deviates from 'in place' refresh, though the banner is arguably better UX.",
+      "suggestion": "Acceptable as-is — the banner avoids complex HTML duplication in JS while informing the user."
+    }
+  ]
+}
