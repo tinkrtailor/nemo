@@ -2,7 +2,7 @@
 
 ## Overview
 
-Extend the `GET /health` response body (added in #131, currently `{"status":"ok","version":"..."}`) with a `build_info` field that reports the binary's build-time git short SHA. Mechanically: embed `env!("VERGEN_GIT_SHA_SHORT")` or fall back to `"unknown"` when the env var is unset at compile time.
+Extend the `GET /health` response body (added in #131, currently `{"status":"ok","version":"..."}`) with a `build_info` field that reports the binary's build-time git short SHA. Mechanically: embed the SHA via a plain `build.rs` that sets `BUILD_SHA`, read it with `option_env!("BUILD_SHA").unwrap_or("unknown")` so dev builds without git context still compile.
 
 ## Baseline
 
@@ -26,12 +26,12 @@ The JSON object returned by `/health` gains one new field:
 }
 ```
 
-`build_info` value is the 7-character short SHA of the git commit that produced the binary, OR the literal string `"unknown"` if that info isn't available at build time.
+`build_info` value is the short SHA (typically 7 characters) of the git commit that produced the binary, OR the literal string `"unknown"` if that info isn't available at build time.
 
 ### FR-2: Build-time injection
 
-- The `control-plane` crate exposes the build's git short SHA via a `build.rs` or via an existing `vergen`-like crate if already present; otherwise via a plain `build.rs` that runs `git rev-parse --short HEAD` and sets `cargo:rustc-env=BUILD_SHA=...`.
-- The handler reads it via `env!("BUILD_SHA")` at compile time; falls back to `"unknown"` if the env var wasn't set (dev builds without git context).
+- The `control-plane` crate exposes the build's git short SHA via a plain `build.rs` that runs `git rev-parse --short=7 HEAD` and sets `cargo:rustc-env=BUILD_SHA=<sha>`. If the git command fails (e.g., no `.git` directory), the `build.rs` should silently skip setting the env var so that `option_env!` returns `None`.
+- The handler reads it via `option_env!("BUILD_SHA").unwrap_or("unknown")` at compile time. This ensures dev builds without git context compile successfully and report `"unknown"` instead of failing.
 
 ### FR-3: Status code and content-type unchanged
 
@@ -46,13 +46,13 @@ Existing consumers of `/health` who read only `status` or `version` continue to 
 
 ### NFR-2: One test
 
-Update the existing `health_returns_ok_json_when_store_healthy` test (or add `health_includes_build_info`) to assert the response body contains a `build_info` field with a non-empty string value. The test should not hard-code any specific SHA.
+Update all existing health tests — currently `test_health_returns_json_ok` and `test_health_returns_degraded_on_db_failure` — to assert the response body contains a `build_info` field with a non-empty string value. The tests should not hard-code any specific SHA.
 
 ## Acceptance Criteria
 
 A reviewer can verify by:
 
-1. `curl http://localhost:18080/health | jq .build_info` returns a 7-char string or `"unknown"`.
+1. `curl http://localhost:18080/health | jq .build_info` returns a short SHA string (typically 7 characters) or `"unknown"`.
 2. `curl -o /dev/null -w '%{http_code} %{content_type}\n' http://localhost:18080/health` returns `200 application/json`.
 3. `cargo test --workspace` passes, including the `build_info`-presence assertion.
 4. The binary's `nemo --version` does NOT include the SHA (CLI version is separate — this is API only).
