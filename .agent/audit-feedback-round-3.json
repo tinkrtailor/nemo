@@ -1,0 +1,55 @@
+{
+  "round": 3,
+  "source": "audit",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "clarity",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-2a/b/c/f: architecture.md uses numbered headings (## 1. System Architecture Overview, ## 2. ..., up to ## 9.). The spec instructs adding new ## sections (Judge, Dashboard, Pluggable cache, Observability) after ## 4 without addressing the numbering scheme. Implementer must decide: (a) number the new sections 5-8 and renumber existing 5-9 to 9-13, or (b) leave them unnumbered, creating inconsistency. This is ambiguous enough to produce divergent implementations.",
+      "suggestion": "State explicitly whether to continue the numbering scheme (and renumber subsequent sections) or drop the numbering convention entirely from the file."
+    },
+    {
+      "severity": "medium",
+      "category": "clarity",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1d: The spec says 'add a <p> inside the .container div, after the .arch-flow div, before the closing </div> of the container'. However, there is already a <p class=\"arch-tagline\"> at line 114 between the .arch-flow div and the closing </div>. The instruction is ambiguous: should the new <p> go before or after the existing arch-tagline paragraph?",
+      "suggestion": "Clarify placement relative to the existing <p class=\"arch-tagline\">. Likely intent: insert the new <p> between the arch-tagline and the closing </div>, or between .arch-flow and arch-tagline."
+    },
+    {
+      "severity": "medium",
+      "category": "consistency",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-2e: The existing state machine diagram already handles AWAITING_REAUTH generically with 'ANY active state ----[creds expired]----> AWAITING_REAUTH' (lines 442-449). The spec asks to add explicit per-state transitions (IMPLEMENTING -> AWAITING_REAUTH, REVIEWING -> AWAITING_REAUTH, HARDENING -> AWAITING_REAUTH) which duplicate the existing generic rule. It's unclear whether the intent is to replace the generic notation with per-state arrows, or add per-state arrows alongside the generic notation.",
+      "suggestion": "Clarify: should the existing 'ANY active state -> AWAITING_REAUTH' generic notation be replaced with per-state arrows, left as-is with the per-state arrows added redundantly, or should only the new FAILED -> {failed_from_state} transition be added (since AWAITING_REAUTH is already covered)?"
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1e refers to the '331 production bugs' line as 'bold' but the actual markup is <p class=\"built-callout\"><span class=\"amber\">331</span> production bugs caught by cross-model review before first deploy.</p> — it uses an amber-colored span, not <strong>. Minor, but an implementer reading 'retain the bold line' might look for a <strong> tag.",
+      "suggestion": "Replace 'bold' with 'callout' or reference the class name: 'Retain the existing <p class=\"built-callout\"> line'."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "Baseline section says www/index.html is 342 lines; actual file is 343 lines. docs/architecture.md is stated as 1141 lines, actual is 1142. Minor inaccuracies that don't affect implementation.",
+      "suggestion": "Correct line counts if updating the spec, but this doesn't block implementation."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1e: The replacement table changes from 3 columns (Lane, Rounds, Findings) to 4 columns (Phase, What, Output, Notes). The spec provides table content but doesn't explicitly mention replacing the <thead>. An implementer would figure this out, but it's an implicit requirement.",
+      "suggestion": "Add a note that the entire <table> structure (including <thead>) should be replaced, not just the <tbody> rows."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1e: The new v0.6.0 callout line ('v0.6.0: nautiloop shipped 12+ of its own feature PRs in a single day of dogfooding.') doesn't specify what CSS class or HTML structure to use. The existing callout uses <p class=\"built-callout\"> with <span class=\"amber\">. Should the new line use the same class/pattern?",
+      "suggestion": "Specify: 'Add a sibling <p class=\"built-callout\"> using the same markup pattern as the existing 331 callout line.'"
+    }
+  ]
+}
