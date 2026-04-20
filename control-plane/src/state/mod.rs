@@ -54,6 +54,8 @@ pub trait StateStore: Send + Sync + 'static {
     /// Get terminal loops ordered by updated_at DESC, with optional filters.
     /// Unlike `get_loops_for_engineer`, this has no hard row limit and filters
     /// at the DB level for efficiency (FR-12, FR-9, FR-13, FR-14).
+    /// When `states` is Some, only loops matching those states are returned
+    /// (DB-level filter). When None, all terminal states are included.
     async fn get_terminal_loops(
         &self,
         engineer: Option<&str>,
@@ -61,6 +63,7 @@ pub trait StateStore: Send + Sync + 'static {
         since: Option<chrono::DateTime<chrono::Utc>>,
         cursor: Option<chrono::DateTime<chrono::Utc>>,
         limit: usize,
+        states: Option<&[LoopState]>,
     ) -> Result<Vec<LoopRecord>>;
 
     /// Update loop state and sub-state. Also updates `updated_at`.
@@ -353,12 +356,17 @@ pub mod memory {
             since: Option<chrono::DateTime<chrono::Utc>>,
             cursor: Option<chrono::DateTime<chrono::Utc>>,
             limit: usize,
+            states: Option<&[LoopState]>,
         ) -> Result<Vec<LoopRecord>> {
             let loops = self.loops.read().await;
             let mut result: Vec<_> = loops
                 .values()
                 .filter(|l| {
-                    if !l.state.is_terminal() {
+                    if let Some(s) = states {
+                        if !s.contains(&l.state) {
+                            return false;
+                        }
+                    } else if !l.state.is_terminal() {
                         return false;
                     }
                     if let Some(eng) = engineer

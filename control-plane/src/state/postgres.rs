@@ -497,11 +497,18 @@ impl StateStore for PgStateStore {
         since: Option<DateTime<Utc>>,
         cursor: Option<DateTime<Utc>>,
         limit: usize,
+        states: Option<&[LoopState]>,
     ) -> Result<Vec<LoopRecord>> {
         // Build a dynamic query that filters at the DB level.
-        let mut conditions = vec![
-            "state IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED')".to_string(),
-        ];
+        // When `states` is provided, filter to exactly those states (DB-level).
+        // Otherwise, default to all terminal states.
+        let state_condition = if let Some(s) = states {
+            let state_strs: Vec<String> = s.iter().map(|st| format!("'{}'", loop_state_str(*st))).collect();
+            format!("state IN ({})", state_strs.join(", "))
+        } else {
+            "state IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED')".to_string()
+        };
+        let mut conditions = vec![state_condition];
         let mut bind_idx = 1u32;
         let mut engineer_val = None;
         let mut spec_val = None;

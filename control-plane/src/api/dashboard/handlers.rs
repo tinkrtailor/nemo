@@ -27,15 +27,23 @@ pub async fn login_page(Query(params): Query<HashMap<String, String>>) -> Respon
     let csrf_token = super::auth::generate_csrf_token();
     let html = render::render_login(error, &csrf_token).into_string();
 
+    // Use a dedicated cookie name for login CSRF to avoid collision with the
+    // auth middleware's `nautiloop_csrf` cookie (which has a 7-day lifetime).
+    // Also clear any stale auth-middleware CSRF cookie to prevent browser from
+    // sending both on form POST.
     let csrf_cookie = format!(
-        "nautiloop_csrf={}; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=86400",
+        "nautiloop_login_csrf={}; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=86400",
         csrf_token
     );
+    let clear_old_csrf = "nautiloop_csrf=; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=0";
     let mut response = Html(html).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         csrf_cookie.parse().unwrap(),
     );
+    if let Ok(val) = clear_old_csrf.parse() {
+        response.headers_mut().append(header::SET_COOKIE, val);
+    }
     response
 }
 
@@ -45,9 +53,11 @@ pub async fn login_submit(
     headers: axum::http::HeaderMap,
     axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>,
 ) -> Response {
-    // Validate CSRF token (double-submit cookie pattern)
+    // Validate CSRF token (double-submit cookie pattern).
+    // Uses `nautiloop_login_csrf` — a dedicated cookie set by the login page —
+    // to avoid collision with the auth middleware's `nautiloop_csrf` cookie.
     let csrf_form = form.get("csrf_token").map(|s| s.as_str()).unwrap_or("");
-    let csrf_cookie = super::auth::extract_cookie_value(&headers, "nautiloop_csrf")
+    let csrf_cookie = super::auth::extract_cookie_value(&headers, "nautiloop_login_csrf")
         .unwrap_or("");
     if !super::auth::validate_csrf_token(csrf_form, csrf_cookie) {
         return Redirect::to("/dashboard/login?error=Invalid+request,+please+try+again").into_response();
@@ -131,6 +141,7 @@ pub async fn logout(
         secure_flag
     );
     let csrf_clear = "nautiloop_csrf=; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=0";
+    let login_csrf_clear = "nautiloop_login_csrf=; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=0";
     let mut response = Redirect::to("/dashboard/login").into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -140,6 +151,9 @@ pub async fn logout(
         response.headers_mut().append(header::SET_COOKIE, val);
     }
     if let Ok(val) = csrf_clear.parse() {
+        response.headers_mut().append(header::SET_COOKIE, val);
+    }
+    if let Ok(val) = login_csrf_clear.parse() {
         response.headers_mut().append(header::SET_COOKIE, val);
     }
     response
@@ -247,34 +261,11 @@ pub async fn grid_page(
         .collect();
 
     // Fleet summary (FR-9) — always uses ALL loops regardless of current view filter.
-    // When show_team=true and no engineer filter, the initial query already fetched
-    // all loops — reuse them instead of issuing a second DB query.
-    let has_all_loops = show_team && query.engineer.is_none();
-    let fleet = if has_all_loops {
-        compute_fleet_summary(&loops, &loop_costs)
-    } else {
-        let all_loops_for_fleet = state
-            .store
-            .get_loops_for_engineer(None, true, true)
-            .await?;
-        let mut fleet_costs: HashMap<Uuid, f64> = loop_costs.clone();
-        let fleet_loop_ids_needed: Vec<Uuid> = all_loops_for_fleet
-            .iter()
-            .filter(|l| !fleet_costs.contains_key(&l.id))
-            .map(|l| l.id)
-            .collect();
-        if !fleet_loop_ids_needed.is_empty() {
-            let extra_rounds = state.store.get_rounds_for_loops(&fleet_loop_ids_needed).await?;
-            for l in &all_loops_for_fleet {
-                fleet_costs.entry(l.id).or_insert_with(|| {
-                    let rounds = extra_rounds.get(&l.id).map(|v| v.as_slice()).unwrap_or(&[]);
-                    let (_, cost, _) = compute_round_metrics(rounds);
-                    cost
-                });
-            }
-        }
-        compute_fleet_summary(&all_loops_for_fleet, &fleet_costs)
-    };
+    // Use compute_fleet_cached for consistency with the polled dashboard_state
+    // endpoint. The 10s cache means this is almost always a cache hit, and avoids
+    // the LIMIT 10000 truncation issue on the initial render (the cached path uses
+    // get_loops_for_aggregation which is unbounded by row count).
+    let (_fleet_json, _fleet_counts, fleet) = compute_fleet_cached(&state).await?;
 
     let engineer_filter = if show_team {
         "team".to_string()
@@ -787,7 +778,7 @@ pub async fn dashboard_state(
 
     // Fleet summary + counts use ALL loops (FR-9a). Cache with 10s TTL to
     // avoid fetching unbounded historical data on every 5s poll cycle.
-    let (fleet_json, counts) = compute_fleet_cached(&state).await?;
+    let (fleet_json, counts, _) = compute_fleet_cached(&state).await?;
 
     Ok(Json(DashboardStateResponse {
         loops: summaries,
@@ -895,43 +886,25 @@ async fn fetch_feed_items_with_engineers(
     // Fetch distinct engineer names via a lightweight query (no full row scan).
     let engineers = state.store.get_distinct_engineers().await?;
 
-    // Fetch terminal loops with state sub-filter applied via a fetch loop.
-    // We fetch in batches and filter in memory because the state sub-filter
-    // (converged/failed) maps to multiple DB states. The loop ensures we
-    // collect `limit` matching items even when many rows don't match.
-    let mut terminal_loops = Vec::with_capacity(limit);
-    let mut current_cursor = cursor_dt;
-    let batch_size = limit + 50;
-    let max_fetches = 20; // Safety bound to prevent runaway queries
-    for _ in 0..max_fetches {
-        let batch = state
-            .store
-            .get_terminal_loops(engineer, None, None, current_cursor, batch_size)
-            .await?;
-        let batch_len = batch.len();
-        for l in batch {
-            let matches = match filter {
-                "converged" => matches!(
-                    l.state,
-                    LoopState::Converged | LoopState::Hardened | LoopState::Shipped
-                ),
-                "failed" => l.state == LoopState::Failed,
-                _ => true,
-            };
-            if matches {
-                current_cursor = Some(l.updated_at);
-                terminal_loops.push(l);
-                if terminal_loops.len() >= limit {
-                    break;
-                }
-            } else {
-                current_cursor = Some(l.updated_at);
-            }
-        }
-        if terminal_loops.len() >= limit || batch_len < batch_size {
-            break;
-        }
-    }
+    // Pass the state sub-filter to the DB level to guarantee correct pagination.
+    // Previously this was done in-memory, which could under-report results when
+    // filtering for "converged" but most terminal loops were "failed" (or vice versa).
+    let state_filter: Option<Vec<LoopState>> = match filter {
+        "converged" => Some(vec![LoopState::Converged, LoopState::Hardened, LoopState::Shipped]),
+        "failed" => Some(vec![LoopState::Failed]),
+        _ => None, // "all" — include all terminal states
+    };
+    let terminal_loops = state
+        .store
+        .get_terminal_loops(
+            engineer,
+            None,
+            None,
+            cursor_dt,
+            limit,
+            state_filter.as_deref(),
+        )
+        .await?;
 
     // Fetch rounds for all terminal loops in one query
     let feed_loop_ids: Vec<Uuid> = terminal_loops.iter().map(|l| l.id).collect();
@@ -970,7 +943,7 @@ pub async fn specs_page(
     // - Active loops: use get_active_loops_for_spec with spec_path filter (DB-level)
     // Both queries filter at the database level to avoid fetching unrelated loops.
     let (terminal_loops, active_matching) = tokio::join!(
-        state.store.get_terminal_loops(None, Some(&spec_path), None, None, 500),
+        state.store.get_terminal_loops(None, Some(&spec_path), None, None, 500, None),
         state.store.get_active_loops_for_spec(&spec_path),
     );
     let terminal_loops = terminal_loops?;
@@ -1135,14 +1108,14 @@ pub struct EngineerStatsJson {
 /// loops older than 14 days still appear in filter chip badges.
 async fn compute_fleet_cached(
     state: &AppState,
-) -> Result<(FleetSummaryJson, CountsJson), NautiloopError> {
+) -> Result<(FleetSummaryJson, CountsJson, render::FleetSummary), NautiloopError> {
     // Check cache under read lock
     {
         let guard = state.fleet_cache.read().await;
-        if let Some((ref fleet, ref counts, ref cached_at)) = *guard
+        if let Some((ref fleet, ref counts, ref full, ref cached_at)) = *guard
             && Utc::now() - *cached_at < Duration::seconds(10)
         {
-            return Ok((fleet.clone(), counts.clone()));
+            return Ok((fleet.clone(), counts.clone(), full.clone()));
         }
     }
     // Fleet summary: 14-day window (current + prior week for FR-9b trend).
@@ -1187,9 +1160,9 @@ async fn compute_fleet_cached(
     };
     {
         let mut guard = state.fleet_cache.write().await;
-        *guard = Some((fleet_json.clone(), counts.clone(), Utc::now()));
+        *guard = Some((fleet_json.clone(), counts.clone(), fleet.clone(), Utc::now()));
     }
-    Ok((fleet_json, counts))
+    Ok((fleet_json, counts, fleet))
 }
 
 // ── Shared helpers ──
@@ -1807,10 +1780,12 @@ mod tests {
             )
             .await
             .unwrap();
+        // Login page now sets `nautiloop_login_csrf` (not `nautiloop_csrf`) to avoid
+        // collision with the auth middleware's CSRF cookie.
         let csrf_cookie_hdr = get_response.headers().get("set-cookie").unwrap().to_str().unwrap();
         let csrf_token = csrf_cookie_hdr
             .split(';').next().unwrap()
-            .strip_prefix("nautiloop_csrf=").unwrap();
+            .strip_prefix("nautiloop_login_csrf=").unwrap();
 
         // Step 2: POST with valid CSRF but wrong API key
         let app2 = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
@@ -1822,7 +1797,7 @@ mod tests {
                     .method("POST")
                     .uri("/dashboard/login")
                     .header("content-type", "application/x-www-form-urlencoded")
-                    .header("cookie", format!("nautiloop_csrf={}", csrf_token))
+                    .header("cookie", format!("nautiloop_login_csrf={}", csrf_token))
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -1856,7 +1831,7 @@ mod tests {
         let csrf_cookie_hdr = get_response.headers().get("set-cookie").unwrap().to_str().unwrap();
         let csrf_token = csrf_cookie_hdr
             .split(';').next().unwrap()
-            .strip_prefix("nautiloop_csrf=").unwrap();
+            .strip_prefix("nautiloop_login_csrf=").unwrap();
 
         // Step 2: POST with CSRF token + API key
         let app2 = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
@@ -1868,7 +1843,7 @@ mod tests {
                     .method("POST")
                     .uri("/dashboard/login")
                     .header("content-type", "application/x-www-form-urlencoded")
-                    .header("cookie", format!("nautiloop_csrf={}", csrf_token))
+                    .header("cookie", format!("nautiloop_login_csrf={}", csrf_token))
                     .body(Body::from(body))
                     .unwrap(),
             )

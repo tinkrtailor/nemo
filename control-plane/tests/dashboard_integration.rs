@@ -160,10 +160,10 @@ async fn test_login_flow_with_cookie_propagation() {
     let login_cookies = extract_cookies(&resp);
     let csrf_cookie = login_cookies
         .iter()
-        .find(|c| c.starts_with("nautiloop_csrf="))
+        .find(|c| c.starts_with("nautiloop_login_csrf="))
         .expect("CSRF cookie missing");
     let csrf_token = csrf_cookie.split(';').next().unwrap()
-        .strip_prefix("nautiloop_csrf=").unwrap();
+        .strip_prefix("nautiloop_login_csrf=").unwrap();
 
     // Step 3: POST /dashboard/login with valid credentials
     let app = build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(state.clone());
@@ -177,7 +177,7 @@ async fn test_login_flow_with_cookie_propagation() {
                 .method("POST")
                 .uri("/dashboard/login")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .header("cookie", format!("nautiloop_csrf={}", csrf_token))
+                .header("cookie", format!("nautiloop_login_csrf={}", csrf_token))
                 .body(Body::from(body))
                 .unwrap(),
         )
@@ -592,12 +592,12 @@ async fn test_session_continuity_login_through_action() {
     let login_page_cookies = extract_cookies(&resp);
     let csrf_token = login_page_cookies
         .iter()
-        .find(|c| c.starts_with("nautiloop_csrf="))
+        .find(|c| c.starts_with("nautiloop_login_csrf="))
         .expect("CSRF cookie on login page")
         .split(';')
         .next()
         .unwrap()
-        .strip_prefix("nautiloop_csrf=")
+        .strip_prefix("nautiloop_login_csrf=")
         .unwrap()
         .to_string();
 
@@ -613,7 +613,7 @@ async fn test_session_continuity_login_through_action() {
                 .method("POST")
                 .uri("/dashboard/login")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .header("cookie", format!("nautiloop_csrf={}", csrf_token))
+                .header("cookie", format!("nautiloop_login_csrf={}", csrf_token))
                 .body(Body::from(body))
                 .unwrap(),
         )

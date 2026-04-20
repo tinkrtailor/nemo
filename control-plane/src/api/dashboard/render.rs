@@ -161,6 +161,7 @@ pub struct CardData {
     pub last_verdict: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct FleetSummary {
     pub total_loops: usize,
     pub total_cost: f64,
@@ -698,7 +699,7 @@ pub fn render_feed(
 
             div #feed-list class="feed-list" {
                 @for item in items {
-                    a class="feed-item" href=(format!("/dashboard/loops/{}", item.loop_id)) {
+                    a class="feed-item" href=(format!("/dashboard/loops/{}", item.loop_id)) data-state=(item.state) {
                         span class="feed-time" { (item.updated_at.format("%H:%M")) }
                         span class="feed-engineer" { (item.engineer) }
                         span class="feed-spec" { (spec_filename(&item.spec_path)) }

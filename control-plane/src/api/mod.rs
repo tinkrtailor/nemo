@@ -21,9 +21,11 @@ use crate::state::StateStore;
 /// Cached stats entry: (window_key, stats_data, cached_at).
 pub type StatsCacheEntry = Option<(String, dashboard::render::StatsData, chrono::DateTime<chrono::Utc>)>;
 
-/// Cached fleet summary + counts: (fleet_json, counts_json, cached_at).
+/// Cached fleet summary + counts: (fleet_json, counts_json, full_fleet_summary, cached_at).
 /// Short TTL (10s) for the dashboard_state endpoint which is polled every 5s.
-pub type FleetCacheEntry = Option<(dashboard::handlers::FleetSummaryJson, dashboard::handlers::CountsJson, chrono::DateTime<chrono::Utc>)>;
+/// The full `FleetSummary` is included so grid_page can use the cached data
+/// directly without recomputing (avoids LIMIT 10000 truncation on initial render).
+pub type FleetCacheEntry = Option<(dashboard::handlers::FleetSummaryJson, dashboard::handlers::CountsJson, dashboard::render::FleetSummary, chrono::DateTime<chrono::Utc>)>;
 
 /// Shared application state for all API handlers.
 #[derive(Clone)]
@@ -189,6 +191,7 @@ mod tests {
             _: Option<chrono::DateTime<chrono::Utc>>,
             _: Option<chrono::DateTime<chrono::Utc>>,
             _: usize,
+            _: Option<&[LoopState]>,
         ) -> crate::error::Result<Vec<LoopRecord>> {
             unimplemented!()
         }
