@@ -1,0 +1,30 @@
+{
+  "round": 4,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "docs/deploy.md",
+      "line": 197,
+      "description": "deploy.md unconditionally says 'See `specs/pluggable-cache.md` for the canonical env var list.' but `specs/pluggable-cache.md` does not exist in the repo. This violates NFR-4 ('Every link added must point at a file that exists'). The spec itself anticipated this: FR-3d says 'Refer to the pluggable-cache spec if it exists; otherwise use the examples above as representative.' The implementation should have dropped the reference since the file doesn't exist.",
+      "suggestion": "Remove the line 'See `specs/pluggable-cache.md` for the canonical env var list.' or replace with something like 'The examples above cover the most common configurations.'"
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "www/index.html",
+      "line": 222,
+      "description": "FR-1c specifies 'leave a placeholder: `<img>` tag commented out with `<!-- TODO: dashboard screenshot -->`'. The implementation has only `<!-- TODO: dashboard screenshot -->` as a bare comment, not a commented-out `<img>` element (e.g., `<!-- <img alt=\"Dashboard screenshot\"> TODO: dashboard screenshot -->`). Functionally equivalent as a placeholder, but not literally an `<img>` tag inside a comment.",
+      "suggestion": "Consider changing to `<!-- <img src=\"\" alt=\"Dashboard screenshot\"> TODO: dashboard screenshot -->` to match the spec's letter, or leave as-is if the intent is just a comment marker."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "www/index.html",
+      "line": 115,
+      "description": "The new judge paragraph reuses `class=\"arch-tagline\"` which makes it visually identical to the 'Your agents keep working' line. The spec says 'Add a new <p>' without specifying a class. Using arch-tagline works but may not be the ideal styling — the judge note is a technical detail, not a tagline. This is cosmetic and the spec doesn't prescribe otherwise.",
+      "suggestion": "Consider a different or no class to visually differentiate the judge note from the primary tagline, or keep as-is if the visual match is acceptable."
+    }
+  ]
+}
