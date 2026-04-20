@@ -167,9 +167,12 @@ data:
 YAML
 
   # Judge credentials (only rendered when judge_api_key provided).
-  # HCL's ternary cannot contain heredocs directly, so build the YAML
-  # unconditionally against a placeholder API key and then ternary-select
-  # the final string based on whether judge_api_key is set.
+  # HCL evaluates the template body unconditionally even when the outer
+  # ternary short-circuits, so we cannot use `coalesce(var.judge_api_key, "")`
+  # here — coalesce rejects empty strings when nothing else is non-null.
+  # A plain `!= null` ternary works: when null, use an empty string which
+  # is valid input to jsonencode; the outer ternary below selects the
+  # empty-string template path anyway so this body is never actually applied.
   _judge_creds_yaml_template = <<-YAML
 apiVersion: v1
 kind: Secret
@@ -177,7 +180,7 @@ metadata:
   name: nautiloop-judge-creds
   namespace: nautiloop-system
 data:
-  credentials.json: ${base64encode(jsonencode({ api_key = coalesce(var.judge_api_key, "") }))}
+  credentials.json: ${base64encode(jsonencode({ api_key = var.judge_api_key != null ? var.judge_api_key : "" }))}
 YAML
   judge_creds_yaml           = var.judge_api_key != null ? local._judge_creds_yaml_template : ""
 
