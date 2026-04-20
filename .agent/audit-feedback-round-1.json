@@ -1,0 +1,69 @@
+{
+  "round": 1,
+  "source": "audit",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "specs/dashboard-contrast-theme-toggle.md",
+      "description": "FR-1a table lists variable names that don't match the actual CSS. The dashboard uses `--text-primary`, `--text-secondary`, `--text-tertiary`, `--primary`, `--success`, `--error`, `--info`, `--accent` — NOT `--text`, `--muted`, `--teal`, `--green`, `--red`, `--blue`. An implementor following the spec literally would either create duplicate/conflicting variables or fail to find the ones to change.",
+      "suggestion": "Replace the variable name column in the FR-1a table with the actual CSS variable names: `--text-primary` (not `--text`), `--text-secondary` (not `--muted`), `--primary` (not `--teal`), `--accent` (not `--amber`), `--success` (not `--green`), `--error` (not `--red`), `--info` (not `--blue`). Also add `--surface-raised` and `--text-tertiary` which exist in the CSS but are missing from the table."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "specs/dashboard-contrast-theme-toggle.md",
+      "description": "FR-1a states the dashboard uses 'phase-1 values' and lists current values as needing replacement, but the actual CSS already contains the exact hex values the spec wants to adopt (e.g., `--bg: #0F0F0E`, `--text-primary: #E8E6E3`, `--primary: #1B6B5A`). The dark-mode palette is already helm-aligned. The contrast problem described in the Problem Statement may stem from `--text-secondary: #8A8784` (actual) vs the spec's proposed `--muted: #A29F9B`, but the spec misdiagnoses the scope of changes needed.",
+      "suggestion": "Re-verify which values actually differ between the current dashboard CSS and the desired helm phase-2 palette. Update the table to show only the values that actually need changing. The main candidate is `--text-secondary` (#8A8784 → #A29F9B or #B8B5B2 per FR-1b). Document the actual current values in the 'Current value' column rather than leaving them as '(current)'."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/dashboard-contrast-theme-toggle.md",
+      "description": "The Baseline section states the settings menu 'currently only holds the kill-switch item', but the actual menu contains three items: 'Cancel all active loops' button, 'Bell on converge' checkbox toggle, and a 'Logout' form. FR-2a describes adding theme items 'above the existing Cancel all active loops kill switch' without accounting for the bell toggle or logout items.",
+      "suggestion": "Update the Baseline to list all current menu items. Specify the exact insertion point for the theme radio group relative to all existing items (e.g., theme group first, then bell toggle, then separator, then cancel-all and logout)."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "specs/dashboard-contrast-theme-toggle.md",
+      "description": "FR-1c proposes light-mode values (`--bg: #FBFAF8`, `--surface: #F2F0EC`, etc.) that differ from both the current dashboard CSS values (`--bg: #F7F5F2`, `--surface: #EDEAE6`) AND the helm light theme values (`bg: rgb(250,250,248)` = #FAFAF8, `surface: rgb(240,239,237)` = #F0EFED). Three different light palettes are now in play with no clear authority.",
+      "suggestion": "Align the spec's light-mode table with the helm light theme source of truth in `cli/src/commands/helm/themes.rs`, just as FR-1a does for dark mode. Convert the helm RGB values to hex and use those. If intentional divergence is desired, document why."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/dashboard-contrast-theme-toggle.md",
+      "description": "FR-3a references `color: var(--muted)` on the fleet summary line, but the actual CSS variable is `--text-secondary`. It also proposes adding a new `--text-secondary` custom property, but that variable already exists in the CSS. The spec is working from an outdated model of the variable names.",
+      "suggestion": "Rewrite FR-3a using actual variable names. Since `--text-secondary` already exists, the fix is to either bump its value (covered by FR-1a/1b) or change the fleet summary line to use `--text-primary` with reduced opacity. Clarify which approach is preferred."
+    },
+    {
+      "severity": "medium",
+      "category": "clarity",
+      "file": "specs/dashboard-contrast-theme-toggle.md",
+      "description": "FR-2d specifies CSS structure with `:root { light values }` as default, but the current CSS uses `:root { dark values }` as default with light in a media query. Switching the default theme base is a non-trivial structural change that could cause regressions and isn't called out as such.",
+      "suggestion": "Either (a) keep dark as the `:root` default and adjust the `[data-theme]` selectors accordingly, or (b) explicitly call out the default-theme flip as a deliberate structural change and explain migration steps. Option (a) is lower risk."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/dashboard-contrast-theme-toggle.md",
+      "description": "The Files Likely Touched section references `control-plane/src/api/dashboard/templates.rs` but the actual file is `control-plane/src/api/dashboard/render.rs` using Maud macros (compile-time Rust HTML templating), not string templates. The inline `<script>` for flash prevention (FR-2f) needs to be injected via Maud's `PreEscaped()` or similar — this Rust-specific detail affects implementation.",
+      "suggestion": "Correct the filename to `render.rs` and note that the template system is Maud (compile-time HTML macros in Rust). Mention that the inline script will need `PreEscaped()` wrapping for raw JS injection."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/dashboard-contrast-theme-toggle.md",
+      "description": "The existing bell toggle in the menu uses `localStorage` key `nautiloop_bell`. The spec introduces `nautiloop_theme`. Both are consistent naming, but the spec doesn't mention the existing localStorage usage pattern or suggest the theme toggle follow the same `initBell()`-style initialization pattern already in `dashboard.js`.",
+      "suggestion": "Reference the existing `initBell()` pattern as the model for `initTheme()` implementation. This helps the implementor stay consistent with existing code."
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/dashboard-contrast-theme-toggle.md",
+      "description": "The Baseline Branch says 'main at PR #170 merge' but the git history shows PR #170 was followed by PR #171 (this spec's own docs commit). Minor discrepancy that could confuse an implementor checking out the baseline.",
+      "suggestion": "Clarify whether baseline is the commit at PR #170 merge or HEAD of main (which includes #171). Since #171 is the spec doc itself, either is fine — just be explicit."
+    }
+  ]
+}
