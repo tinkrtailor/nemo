@@ -1,0 +1,44 @@
+{
+  "round": 4,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 573,
+      "description": "FR-4d spec violation: field name is `judge_attempt_total` but spec explicitly requires `judge_decision_total`. The spec text (updated after round-3 feedback) reads: 'fields `judge_decision_total = <cumulative count for this loop>`'. Operators grepping for `judge_decision_total` per the spec docs will find nothing. The rename to `attempt` was a round-3 review suggestion but the spec was not updated to match — implementation must follow the spec text or the spec must be amended.",
+      "suggestion": "Either rename the variable and log field back to `judge_decision_total` to match the spec, or update the spec FR-4d to say `judge_attempt_total` with a note that the count includes failed attempts."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "description": "NFR-4 integration test gap: spec requires 'Integration: loop runs end-to-end with judge enabled on a mock Anthropic endpoint; verify judge_decisions rows written.' The test `test_judge_writes_decisions_to_store` exercises OrchestratorJudge directly with a MockJudgeClient, but never tests DirectAnthropicClient over HTTP. There is no mock HTTP server test that verifies DirectAnthropicClient sends the correct headers (x-api-key, anthropic-version), request body format, or parses a real Anthropic-shaped response. A bug in header construction or response parsing would not be caught.",
+      "suggestion": "Add an integration test using a local HTTP server (e.g., `wiremock` or `mockito` crate) that validates DirectAnthropicClient sends the correct request format and parses the response. Alternatively, add a unit test that at least validates the request construction."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/ship-judge.md",
+      "description": "FR-4b and FR-4c require explicit verification that `nemo inspect` renders judge_decisions and that the dashboard detail page renders judge decision blocks. The diff contains no verification artifacts — no new test assertions for the inspect endpoint's judge_decisions serialization, no dashboard rendering test with judge data. The rendering code pre-exists but the spec says 'verify it's actually rendering', implying the implementer should confirm and document that verification. This diff does not demonstrate that verification was performed.",
+      "suggestion": "Add at least a smoke test: (1) for the inspect API handler that includes judge_decisions in the response fixture and asserts they appear in the JSON output, (2) for the dashboard detail page that includes a judge_decision in test data and asserts the HTML contains expected elements (decision text, confidence). Alternatively, document the manual verification in the PR description."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 572,
+      "description": "The `judge_attempt_total` counter reflects all attempts (including failures) but is only emitted on successful invocations (line 588 is inside the success path after decision persistence). If there are 3 failures then 1 success, operators see the count jump from 0 to 4 with no log entries for 1-3. This could confuse operators tracking invocation rate, as noted in round-3 review feedback.",
+      "suggestion": "Consider emitting the attempt count on failure paths too (as a WARN-level event), or maintain a separate success counter alongside the attempt counter. This is a minor observability gap, not a correctness bug."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 578,
+      "description": "Comment says 'FR-6a / FR-4a' mixing spec reference numbers from two different specs (orchestrator-judge.md FR-6a vs ship-judge.md FR-4a). Minor confusion for future readers.",
+      "suggestion": "Use a single consistent spec reference, e.g., 'ship-judge FR-4a'."
+    }
+  ]
+}
