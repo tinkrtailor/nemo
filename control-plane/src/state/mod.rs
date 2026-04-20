@@ -37,6 +37,18 @@ pub trait StateStore: Send + Sync + 'static {
         include_terminal: bool,
     ) -> Result<Vec<LoopRecord>>;
 
+    /// Get terminal loops ordered by updated_at DESC, with optional filters.
+    /// Unlike `get_loops_for_engineer`, this has no hard row limit and filters
+    /// at the DB level for efficiency (FR-12, FR-9, FR-13, FR-14).
+    async fn get_terminal_loops(
+        &self,
+        engineer: Option<&str>,
+        spec_path: Option<&str>,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        cursor: Option<chrono::DateTime<chrono::Utc>>,
+        limit: usize,
+    ) -> Result<Vec<LoopRecord>>;
+
     /// Update loop state and sub-state. Also updates `updated_at`.
     async fn update_loop_state(
         &self,
@@ -286,6 +298,50 @@ pub mod memory {
                 })
                 .cloned()
                 .collect())
+        }
+
+        async fn get_terminal_loops(
+            &self,
+            engineer: Option<&str>,
+            spec_path: Option<&str>,
+            since: Option<chrono::DateTime<chrono::Utc>>,
+            cursor: Option<chrono::DateTime<chrono::Utc>>,
+            limit: usize,
+        ) -> Result<Vec<LoopRecord>> {
+            let loops = self.loops.read().await;
+            let mut result: Vec<_> = loops
+                .values()
+                .filter(|l| {
+                    if !l.state.is_terminal() {
+                        return false;
+                    }
+                    if let Some(eng) = engineer
+                        && l.engineer != eng
+                    {
+                        return false;
+                    }
+                    if let Some(sp) = spec_path
+                        && l.spec_path != sp
+                    {
+                        return false;
+                    }
+                    if let Some(s) = since
+                        && l.updated_at < s
+                    {
+                        return false;
+                    }
+                    if let Some(c) = cursor
+                        && l.updated_at >= c
+                    {
+                        return false;
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
+            result.sort_by_key(|l| std::cmp::Reverse(l.updated_at));
+            result.truncate(limit);
+            Ok(result)
         }
 
         async fn update_loop_state(

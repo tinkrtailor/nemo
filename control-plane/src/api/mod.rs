@@ -162,6 +162,16 @@ mod tests {
         ) -> crate::error::Result<Vec<LoopRecord>> {
             unimplemented!()
         }
+        async fn get_terminal_loops(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<chrono::DateTime<chrono::Utc>>,
+            _: Option<chrono::DateTime<chrono::Utc>>,
+            _: usize,
+        ) -> crate::error::Result<Vec<LoopRecord>> {
+            unimplemented!()
+        }
         async fn update_loop_state(
             &self,
             _: Uuid,

@@ -54,14 +54,19 @@ pub async fn login_submit(
 
     let api_key = form.get("api_key").map(|s| s.as_str()).unwrap_or("");
 
-    let expected = state.api_key.as_deref().unwrap_or("");
-    if api_key.is_empty() || !super::auth::validate_api_key_against(api_key, expected) {
-        return Redirect::to("/dashboard/login?error=Invalid+API+key").into_response();
+    // Validate API key contains only safe ASCII characters (prevent cookie/header injection)
+    // Must happen before comparison to reject malformed keys before any other processing.
+    if api_key.is_empty()
+        || !api_key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+    {
+        return Redirect::to("/dashboard/login?error=Invalid+API+key+format").into_response();
     }
 
-    // Validate API key contains only safe ASCII characters (prevent cookie/header injection)
-    if !api_key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.') {
-        return Redirect::to("/dashboard/login?error=Invalid+API+key+format").into_response();
+    let expected = state.api_key.as_deref().unwrap_or("");
+    if !super::auth::validate_api_key_against(api_key, expected) {
+        return Redirect::to("/dashboard/login?error=Invalid+API+key").into_response();
     }
 
     // Set HttpOnly, SameSite=Strict cookie with 7-day expiry.
@@ -652,8 +657,7 @@ pub struct FeedJsonItem {
 }
 
 /// Fetch feed items and the set of unique engineers (from terminal loops only).
-/// Filters to terminal loops immediately after the DB query to avoid processing
-/// non-terminal data unnecessarily.
+/// Uses `get_terminal_loops` for DB-level filtering (no LIMIT 100 cap).
 async fn fetch_feed_items_with_engineers(
     state: &AppState,
     filter: &str,
@@ -661,16 +665,17 @@ async fn fetch_feed_items_with_engineers(
     cursor: Option<&str>,
     limit: usize,
 ) -> Result<(Vec<render::FeedItem>, Vec<String>), NautiloopError> {
-    // Fetch all loops and immediately filter to terminal-only
-    let all_terminal: Vec<_> = state
-        .store
-        .get_loops_for_engineer(None, true, true)
-        .await?
-        .into_iter()
-        .filter(|l| l.state.is_terminal())
-        .collect();
+    let cursor_dt = cursor
+        .and_then(|c| chrono::DateTime::parse_from_rfc3339(c).ok())
+        .map(|dt| dt.with_timezone(&Utc));
 
-    // Extract unique engineers from terminal loops (for filter chips)
+    // Fetch engineers list from all terminal loops (unfiltered) for filter chips.
+    // Use a large limit to capture all unique engineers.
+    let all_terminal = state
+        .store
+        .get_terminal_loops(None, None, None, None, 10_000)
+        .await?;
+
     let engineers: Vec<String> = all_terminal
         .iter()
         .map(|l| l.engineer.clone())
@@ -678,34 +683,26 @@ async fn fetch_feed_items_with_engineers(
         .into_iter()
         .collect();
 
-    let cursor_dt = cursor
-        .and_then(|c| chrono::DateTime::parse_from_rfc3339(c).ok())
-        .map(|dt| dt.with_timezone(&Utc));
+    // Fetch the page of terminal loops with DB-level filtering.
+    let terminal_loops_raw = state
+        .store
+        .get_terminal_loops(engineer, None, None, cursor_dt, limit + 50)
+        .await?;
 
-    // Apply per-engineer, state, and cursor filters
-    let mut terminal_loops: Vec<_> = all_terminal
+    // Apply state sub-filter (converged/failed) in memory — these map to
+    // multiple DB states so a simple WHERE wouldn't capture them cleanly.
+    let terminal_loops: Vec<_> = terminal_loops_raw
         .into_iter()
-        .filter(|l| {
-            // Per-engineer filter (FR-12b)
-            if let Some(eng) = engineer
-                && l.engineer != eng
-            {
-                return false;
-            }
-            match filter {
-                "converged" => matches!(
-                    l.state,
-                    LoopState::Converged | LoopState::Hardened | LoopState::Shipped
-                ),
-                "failed" => l.state == LoopState::Failed,
-                _ => true,
-            }
+        .filter(|l| match filter {
+            "converged" => matches!(
+                l.state,
+                LoopState::Converged | LoopState::Hardened | LoopState::Shipped
+            ),
+            "failed" => l.state == LoopState::Failed,
+            _ => true,
         })
-        .filter(|l| cursor_dt.is_none_or(|c| l.updated_at < c))
+        .take(limit)
         .collect();
-
-    terminal_loops.sort_by_key(|l| std::cmp::Reverse(l.updated_at));
-    terminal_loops.truncate(limit);
 
     // Fetch rounds for all terminal loops in one query
     let feed_loop_ids: Vec<Uuid> = terminal_loops.iter().map(|l| l.id).collect();
@@ -737,15 +734,12 @@ pub async fn specs_page(
     csrf_ext: Option<axum::Extension<CsrfToken>>,
 ) -> Result<Html<String>, NautiloopError> {
     let csrf_token = csrf_from(csrf_ext);
-    let loops = state
+    // Use get_terminal_loops with spec_path filter for DB-level filtering.
+    // FR-13 shows only terminal loops for the spec, so this is appropriate.
+    let matching = state
         .store
-        .get_loops_for_engineer(None, true, true)
+        .get_terminal_loops(None, Some(&spec_path), None, None, 10_000)
         .await?;
-
-    let matching: Vec<_> = loops
-        .into_iter()
-        .filter(|l| l.spec_path == spec_path)
-        .collect();
 
     // Fetch rounds for all matching loops in one query
     let spec_loop_ids: Vec<Uuid> = matching.iter().map(|l| l.id).collect();
@@ -755,7 +749,8 @@ pub async fn specs_page(
     let mut total_cost = 0.0;
     let mut total_rounds = 0;
     let mut converged_count = 0;
-    let terminal_count = matching.iter().filter(|l| l.state.is_terminal()).count();
+    // All loops from get_terminal_loops are terminal by definition.
+    let terminal_count = matching.len();
 
     for l in &matching {
         let rounds = spec_rounds.get(&l.id).map(|v| v.as_slice()).unwrap_or(&[]);
@@ -1491,26 +1486,48 @@ mod tests {
 
     #[tokio::test]
     async fn test_login_submit_invalid_key() {
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(test_state());
+        use tower::ServiceExt;
+        let state = test_state();
 
-        let response = app
+        // Step 1: GET the login page to obtain a valid CSRF token
+        let app1 = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
+            .with_state(state.clone());
+        let get_response = app1
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let csrf_cookie_hdr = get_response.headers().get("set-cookie").unwrap().to_str().unwrap();
+        let csrf_token = csrf_cookie_hdr
+            .split(';').next().unwrap()
+            .strip_prefix("nautiloop_csrf=").unwrap();
+
+        // Step 2: POST with valid CSRF but wrong API key
+        let app2 = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
+            .with_state(state);
+        let body = format!("api_key=wrong-key&csrf_token={}", csrf_token);
+        let response = app2
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/dashboard/login")
                     .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("api_key=wrong-key"))
+                    .header("cookie", format!("nautiloop_csrf={}", csrf_token))
+                    .body(Body::from(body))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        // Should redirect to login with error
+        // Should redirect to login with the specific "Invalid+API+key" error
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         let location = response.headers().get("location").unwrap().to_str().unwrap();
         assert!(location.contains("/dashboard/login"));
-        assert!(location.contains("error"));
+        assert!(location.contains("Invalid+API+key"), "expected 'Invalid+API+key' in redirect, got: {}", location);
     }
 
     #[tokio::test]
