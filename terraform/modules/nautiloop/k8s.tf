@@ -166,17 +166,20 @@ data:
   id_ed25519: ${base64encode(local.deploy_private_key)}
 YAML
 
-  # Judge credentials (only rendered when judge_api_key provided)
-  judge_creds_yaml = var.judge_api_key != null ? <<-YAML
+  # Judge credentials (only rendered when judge_api_key provided).
+  # HCL's ternary cannot contain heredocs directly, so build the YAML
+  # unconditionally against a placeholder API key and then ternary-select
+  # the final string based on whether judge_api_key is set.
+  _judge_creds_yaml_template = <<-YAML
 apiVersion: v1
 kind: Secret
 metadata:
   name: nautiloop-judge-creds
   namespace: nautiloop-system
 data:
-  credentials.json: ${base64encode(jsonencode({ api_key = var.judge_api_key }))}
+  credentials.json: ${base64encode(jsonencode({ api_key = coalesce(var.judge_api_key, "") }))}
 YAML
-  : ""
+  judge_creds_yaml           = var.judge_api_key != null ? local._judge_creds_yaml_template : ""
 
   # Registry creds (only rendered when image_pull_secret provided)
   _dockerconfigjson_b64 = var.image_pull_secret_dockerconfigjson != null ? base64encode(var.image_pull_secret_dockerconfigjson) : ""
