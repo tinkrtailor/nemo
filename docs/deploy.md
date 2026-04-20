@@ -194,7 +194,7 @@ PNPM_HOME = "/cache/pnpm"
 disabled = true
 ```
 
-See `specs/pluggable-cache.md` for the canonical env var list.
+The examples above cover the most common configurations.
 
 ## Prerequisites
 
