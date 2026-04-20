@@ -1,0 +1,21 @@
+{
+  "round": 2,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/build.rs",
+      "description": "Missing `cargo:rerun-if-changed` directive. Without it, Cargo only reruns build.rs when files inside the package directory change. If a developer commits (changing the git SHA) but doesn't modify any control-plane source files before rebuilding, the old SHA remains baked in — the health endpoint would report a stale commit. This directly undermines the spec's stated goal: 'operators need to know which build is running'. CI clean builds are unaffected, but iterative local builds can silently go stale.",
+      "suggestion": "Add `println!(\"cargo:rerun-if-changed=../.git/HEAD\");` and `println!(\"cargo:rerun-if-changed=../.git/refs/\");` so the build script reruns whenever the checked-out commit changes. Alternatively, `println!(\"cargo:rerun-if-changed=.git\");` as a broader trigger, though pointing at HEAD and refs is more precise."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/api/mod.rs",
+      "line": 47,
+      "description": "The doc comment on the health function still says 'Returns 200 with {\"status\":\"ok\"}' — it doesn't mention the new `build_info` field. Minor doc drift.",
+      "suggestion": "Update the doc comment to reflect the current response shape, e.g., '{\"status\":\"ok\",\"version\":\"...\",\"build_info\":\"...\"}'."
+    }
+  ]
+}
