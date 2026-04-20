@@ -8,7 +8,7 @@
   --surface-raised: #242322;
   --border: #2E2D2B;
   --text-primary: #E8E6E3;
-  --text-secondary: #8A8784;
+  --text-secondary: #A29F9B; /* bumped from #8A8784 for WCAG AA ≥5.2:1 vs --bg */
   --text-tertiary: #5C5A57;
 
   /* Brand */
@@ -47,14 +47,55 @@
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #F7F5F2;
-    --surface: #EDEAE6;
+    --bg: #FAFAF8;           /* aligned with helm light theme */
+    --surface: #F0EFED;      /* aligned with helm light theme */
     --surface-raised: #FFFFFF;
-    --border: #D9D6D0;
-    --text-primary: #1A1918;
-    --text-secondary: #5C5A57;
-    --text-tertiary: #8A8784;
+    --border: #D2D0CD;       /* aligned with helm light theme */
+    --text-primary: #1E1E1C; /* aligned with helm light theme */
+    --text-secondary: #5C5A57; /* ~6.6:1 vs #FAFAF8, passes WCAG AA */
+    --text-tertiary: #5C5A57;  /* bumped from #8A8784 (~3.5:1) to ~6.6:1 vs #FAFAF8 */
   }
+}
+
+/* Explicit theme overrides — win over media queries via attribute specificity */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0F0F0E;
+  --surface: #1A1918;
+  --surface-raised: #242322;
+  --border: #2E2D2B;
+  --text-primary: #E8E6E3;
+  --text-secondary: #A29F9B;
+  --text-tertiary: #5C5A57;
+  --primary: #1B6B5A;
+  --primary-hover: #237D6A;
+  --primary-muted: rgba(27,107,90,0.2);
+  --accent: #E8A838;
+  --accent-muted: rgba(232,168,56,0.2);
+  --success: #2D7A4F;
+  --warning: #C4841D;
+  --error: #C4392D;
+  --info: #3B7BC0;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #FAFAF8;
+  --surface: #F0EFED;
+  --surface-raised: #FFFFFF;
+  --border: #D2D0CD;
+  --text-primary: #1E1E1C;
+  --text-secondary: #5C5A57;
+  --text-tertiary: #5C5A57;
+  --primary: #1B6B5A;
+  --primary-hover: #237D6A;
+  --primary-muted: rgba(27,107,90,0.2);
+  --accent: #E8A838;
+  --accent-muted: rgba(232,168,56,0.2);
+  --success: #2D7A4F;
+  --warning: #C4841D;
+  --error: #C4392D;
+  --info: #3B7BC0;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -222,8 +263,8 @@ a:hover { color: var(--primary-hover); }
 }
 .badge-implementing, .badge-hardening, .badge-testing { background: var(--primary-muted); color: var(--primary); }
 .badge-reviewing { background: var(--accent-muted); color: var(--accent); }
-.badge-converged, .badge-hardened, .badge-shipped { background: rgba(45,122,79,0.2); color: var(--success); }
-.badge-failed { background: rgba(196,57,45,0.2); color: var(--error); }
+.badge-converged, .badge-hardened, .badge-shipped { background: rgba(45,122,79,0.2); color: #3A9A65; } /* per-element override: #3A9A65 ≥5.0:1 vs dark --surface; keeps global --success unchanged per FR-1d */
+.badge-failed { background: rgba(196,57,45,0.2); color: #E0564C; } /* per-element override: #E0564C ≥4.7:1 vs dark --surface; keeps global --error unchanged per FR-1d */
 .badge-cancelled { background: rgba(92,90,87,0.2); color: var(--text-tertiary); }
 .badge-pending { background: rgba(59,123,192,0.2); color: var(--info); }
 .badge-awaiting-approval, .badge-paused, .badge-awaiting-reauth { background: rgba(196,132,29,0.2); color: var(--warning); }
@@ -670,6 +711,39 @@ a:hover { color: var(--primary-hover); }
 .menu-dropdown button:hover { background: var(--surface); }
 .menu-dropdown button.danger { color: var(--error); }
 .menu-dropdown button.danger:hover { background: rgba(196,57,45,0.1); }
+/* Theme radio group in menu */
+.theme-group {
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+.menu-section-label {
+  display: block;
+  padding: var(--sp-xs) var(--sp-md);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.theme-option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-xs);
+  width: 100%;
+  text-align: left;
+  padding: var(--sp-xs) var(--sp-md);
+  font-size: 0.8125rem;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.theme-option:hover { background: var(--surface); color: var(--text-primary); }
+.theme-option.active { color: var(--text-primary); }
+.theme-check { display: inline-block; width: 1em; text-align: center; }
+.menu-divider { border: none; border-top: 1px solid var(--border); margin: var(--sp-xs) 0; }
+
 .menu-toggle-label {
   display: flex;
   align-items: center;
