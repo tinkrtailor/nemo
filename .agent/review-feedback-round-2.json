@@ -1,0 +1,94 @@
+{
+  "round": 2,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 7,
+      "description": "JS reads `nautiloop_api_key` cookie via `document.cookie` and sends it as a Bearer token, but the cookie is set with `HttpOnly` flag (handlers.rs line 39). HttpOnly cookies are inaccessible to JavaScript, so `getCookie()` always returns empty string and `API_KEY` is always `\"\"`. The Bearer header sent by `apiFetch()` is always `\"Bearer \"` (empty token), which will fail auth. Auth only works incidentally because the browser auto-sends HttpOnly cookies with same-origin fetch requests. If the cookie auth path is ever removed from middleware, all JS actions will break silently.",
+      "suggestion": "Either (a) remove `HttpOnly` from the cookie so JS can read it for Bearer auth (reduces defense-in-depth), or (b) remove the Bearer header from `apiFetch()` since auth actually works via the browser-sent cookie. Option (b) is cleaner and preserves HttpOnly protection."
+    },
+    {
+      "severity": "high",
+      "category": "performance",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 117,
+      "description": "N+1 query pattern: `grid_page`, `dashboard_state`, `feed_page`, `specs_page`, and `compute_stats` all call `state.store.get_rounds(record.id)` in a per-loop for-loop. For 50 active loops this is 50+ sequential DB round-trips. FR-8b's `/dashboard/state` endpoint exists specifically to avoid N+1, and NFR-2 requires <200ms for 50 active loops. The StateStore trait only has a per-loop `get_rounds()` method.",
+      "suggestion": "Add a bulk `get_rounds_for_loops(loop_ids: &[Uuid]) -> Result<HashMap<Uuid, Vec<RoundRecord>>>` method to the StateStore trait, implemented with a single `WHERE loop_id = ANY($1)` query in the Postgres store. Use it in all dashboard handlers."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 147,
+      "description": "Fleet summary (FR-9a) is computed from the filtered loop set (filtered by engineer/team query params), not from ALL loops. FR-9a spec explicitly says: 'Aggregates all non-terminal + terminal loops in the rolling 7-day window.' When viewing 'Mine' or a specific engineer's loops, the fleet summary only shows that engineer's metrics, not the whole fleet.",
+      "suggestion": "Always fetch all loops for the fleet summary regardless of the current view filter. Either make a separate `get_loops_for_engineer(None, true, true)` call for the fleet computation, or compute fleet summary before applying the engineer filter."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 39,
+      "description": "Cookie is set with `Secure` flag, which means it's only sent over HTTPS. In development environments or deployments without TLS termination, the login flow will appear to succeed (Set-Cookie response is sent) but subsequent requests won't include the cookie (browser won't send Secure cookies over HTTP). The dashboard becomes unusable over plain HTTP with no visible error.",
+      "suggestion": "Make the `Secure` flag conditional on the deployment environment, or document that HTTPS is required. Consider reading a config flag or detecting the request scheme."
+    },
+    {
+      "severity": "medium",
+      "category": "performance",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 462,
+      "description": "In `feed_page`, `fetch_feed_items` queries ALL loops (line 552: `get_loops_for_engineer(None, true, true)`), and then the handler queries ALL loops AGAIN (line 468-471) just to extract the unique engineer list for filter chips. This doubles the database load for every feed page render.",
+      "suggestion": "Have `fetch_feed_items` return the engineer list as a side-channel, or extract engineers from the items already returned rather than making a second full query."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/auth.rs",
+      "line": 96,
+      "description": "The `constant_time_eq` function has an early return when lengths differ (`if a.len() != b.len() { return false; }`). This leaks the length of the expected API key via timing side-channel. An attacker can binary-search the key length by measuring response times. While unlikely to be exploited behind Tailscale, it undermines the purpose of using constant-time comparison.",
+      "suggestion": "Use the `subtle` crate's `ConstantTimeEq` trait, or pad/hash both values to a fixed length before comparing. Alternatively, compare HMAC(key, nonce) instead of raw keys."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 1505,
+      "description": "Multiple tests use `unsafe { std::env::set_var() }` which is UB in Rust 1.66+ when other threads exist. While `#[tokio::test(flavor = \"current_thread\")]` mitigates intra-test races, `cargo test` runs test functions in parallel across multiple OS threads. One test's `set_var(\"NAUTILOOP_API_KEY\", \"X\")` races with another test's env read, causing flaky failures or worse.",
+      "suggestion": "Refactor auth to accept the expected key from AppState/config rather than reading the env var directly. In tests, inject the key via the state. This also fixes the round-1 feedback about auth inconsistency."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 310,
+      "description": "In `pollPodIntrospect`, the `data.worktree.head_sha` value is interpolated into innerHTML without escaping. While unlikely to be attacker-controlled, if the git SHA were crafted (e.g., via a malicious branch name or commit message that leaks into this field), it could enable XSS.",
+      "suggestion": "Use `escapeHtml(data.worktree.head_sha || '—')` consistently, same as is done for `p.cmd`."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 756,
+      "description": "In `compute_stats`, `daily_series` counts loops by their `created_at` date, then reports converged/failed counts for loops created on that day. But a loop created on Monday that converges on Wednesday shows as 'converged' on Monday's bar. FR-14a says 'daily count of loops started vs terminal outcomes' — the terminal outcome should appear on the day it terminated, not the day it started.",
+      "suggestion": "Use `updated_at` (or a dedicated `terminated_at` field) for converged/failed counts, keeping `created_at` for the 'started' count."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/render.rs",
+      "line": 168,
+      "description": "FR-9c says tapping any individual field in the fleet summary should navigate to `/dashboard/stats` with that field pre-focused. The implementation uses `?focus=cost`, `?focus=loops`, etc. but the stats page handler (`StatsQuery`) doesn't parse or use a `focus` query parameter, so the anchor is ignored.",
+      "suggestion": "Either add `focus` support to the stats page (scroll to the relevant section via JS or anchor) or document this as deferred."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/api/dashboard/render.rs",
+      "line": 191,
+      "description": "Fleet summary trend arrows for avg_rounds use inverted direction semantics (fewer rounds = up arrow, more = down) which is arguably correct (fewer is better) but inconsistent with cost trends (higher cost = up arrow, which is bad). The CSS classes `trend-up`/`trend-down` exist with green/red colors but are never applied — all trends use the generic `trend` class.",
+      "suggestion": "Apply `trend-up` class when the trend is favorable (converge rate up, avg rounds down, cost down) and `trend-down` when unfavorable, so the color coding matches the direction."
+    }
+  ]
+}
