@@ -1,0 +1,70 @@
+{
+  "round": 3,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "security",
+      "file": "control-plane/src/api/dashboard/auth.rs",
+      "line": 113,
+      "description": "constant_time_eq uses DefaultHasher (SipHash) to hash both inputs before comparing. While SipHash is collision-resistant, DefaultHasher is NOT intended for security use — its behavior is explicitly documented as unstable across Rust versions. More critically, hash comparison introduces a false-accept vector: two different API keys that collide on a 64-bit hash (probability ~2^-64) would pass authentication. The main API auth in api/auth.rs uses a proper direct byte-comparison approach, making this inconsistency doubly concerning.",
+      "suggestion": "Reuse the same constant_time_eq approach from the main api/auth.rs (direct byte XOR with length check), or use the `subtle` crate's ConstantTimeEq. The length-leak from the early return in the main auth is a negligible concern given the deployment model (Tailscale + shared key)."
+    },
+    {
+      "severity": "medium",
+      "category": "security",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 25,
+      "description": "Login and logout POST endpoints have no CSRF protection. While SameSite=Strict on the cookie mitigates most CSRF vectors, some older browsers don't fully support SameSite, and the login form itself is unprotected (an attacker could force a user to log in with a different API key, though in a single-key system this is less impactful). The logout endpoint could be used to force-logout a user.",
+      "suggestion": "Add a CSRF token to the login form (render a random token in a hidden field, store it in a separate cookie or server-side, and validate on POST). Low urgency given Tailscale deployment, but worth addressing for defense-in-depth."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 574,
+      "description": "In fetch_feed_items_with_engineers, ALL loops (including non-terminal) are fetched with get_loops_for_engineer(None, true, true) on every feed page load. Then terminal loops are filtered client-side. For large deployments with many active loops, this fetches and deserializes unnecessary data. More importantly, the engineer list is extracted from terminal loops only, but the initial query fetches everything. This becomes the hot path for FR-12d's '<1 second on mobile' target.",
+      "suggestion": "Consider adding a get_terminal_loops or equivalent StateStore method that filters at the DB level, or at minimum filter before extracting engineer names to avoid iterating the full set twice."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 163,
+      "description": "Fleet summary in grid_page makes a second full DB query (get_loops_for_engineer(None, true, true)) to get ALL loops, even when the user is already viewing team mode (where the first query already fetched all loops). This doubles the DB load on the most common dashboard view.",
+      "suggestion": "When show_team is true and no engineer filter is set, reuse the already-fetched loops for fleet summary computation instead of issuing a second query."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 459,
+      "description": "Same issue in dashboard_state handler (the polling endpoint called every 5s): a second full DB query for fleet summary even when already in team mode. Since this endpoint is polled every 5 seconds by every open dashboard tab, the extra query load multiplies quickly.",
+      "suggestion": "Same as grid_page: detect when the initial query already fetched all loops and skip the second query for fleet summary."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/api/dashboard/render.rs",
+      "line": 226,
+      "description": "Avg rounds trend arrow direction is inconsistent with other metrics. For cost and converge rate, the arrow indicates the mathematical direction of change (↑ = increased, ↓ = decreased). For avg_rounds, the arrow is inverted: fewer rounds (delta < 0) shows ↑ and more rounds (delta > 0) shows ↓. The color is correct (green for improvement), but the arrow direction could confuse users who expect consistent semantics across the summary.",
+      "suggestion": "Use consistent arrow semantics: ↑ always means 'value increased', ↓ always means 'value decreased'. Rely solely on color (green/red) to convey favorability. Or document the inversion clearly."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 130,
+      "description": "When a new loop appears in the polled data that isn't in the current DOM, the code silently skips it ('Don't insert new cards via JS to avoid complex HTML duplication'). This means new loops only appear on full page reload. For an operator monitoring active loops, a new loop starting won't be visible until they manually refresh — counter to the 'auto-refreshes every 5s' intent of FR-3d.",
+      "suggestion": "Consider rendering new cards from the JSON data, or at minimum showing a non-intrusive banner like 'New loops available — tap to refresh' so the user knows to reload."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/api/dashboard/handlers.rs",
+      "line": 42,
+      "description": "The Secure flag conditional checks config.cluster.bind_addr for loopback addresses, but the bind address doesn't reliably indicate whether TLS is in use. A server bound to 0.0.0.0 behind a Tailscale-only firewall with no TLS termination would still set Secure, breaking cookie delivery.",
+      "suggestion": "Add an explicit config option (e.g., dashboard_secure_cookie = true/false) or detect the request's X-Forwarded-Proto / scheme rather than inferring from bind address."
+    }
+  ]
+}
