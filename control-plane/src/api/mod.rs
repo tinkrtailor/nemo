@@ -44,8 +44,8 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// Health check that verifies Postgres connectivity.
-/// Returns 200 with `{"status":"ok"}` if the store is reachable,
-/// 503 with `{"status":"degraded"}` otherwise.
+/// Returns 200 with `{"status":"ok","version":"...","build_info":"..."}` if the store is reachable,
+/// 503 with `{"status":"degraded","version":"...","build_info":"..."}` otherwise.
 /// K8s liveness/readiness probes use this to detect a dead control plane.
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let version = env!("CARGO_PKG_VERSION");

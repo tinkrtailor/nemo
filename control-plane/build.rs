@@ -16,4 +16,9 @@ fn main() {
     if !sha.is_empty() {
         println!("cargo:rustc-env=BUILD_SHA={sha}");
     }
+
+    // Re-run this build script when the checked-out commit changes,
+    // so iterative local builds pick up the new SHA.
+    println!("cargo:rerun-if-changed=../.git/HEAD");
+    println!("cargo:rerun-if-changed=../.git/refs/");
 }
