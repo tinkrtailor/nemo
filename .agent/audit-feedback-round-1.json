@@ -1,0 +1,76 @@
+{
+  "round": 1,
+  "source": "audit",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "clarity",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1c says new section goes between 'Three verbs' and 'Deploy a nautiloop', but the spec also references inserting content about the judge into the 'How it works' diagram (FR-1d). The section ordering is clear for the new section, but FR-1d is ambiguous about what constitutes 'the diagram' — the existing arch-flow section (lines 95-116) is a 5-column CSS grid of styled divs, not ASCII art. The spec says 'Keep the ASCII or whatever shape the current diagram uses; add a line noting…' — this is vague enough that an implementer could add a text blurb, a new grid node, or something else entirely.",
+      "suggestion": "Clarify whether the orchestrator judge should be added as a new arch-node div in the existing grid, or as a text paragraph below the diagram, or as a footnote. Specify the exact placement within the arch-flow structure."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1e specifies replacing the 'Built with Nautiloop' table with a 2-row table (Original build / v0.6.0), but the existing table has 5 data rows (Core loop engine, Infrastructure, Agent runtime, Integration, Total) providing lane-level granularity. The spec doesn't say whether to preserve the per-lane breakdown in some form or collapse it entirely into the summary row. Collapsing to '3 lanes, 81 rounds, 331 findings' loses granularity that was presumably intentional.",
+      "suggestion": "Explicitly state whether the per-lane breakdown rows should be preserved (e.g., as a collapsible detail or secondary table) or fully replaced by the 2-row summary table."
+    },
+    {
+      "severity": "medium",
+      "category": "consistency",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1f says to update the 'Three verbs' table with a 'fourth row or sub-note' for harden-by-default. However, the existing structure uses verb-card divs in a verbs-grid (3-column CSS grid), not a table. Adding a 4th card would break the 3-column grid layout unless CSS is updated. Adding a 'sub-note' to an existing card is structurally different from adding a row. The spec says 'fourth row or sub-note' without resolving which approach to take.",
+      "suggestion": "Specify whether to (a) update the existing verbs-note paragraph text at line 212 (simplest — just change the wording), (b) add a sub-note inside the 'nemo start' card, or (c) add a 4th card (which requires CSS grid adjustment). Option (a) seems most aligned with the intent and NFR-3."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1h says to add links to docs/local-dev-quickstart.md and docs/dashboard-setup.md in the 'Documentation links footer'. The existing footer (lines 322-338) links to GitHub, Docs (deploy.md on GitHub), and License — all as absolute GitHub URLs. The spec doesn't specify whether the new links should also be absolute GitHub URLs (matching the existing pattern) or relative paths. Since this is a static HTML page that may be served from a different origin than GitHub, relative paths would break.",
+      "suggestion": "Specify that the new doc links should follow the same absolute GitHub URL pattern as the existing footer links (e.g., https://github.com/tinkrtailor/nautiloop/blob/main/docs/dashboard-setup.md)."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-2a specifies adding an 'Orchestrator Judge' section after 'the existing state-machine section'. The architecture doc's top-level sections are: System Architecture Overview, Job Pod Internal Architecture, Full Loop Lifecycle, State Machine Diagram, Control Plane Communication, Config Resolution Flow, Git Worktree Lifecycle, Auth Flow, Retry and Error Handling Flow, Notation Reference. 'After the state-machine section' means after 'State Machine Diagram' but there is no 'Stages' section mentioned in FR-2d — it says 'Update the existing Stages section' but no such section exists by that name. The stages are described inline across multiple sections.",
+      "suggestion": "Clarify which existing section FR-2d refers to. If stages are described inline (e.g., within 'Full Loop Lifecycle'), specify where to add the QA stage note. Consider that the implementer needs an unambiguous anchor."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-2f says to add 'nemo ps' and '/pod-introspect/:id' to the 'observability section' but there is no dedicated observability section in architecture.md. Observability content is scattered across multiple sections (egress logging in Job Pod, log_events in Control Plane Communication, etc.).",
+      "suggestion": "Either (a) specify that a new '## Observability' section should be created, or (b) identify the specific existing section where this content should be added (e.g., 'Control Plane Communication')."
+    },
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1g references 'docs/dashboard-setup.md' with the text 'See docs/dashboard-setup.md'. NFR-4 says 'Every link added must point at a file that exists.' The file does exist (verified), but the spec also says in FR-1h to add a link to docs/dashboard-setup.md in the footer. However, the security section bullet says 'See docs/dashboard-setup.md' — from an HTML page served at www/index.html, a relative link 'docs/dashboard-setup.md' would resolve to www/docs/dashboard-setup.md which doesn't exist. This is a potential NFR-4 violation depending on how links are rendered.",
+      "suggestion": "Clarify that references to docs/ files from www/index.html should use absolute GitHub URLs (matching existing footer pattern), not relative paths. Or specify the exact href format to use."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-3e says to update the 'What gets installed' list but deploy.md doesn't have a section with that exact heading. The closest is the general deployment walkthrough content. An implementer needs to find or create this list.",
+      "suggestion": "Specify the exact section heading or location in deploy.md where the 'what gets installed' content lives, or note that a new subsection should be created."
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1e says 'v0.6.0: nautiloop shipped 10+ of its own feature PRs in a single day of dogfooding' as a sibling callout line, but earlier in the same requirement it says '12+ machine-produced convergent PRs in one session' in the table. The '10+' vs '12+' discrepancy could confuse the implementer about which number to use in which location.",
+      "suggestion": "Use a consistent number in both the table and the callout, or explicitly note why they differ (e.g., '12 PRs total, 10+ were feature PRs')."
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-2b mentions 'askama or maud' for server-rendered HTML. The implementer documenting architecture should state which one is actually used, not present alternatives. This is a docs spec, not an implementation spec.",
+      "suggestion": "Check the actual implementation and specify which template engine is used (grep suggests askama based on the crate), so the architecture doc is authoritative."
+    }
+  ]
+}
