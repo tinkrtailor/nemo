@@ -1,0 +1,54 @@
+{
+  "round": 4,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.css",
+      "line": 266,
+      "description": "FR-3c requires badge colors pass 4.5:1 against BOTH --surface variants. The hardcoded `color: #3A9A65` on `.badge-converged` yields ~3.05:1 against light --surface (#F0EFED), failing WCAG AA for normal text AND the 3:1 minimum for UI components. Similarly, `#E0564C` on `.badge-failed` yields ~3.28:1 against light --surface. These per-element overrides are unconditional — they don't adapt to the active theme, so they fix dark mode but regress light mode below spec requirements.",
+      "suggestion": "Use theme-aware selectors: `:root .badge-converged { color: #3A9A65; }` for dark and `[data-theme=\"light\"] .badge-converged, @media (prefers-color-scheme: light) { :root .badge-converged { color: #1E643C; } }` (or the original `var(--success)` which is #2D7A4F ≈5.2:1 against light surface) for light mode. Same pattern for `.badge-failed`. Alternatively, use CSS variables with different values in each theme block."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.js",
+      "line": 45,
+      "description": "FR-2a requires keyboard navigation: 'arrow keys cycle options, Tab moves focus in/out of the group'. The implementation uses `<button role=\"radio\">` elements, which do NOT get automatic arrow-key cycling from the browser — only native `<input type=\"radio\">` elements provide that. The `initTheme()` function has no keyboard event handling. A keyboard-only user can Tab between buttons but cannot use arrow keys as the spec and ARIA radio pattern require.",
+      "suggestion": "Add a keydown handler on the fieldset that implements the ARIA radio group keyboard pattern: ArrowDown/ArrowRight move focus to the next radio button, ArrowUp/ArrowLeft to the previous, wrapping around. Alternatively, switch to native `<input type=\"radio\">` elements which get this behavior for free."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.css",
+      "line": 61,
+      "description": "The `[data-theme=\"dark\"]` and `[data-theme=\"light\"]` selectors target the attribute on any element, but CSS custom properties on `[data-theme=\"dark\"]` (specificity 0,1,0) compete with `:root` (also specificity 0,1,0). Currently this works because the `[data-theme]` blocks come after `:root` in source order. However, the `@media (prefers-color-scheme: light) { :root { ... } }` block also has specificity (0,1,0). If a user has OS light mode AND `data-theme=\"light\"`, both apply with equal specificity and the `[data-theme]` block wins by source order — correct. But if OS is light and user sets `data-theme=\"dark\"`, the media query's `:root` light values and `[data-theme=\"dark\"]` dark values both match with equal specificity. The `[data-theme]` block wins by source order, which is correct. No actual bug here, but the comment says 'attribute specificity' when it's actually source-order that ensures correctness. If someone reorders these blocks, the override breaks. Consider adding a comment clarifying the ordering dependency.",
+      "suggestion": "This is actually working correctly via source order. Consider adding a comment like `/* IMPORTANT: these blocks must appear AFTER the @media query to win by source order */` to prevent accidental reordering."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/assets/dashboard.css",
+      "line": 266,
+      "description": "The spec says badge text contrast should be verified and documented with measured ratios. The comments claim '#3A9A65 ≥5.0:1 vs dark --surface' and '#E0564C ≥4.7:1 vs dark --surface' but provide no verification against light --surface. The spec explicitly says 'Verify... against both --surface variants (dark: #1A1918, light: #F0EFED)'. Light-mode verification is missing from documentation.",
+      "suggestion": "Add measured light-mode contrast ratios and fix the values that fail (see the high-severity issue above). Document both dark and light ratios in the CSS comments."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/api/dashboard/render.rs",
+      "line": 42,
+      "description": "The server-rendered HTML hardcodes `class=\"theme-option active\"` and `aria-checked=\"true\"` on the System button, and `aria-checked=\"false\"` on Dark/Light. If the user previously selected Dark or Light (in localStorage), the HTML is incorrect until JS runs. The menu is hidden, so this isn't visually observable, but screen readers accessing the menu before JS initializes would see stale ARIA state.",
+      "suggestion": "This is a minor SSR/hydration mismatch inherent in the localStorage-only approach. Acceptable for v0.6.1, but note that JS must correct the state before the menu is first opened. Since the menu starts hidden and `initTheme()` runs on DOMContentLoaded, this is effectively a non-issue for sighted users."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/assets/dashboard.css",
+      "line": 56,
+      "description": "Light-mode --text-tertiary is set to the same value as --text-secondary (#5C5A57). While this passes WCAG AA, it eliminates the visual hierarchy between secondary and tertiary text in light mode — they're now identical. The spec acknowledges this is a pragmatic choice but it means light-mode card metadata (tertiary) and card progress text (secondary) have zero contrast difference.",
+      "suggestion": "Consider using a slightly lighter value like #6E6C69 for --text-tertiary in light mode if it can pass 4.5:1 (it doesn't at ~3.8:1). Alternatively, accept this as a known limitation and document it. The current approach is spec-compliant since FR-1f says to bump to #5C5A57."
+    }
+  ]
+}
