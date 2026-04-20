@@ -449,11 +449,11 @@ impl StateStore for PgStateStore {
                 sqlx::query(&q).bind(eng).fetch_all(&self.pool).await?
             }
             _ => {
-                // No hard LIMIT for team/all queries — aggregation (fleet summary,
-                // stats, specs) depends on complete data. The card grid applies its
-                // own in-memory filtering + pagination.
+                // Bounded to prevent unbounded memory consumption on long-running
+                // deployments. 10000 rows is sufficient for aggregation (fleet
+                // summary, stats, specs) while protecting the polling endpoint.
                 let q = format!(
-                    "SELECT * FROM loops WHERE true{terminal_filter} ORDER BY created_at DESC"
+                    "SELECT * FROM loops WHERE true{terminal_filter} ORDER BY created_at DESC LIMIT 10000"
                 );
                 sqlx::query(&q).fetch_all(&self.pool).await?
             }

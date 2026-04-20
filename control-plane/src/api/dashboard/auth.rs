@@ -72,13 +72,7 @@ pub async fn dashboard_auth_middleware(
             request.extensions_mut().insert(EngineerName(eng));
         }
         let mut response = next.run(request).await;
-        let csrf_cookie = format!(
-            "nautiloop_csrf={}; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=604800",
-            csrf_token
-        );
-        if let Ok(val) = csrf_cookie.parse() {
-            response.headers_mut().append(header::SET_COOKIE, val);
-        }
+        set_csrf_cookie(&mut response, &csrf_token);
         return Ok(response);
     }
 
@@ -95,13 +89,7 @@ pub async fn dashboard_auth_middleware(
             request.extensions_mut().insert(EngineerName(eng));
         }
         let mut response = next.run(request).await;
-        let csrf_cookie = format!(
-            "nautiloop_csrf={}; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=604800",
-            csrf_token
-        );
-        if let Ok(val) = csrf_cookie.parse() {
-            response.headers_mut().append(header::SET_COOKIE, val);
-        }
+        set_csrf_cookie(&mut response, &csrf_token);
         return Ok(response);
     }
 
@@ -119,7 +107,23 @@ pub async fn dashboard_auth_middleware(
     }
 }
 
+/// Set the CSRF cookie on a response via `append`. Multiple `nautiloop_csrf`
+/// cookies may accumulate across requests, but `extract_cookie_value` takes
+/// the last match, so the browser-sent cookie always matches the latest token.
+fn set_csrf_cookie(response: &mut Response, csrf_token: &str) {
+    let csrf_cookie = format!(
+        "nautiloop_csrf={}; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=604800",
+        csrf_token
+    );
+    if let Ok(val) = csrf_cookie.parse() {
+        response.headers_mut().append(header::SET_COOKIE, val);
+    }
+}
+
 /// Extract a cookie value by name from the Cookie header.
+/// Returns the **last** match when multiple cookies share the same name,
+/// which ensures we pick up the most recently set value (important for
+/// the CSRF token cookie that may accumulate across requests).
 pub fn extract_cookie_value<'a>(
     headers: &'a axum::http::HeaderMap,
     name: &str,
@@ -128,13 +132,14 @@ pub fn extract_cookie_value<'a>(
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| {
+            let mut last_match = None;
             for cookie in cookies.split(';') {
                 let cookie = cookie.trim();
                 if let Some(value) = cookie.strip_prefix(name).and_then(|v| v.strip_prefix('=')) {
-                    return Some(value);
+                    last_match = Some(value);
                 }
             }
-            None
+            last_match
         })
 }
 

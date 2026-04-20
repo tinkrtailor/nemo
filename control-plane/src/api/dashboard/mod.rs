@@ -4,7 +4,7 @@ pub mod render;
 
 use axum::Router;
 use axum::middleware;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 
 use super::AppState;
 
@@ -26,6 +26,11 @@ pub fn build_dashboard_router_with_key(api_key: Option<String>) -> Router<AppSta
         .route("/dashboard/stats", get(handlers::stats_page))
         .route("/dashboard/stats/json", get(handlers::stats_json))
         .route("/dashboard/logout", post(handlers::logout))
+        // Dashboard-namespaced action proxies (cookie-authed, FR-4b)
+        .route("/dashboard/api/approve/{id}", post(handlers::proxy_approve))
+        .route("/dashboard/api/cancel/{id}", delete(handlers::proxy_cancel))
+        .route("/dashboard/api/resume/{id}", post(handlers::proxy_resume))
+        .route("/dashboard/api/extend/{id}", post(handlers::proxy_extend))
         .layer(middleware::from_fn(auth::dashboard_auth_middleware));
 
     if let Some(key) = api_key {

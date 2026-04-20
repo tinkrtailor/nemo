@@ -10,6 +10,7 @@ use super::auth::CsrfToken;
 use super::render;
 use crate::api::AppState;
 use crate::error::NautiloopError;
+use crate::state::LoopFlag;
 use crate::types::LoopState;
 
 // Stats cache moved to AppState to avoid global state and cross-test contamination.
@@ -27,7 +28,7 @@ pub async fn login_page(Query(params): Query<HashMap<String, String>>) -> Respon
     let html = render::render_login(error, &csrf_token).into_string();
 
     let csrf_cookie = format!(
-        "nautiloop_csrf={}; HttpOnly; SameSite=Strict; Path=/dashboard/login; Max-Age=600",
+        "nautiloop_csrf={}; HttpOnly; SameSite=Strict; Path=/dashboard/login; Max-Age=3600",
         csrf_token
     );
     let mut response = Html(html).into_response();
@@ -74,7 +75,10 @@ pub async fn login_submit(
         return Redirect::to("/dashboard/login?error=Invalid+API+key+format").into_response();
     }
 
-    let expected = state.api_key.as_deref().unwrap_or("");
+    let env_key = std::env::var("NAUTILOOP_API_KEY").ok();
+    let expected = state.api_key.as_deref()
+        .or(env_key.as_deref())
+        .unwrap_or("");
     if !super::auth::validate_api_key_against(api_key, expected) {
         return Redirect::to("/dashboard/login?error=Invalid+API+key").into_response();
     }
@@ -451,6 +455,209 @@ pub async fn static_js() -> impl IntoResponse {
     )
 }
 
+// ── Dashboard-namespaced action proxies ──
+//
+// The main API endpoints (/approve/:id, /cancel/:id, etc.) are protected by the
+// main API auth middleware which only accepts Bearer headers. The dashboard JS
+// cannot construct Bearer headers because the API key cookie is HttpOnly. These
+// proxy routes go through the dashboard auth middleware (which accepts cookies)
+// and call the same state-store logic as the main API handlers.
+
+/// POST /dashboard/api/approve/:id — approve a loop (cookie-authed proxy).
+pub async fn proxy_approve(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, NautiloopError> {
+    let record = state
+        .store
+        .get_loop(id)
+        .await?
+        .ok_or(NautiloopError::LoopNotFound { id })?;
+
+    if record.state != LoopState::AwaitingApproval {
+        return Err(NautiloopError::InvalidStateTransition {
+            action: "approve".to_string(),
+            state: record.state.to_string(),
+            expected: "AWAITING_APPROVAL".to_string(),
+        });
+    }
+
+    state
+        .store
+        .set_loop_flag(id, LoopFlag::Approve, true)
+        .await?;
+
+    Ok(Json(serde_json::json!({
+        "loop_id": id,
+        "state": record.state.to_string(),
+        "approve_requested": true
+    })))
+}
+
+/// DELETE /dashboard/api/cancel/:id — cancel a loop (cookie-authed proxy).
+pub async fn proxy_cancel(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, NautiloopError> {
+    let record = state
+        .store
+        .get_loop(id)
+        .await?
+        .ok_or(NautiloopError::LoopNotFound { id })?;
+
+    if record.state.is_terminal() {
+        return Err(NautiloopError::InvalidStateTransition {
+            action: "cancel".to_string(),
+            state: record.state.to_string(),
+            expected: "non-terminal state".to_string(),
+        });
+    }
+
+    state
+        .store
+        .set_loop_flag(id, LoopFlag::Cancel, true)
+        .await?;
+
+    Ok(Json(serde_json::json!({
+        "loop_id": id,
+        "state": record.state.to_string(),
+        "cancel_requested": true
+    })))
+}
+
+/// POST /dashboard/api/resume/:id — resume a loop (cookie-authed proxy).
+pub async fn proxy_resume(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, NautiloopError> {
+    let record = state
+        .store
+        .get_loop(id)
+        .await?
+        .ok_or(NautiloopError::LoopNotFound { id })?;
+
+    let resumable = match record.state {
+        LoopState::Paused | LoopState::AwaitingReauth => true,
+        LoopState::Failed => record.failed_from_state.is_some(),
+        _ => false,
+    };
+
+    if !resumable {
+        let expected = if record.state == LoopState::Failed {
+            "FAILED loop has no resumable stage (max rounds exhausted or logical failure)"
+                .to_string()
+        } else {
+            "PAUSED, AWAITING_REAUTH, or transient-FAILED".to_string()
+        };
+        return Err(NautiloopError::InvalidStateTransition {
+            action: "resume".to_string(),
+            state: record.state.to_string(),
+            expected,
+        });
+    }
+
+    if record.state == LoopState::Failed
+        && let Some(other) = state.store.get_loop_by_branch_any(&record.branch).await?
+        && other.id != record.id
+        && other.updated_at > record.updated_at
+    {
+        return Err(NautiloopError::InvalidStateTransition {
+            action: "resume".to_string(),
+            state: record.state.to_string(),
+            expected: format!(
+                "branch {} was taken over by a newer loop {} (state {}) — start a fresh loop instead",
+                record.branch, other.id, other.state
+            ),
+        });
+    }
+
+    state
+        .store
+        .set_loop_flag(id, LoopFlag::Resume, true)
+        .await?;
+
+    Ok(Json(serde_json::json!({
+        "loop_id": id,
+        "state": record.state.to_string(),
+        "resume_requested": true
+    })))
+}
+
+/// POST /dashboard/api/extend/:id — extend a failed loop's max_rounds (cookie-authed proxy).
+#[derive(Debug, serde::Deserialize)]
+pub struct DashboardExtendRequest {
+    pub add_rounds: u32,
+}
+
+pub async fn proxy_extend(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<DashboardExtendRequest>,
+) -> Result<Json<serde_json::Value>, NautiloopError> {
+    if req.add_rounds == 0 {
+        return Err(NautiloopError::BadRequest(
+            "add_rounds must be > 0".to_string(),
+        ));
+    }
+
+    let record = state
+        .store
+        .get_loop(id)
+        .await?
+        .ok_or(NautiloopError::LoopNotFound { id })?;
+
+    if record.state != LoopState::Failed {
+        return Err(NautiloopError::InvalidStateTransition {
+            action: "extend".to_string(),
+            state: record.state.to_string(),
+            expected: "FAILED".to_string(),
+        });
+    }
+
+    let Some(resume_state) = record.failed_from_state else {
+        return Err(NautiloopError::InvalidStateTransition {
+            action: "extend".to_string(),
+            state: record.state.to_string(),
+            expected:
+                "FAILED loop with a preserved failed_from_state (not extendable — start a fresh loop)"
+                    .to_string(),
+        });
+    };
+
+    if let Some(other) = state.store.get_loop_by_branch_any(&record.branch).await?
+        && other.id != record.id
+        && other.updated_at > record.updated_at
+    {
+        return Err(NautiloopError::InvalidStateTransition {
+            action: "extend".to_string(),
+            state: record.state.to_string(),
+            expected: format!(
+                "branch {} was taken over by a newer loop {} (state {}) — start a fresh loop instead",
+                record.branch, other.id, other.state
+            ),
+        });
+    }
+
+    let prior_max = record.max_rounds as u32;
+    let new_max = prior_max + req.add_rounds;
+
+    let mut updated = record.clone();
+    updated.max_rounds = new_max as i32;
+    updated.failure_reason = None;
+    state.store.update_loop(&updated).await?;
+    state
+        .store
+        .set_loop_flag(id, LoopFlag::Resume, true)
+        .await?;
+
+    Ok(Json(serde_json::json!({
+        "loop_id": id,
+        "prior_max_rounds": prior_max,
+        "new_max_rounds": new_max,
+        "resumed_to_state": resume_state.to_string()
+    })))
+}
+
 /// GET /dashboard/state — JSON roll-up for card grid polling (FR-8b).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct DashboardStateResponse {
@@ -715,26 +922,43 @@ async fn fetch_feed_items_with_engineers(
     // Fetch distinct engineer names via a lightweight query (no full row scan).
     let engineers = state.store.get_distinct_engineers().await?;
 
-    // Fetch the page of terminal loops with DB-level filtering.
-    let terminal_loops_raw = state
-        .store
-        .get_terminal_loops(engineer, None, None, cursor_dt, limit + 50)
-        .await?;
-
-    // Apply state sub-filter (converged/failed) in memory — these map to
-    // multiple DB states so a simple WHERE wouldn't capture them cleanly.
-    let terminal_loops: Vec<_> = terminal_loops_raw
-        .into_iter()
-        .filter(|l| match filter {
-            "converged" => matches!(
-                l.state,
-                LoopState::Converged | LoopState::Hardened | LoopState::Shipped
-            ),
-            "failed" => l.state == LoopState::Failed,
-            _ => true,
-        })
-        .take(limit)
-        .collect();
+    // Fetch terminal loops with state sub-filter applied via a fetch loop.
+    // We fetch in batches and filter in memory because the state sub-filter
+    // (converged/failed) maps to multiple DB states. The loop ensures we
+    // collect `limit` matching items even when many rows don't match.
+    let mut terminal_loops = Vec::with_capacity(limit);
+    let mut current_cursor = cursor_dt;
+    let batch_size = limit + 50;
+    let max_fetches = 5; // Safety bound to prevent runaway queries
+    for _ in 0..max_fetches {
+        let batch = state
+            .store
+            .get_terminal_loops(engineer, None, None, current_cursor, batch_size)
+            .await?;
+        let batch_len = batch.len();
+        for l in batch {
+            let matches = match filter {
+                "converged" => matches!(
+                    l.state,
+                    LoopState::Converged | LoopState::Hardened | LoopState::Shipped
+                ),
+                "failed" => l.state == LoopState::Failed,
+                _ => true,
+            };
+            if matches {
+                current_cursor = Some(l.updated_at);
+                terminal_loops.push(l);
+                if terminal_loops.len() >= limit {
+                    break;
+                }
+            } else {
+                current_cursor = Some(l.updated_at);
+            }
+        }
+        if terminal_loops.len() >= limit || batch_len < batch_size {
+            break;
+        }
+    }
 
     // Fetch rounds for all terminal loops in one query
     let feed_loop_ids: Vec<Uuid> = terminal_loops.iter().map(|l| l.id).collect();
@@ -2087,5 +2311,180 @@ mod tests {
         // Counts should reflect all loops regardless of filter
         assert_eq!(data.counts.active, 1);
         assert_eq!(data.counts.converged, 1);
+    }
+
+    #[tokio::test]
+    async fn test_proxy_approve_with_cookie_auth() {
+        let state = test_state();
+        let mut record = test_loop_record("alice", LoopState::AwaitingApproval);
+        record.state = LoopState::AwaitingApproval;
+        let loop_id = record.id;
+        state.store.create_loop(&record).await.unwrap();
+
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/dashboard/api/approve/{}", loop_id))
+                    .header("cookie", "nautiloop_api_key=test-api-key")
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["approve_requested"], true);
+    }
+
+    #[tokio::test]
+    async fn test_proxy_cancel_with_cookie_auth() {
+        let state = test_state();
+        let record = test_loop_record("alice", LoopState::Implementing);
+        let loop_id = record.id;
+        state.store.create_loop(&record).await.unwrap();
+
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&format!("/dashboard/api/cancel/{}", loop_id))
+                    .header("cookie", "nautiloop_api_key=test-api-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["cancel_requested"], true);
+    }
+
+    #[tokio::test]
+    async fn test_proxy_cancel_terminal_loop_rejected() {
+        let state = test_state();
+        let record = test_loop_record("alice", LoopState::Converged);
+        let loop_id = record.id;
+        state.store.create_loop(&record).await.unwrap();
+
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&format!("/dashboard/api/cancel/{}", loop_id))
+                    .header("cookie", "nautiloop_api_key=test-api-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should fail — terminal loops can't be cancelled
+        assert_ne!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_proxy_resume_with_cookie_auth() {
+        let state = test_state();
+        let record = test_loop_record("alice", LoopState::Failed);
+        let loop_id = record.id;
+        state.store.create_loop(&record).await.unwrap();
+
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/dashboard/api/resume/{}", loop_id))
+                    .header("cookie", "nautiloop_api_key=test-api-key")
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["resume_requested"], true);
+    }
+
+    #[tokio::test]
+    async fn test_proxy_extend_with_cookie_auth() {
+        let state = test_state();
+        let record = test_loop_record("alice", LoopState::Failed);
+        let loop_id = record.id;
+        state.store.create_loop(&record).await.unwrap();
+
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/dashboard/api/extend/{}", loop_id))
+                    .header("cookie", "nautiloop_api_key=test-api-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"add_rounds":10}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["new_max_rounds"], 25); // 15 default + 10
+    }
+
+    #[tokio::test]
+    async fn test_proxy_actions_require_auth() {
+        let state = test_state();
+        let record = test_loop_record("alice", LoopState::Implementing);
+        let loop_id = record.id;
+        state.store.create_loop(&record).await.unwrap();
+
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
+            .with_state(state);
+
+        // No cookie or bearer → should be unauthorized
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&format!("/dashboard/api/cancel/{}", loop_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
