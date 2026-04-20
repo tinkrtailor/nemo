@@ -105,9 +105,7 @@ Verify that the new `--text-secondary` light value (`#6E6C69`) meets WCAG AA 4.5
 
 **FR-1e.** Light-mode semantic and brand color alignment is **out of scope** for this spec. Helm's light theme defines different values for `teal` (`#145A4B`), `amber` (`#B47814`), `green` (`#1E643C`), `red` (`#B4281E`), and `blue` (`#2864AA`) vs the dark theme. Today the dashboard's light mode falls through to the dark-mode `:root` values for `--primary`, `--accent`, `--success`, `--error`, and `--info`. This is a known gap but is acceptable for v0.6.1 — a follow-up spec should align light-mode semantic colors with helm's light theme.
 
-**FR-1f.** Light-mode `--text-tertiary` WCAG check. With the new light `--bg` (`#FAFAF8`), the current `--text-tertiary` value (`#8A8784`) produces ~3.5:1 contrast — below WCAG AA 4.5:1 for normal text. The implementor must audit where `--text-tertiary` is used in the dashboard:
-- If it is only applied to **large text** (≥18px / ≥14px bold) or **decorative/non-informational elements**, the 3:1 WCAG AA threshold for large text / UI components is met and no change is needed. Document the usage sites.
-- If it is applied to **normal-sized readable text**, bump light-mode `--text-tertiary` to a value that passes 4.5:1 against `#FAFAF8` (e.g., `#6E6C69` at ~3.8:1 won't suffice — use `#5C5A57` at ~5.0:1 or darker). Document the measured ratio.
+**FR-1f.** Light-mode `--text-tertiary` WCAG fix. With the new light `--bg` (`#FAFAF8`), the current `--text-tertiary` value (`#8A8784`) produces ~3.5:1 contrast — below WCAG AA 4.5:1 for normal text. All 13 usages of `--text-tertiary` in `dashboard.css` are normal-sized text (0.6875rem–0.75rem / 11px–12px): card IDs, elapsed times, token/cost metrics, feed timestamps, etc. None meet the large-text threshold (≥18px or ≥14px bold). Therefore, bump light-mode `--text-tertiary` to `#5C5A57` (~5.0:1 against `#FAFAF8`). The implementor must verify the measured ratio and document it.
 
 ### FR-2: Theme toggle in settings menu
 
@@ -128,6 +126,8 @@ Logout
 This reorders the existing menu items. The previous order was: Cancel all → Bell → Logout. The new order groups settings (theme, bell) at the top and actions (cancel, logout) at the bottom. Rationale: settings are adjusted more frequently during a session and grouping them together provides a clearer information hierarchy — passive configuration first, destructive actions last.
 
 Visual style: three radio-button-like items, the currently-active one has a checkmark or filled dot prefix. Tapping another item switches theme and updates the checkmark. The theme section is visually separated from other menu items with a `<hr>` or border. Menu closes automatically after theme selection (see FR-2e for close behavior).
+
+Accessibility: use either native `<input type="radio">` elements within a `<fieldset>` (with a `<legend>` for the "Theme" label) or styled `<button>` elements with `role="radiogroup"` / `role="radio"` and `aria-checked` attributes. This ensures keyboard navigation (arrow keys cycle options, Tab moves focus in/out of the group) and screen-reader announcements. Plain styled `<div>` or `<span>` elements without ARIA roles are not acceptable.
 
 **FR-2b.** The user's selection is persisted client-side in `localStorage` under key `nautiloop_theme` with values `"system"`, `"dark"`, or `"light"`. Default (first visit or cleared storage) is `"system"`. This follows the same `nautiloop_*` naming convention as the existing `nautiloop_bell` key.
 
@@ -152,11 +152,20 @@ Visual style: three radio-button-like items, the currently-active one has a chec
 [data-theme="light"] { --bg: #FAFAF8; ... }
 ```
 
+Additionally, include `color-scheme` declarations in the explicit override selectors so that native browser UI elements (scrollbars, checkboxes, select elements, form buttons) match the forced theme:
+
+```css
+[data-theme="dark"] { color-scheme: dark; --bg: #0F0F0E; ... }
+[data-theme="light"] { color-scheme: light; --bg: #FAFAF8; ... }
+```
+
+The existing `:root { color-scheme: dark light; }` remains as the system-auto fallback. Without these overrides, a user forcing `data-theme="light"` on a dark-OS system would see native controls (e.g., the bell checkbox, logout button) rendered in the OS-preferred dark style, clashing with the light palette.
+
 Duplication of the ~7–10 color variables across `:root` / `[data-theme="dark"]` and across `@media` / `[data-theme="light"]` is acceptable given the small count. A `:where()` grouping or CSS custom-property indirection may be used to reduce duplication but is not required — straightforward duplication is preferred over clever abstractions for this small a variable set.
 
 **FR-2e.** The toggle's JavaScript lives in the embedded `control-plane/assets/dashboard.js`. Follow the existing `initBell()` pattern: define an `initTheme()` function that reads the current `localStorage.nautiloop_theme` value, sets the active indicator in the menu, and attaches click handlers to the three theme radio items. Each click handler sets the `data-theme` attribute on `<html>`, writes `localStorage`, updates the menu's active-item indicator, and **explicitly closes the dropdown** (e.g., add the `hidden` class to `#menu-dropdown`). This explicit close is required because clicks inside the dropdown do not trigger the existing `document.onclick` outside-click handler. ~30 lines. No theme-switching library. `initTheme()` is called from the existing `init()` function alongside `initBell()`. The existing `dashboard.js` uses a compressed/minified coding style (single-line functions, short variable names); `initTheme()` should match this style for consistency.
 
-**FR-2f.** The pre-parse flash prevention: a 5-line inline `<script>` in the HTML `<head>` (in `control-plane/src/api/dashboard/render.rs`) reads localStorage and sets `data-theme` before body renders. Must ship before any CSS or other JS runs. Since the template uses Maud macros, the inline script must be injected via `PreEscaped()` to emit raw JavaScript without HTML escaping.
+**FR-2f.** The pre-parse flash prevention: a 5-line inline `<script>` in the HTML `<head>` (in `control-plane/src/api/dashboard/render.rs`) reads localStorage and sets `data-theme` before body renders. Place the inline `<script>` immediately after `<meta>` tags and before the `<link rel="stylesheet">` tag in `<head>`. This ensures `data-theme` is set on `<html>` before the browser begins applying stylesheet rules. Since the template uses Maud macros, the inline script must be injected via `PreEscaped()` to emit raw JavaScript without HTML escaping.
 
 ### FR-3: Dashboard status-line + card contrast tune-up
 
@@ -165,8 +174,8 @@ Duplication of the ~7–10 color variables across `:root` / `[data-theme="dark"]
 **FR-3b.** Card metadata rows (engineer badge, elapsed time, token count) use `--text-secondary` today; leave unchanged — they're genuinely secondary and benefit from the FR-1a bump.
 
 **FR-3c.** Convergence-badge colors on cards (`--success` for CONVERGED, `--error` for FAILED) should pass 4.5:1 against both `--surface` variants (dark: `#1A1918`, light: `#F0EFED`). Verify:
-- `--success` (`#2D7A4F`) against dark `--surface` (`#1A1918`): check passes 3:1 minimum for UI components. If it fails 4.5:1 for the badge text, use `#3A9A65` instead.
-- `--error` (`#C4392D`) against dark `--surface`: similarly verify.
+- `--success` (`#2D7A4F`) against dark `--surface` (`#1A1918`): check passes 3:1 minimum for UI components. If it fails 4.5:1 for the badge text, apply a **per-element CSS override** on the badge (e.g., `.badge-converged { color: #3A9A65; }`) rather than changing the global `--success` variable — FR-1d requires dark-mode semantic variables to stay aligned with helm.
+- `--error` (`#C4392D`) against dark `--surface`: similarly verify, and if needed apply a per-element override (e.g., `.badge-failed { color: #D94A3F; }`) without changing the global `--error` variable.
 
 Document measured ratios.
 
