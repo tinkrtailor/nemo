@@ -1,0 +1,30 @@
+{
+  "round": 6,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 510,
+      "description": "FR-4d spec violation: the structured log field is named `judge_invocation_total` but the spec explicitly requires `judge_decision_total`. Operators following spec documentation will grep for `judge_decision_total` and find nothing. The rename to 'invocation' was a round-3 review suggestion for semantic accuracy, but the spec text (FR-4d) was never updated to match — it still reads 'fields `judge_decision_total = <cumulative count for this loop>`'.",
+      "suggestion": "Either rename the field back to `judge_decision_total` to match the spec, or update the spec FR-4d to say `judge_invocation_total`. The spec is the contract — implementation must match it or the spec must be amended first."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 489,
+      "description": "The counter increments BEFORE the API call (counts attempts), but is named with 'invocation_total' / spec says 'decision_total'. On the success path the count includes failed prior attempts. If there are 3 failures then 1 success, the count jumps from 0→4 in operator logs with no intermediate entries. This creates a confusing observability gap: the number doesn't represent successful decisions, yet the spec names it 'decision_total'.",
+      "suggestion": "Emit the count on failure paths too (already done — good), but consider maintaining a separate successful-decision counter if the field is renamed back to `judge_decision_total`, or keep as `judge_invocation_total` and update the spec."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/main.rs",
+      "line": 156,
+      "description": "FR-2b specifies the log message format as 'Orchestrator judge: enabled, model=claude-haiku-4-5' (model in the message string). The implementation logs 'Orchestrator judge: enabled' with model only as a structured tracing field. In plain-text log output without structured rendering, operators won't see which model is active without configuring their log viewer for structured fields.",
+      "suggestion": "Interpolate model into the message string: `\"Orchestrator judge: enabled, model={model}\"` to match the spec's stated format and ensure visibility in plain log output."
+    }
+  ]
+}
