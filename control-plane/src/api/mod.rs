@@ -170,6 +170,12 @@ mod tests {
         ) -> crate::error::Result<Vec<LoopRecord>> {
             unimplemented!()
         }
+        async fn get_loops_for_aggregation(
+            &self,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> crate::error::Result<Vec<LoopRecord>> {
+            unimplemented!()
+        }
         async fn get_terminal_loops(
             &self,
             _: Option<&str>,

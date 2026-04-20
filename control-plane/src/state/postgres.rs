@@ -462,6 +462,20 @@ impl StateStore for PgStateStore {
         rows.iter().map(row_to_loop_record).collect()
     }
 
+    async fn get_loops_for_aggregation(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<LoopRecord>> {
+        let rows = sqlx::query(
+            "SELECT * FROM loops WHERE created_at >= $1 ORDER BY created_at DESC",
+        )
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(row_to_loop_record).collect()
+    }
+
     async fn get_terminal_loops(
         &self,
         engineer: Option<&str>,

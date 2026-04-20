@@ -28,7 +28,7 @@ pub async fn login_page(Query(params): Query<HashMap<String, String>>) -> Respon
     let html = render::render_login(error, &csrf_token).into_string();
 
     let csrf_cookie = format!(
-        "nautiloop_csrf={}; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=3600",
+        "nautiloop_csrf={}; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=86400",
         csrf_token
     );
     let mut response = Html(html).into_response();
@@ -902,7 +902,7 @@ async fn fetch_feed_items_with_engineers(
     let mut terminal_loops = Vec::with_capacity(limit);
     let mut current_cursor = cursor_dt;
     let batch_size = limit + 50;
-    let max_fetches = 5; // Safety bound to prevent runaway queries
+    let max_fetches = 20; // Safety bound to prevent runaway queries
     for _ in 0..max_fetches {
         let batch = state
             .store
@@ -1145,10 +1145,13 @@ async fn compute_fleet_cached(
             return Ok((fleet.clone(), counts.clone()));
         }
     }
-    // Cache miss — compute from all loops and store under write lock
+    // Cache miss — compute from all loops within a 14-day window (current +
+    // prior week for FR-9b trend comparison). Uses time-bounded query without
+    // row LIMIT so aggregates are accurate on long-running deployments.
+    let since = Utc::now() - Duration::days(14);
     let all_loops = state
         .store
-        .get_loops_for_engineer(None, true, true)
+        .get_loops_for_aggregation(since)
         .await?;
     let all_ids: Vec<Uuid> = all_loops.iter().map(|l| l.id).collect();
     let all_rounds = state.store.get_rounds_for_loops(&all_ids).await?;
@@ -1504,15 +1507,14 @@ async fn compute_stats(
     };
     let cutoff = Utc::now() - duration;
 
+    // Use time-bounded aggregation query (no row LIMIT) so stats are
+    // accurate on long-running deployments with >10k loops.
     let all_loops = state
         .store
-        .get_loops_for_engineer(None, true, true)
+        .get_loops_for_aggregation(cutoff)
         .await?;
 
-    let window_loops: Vec<_> = all_loops
-        .iter()
-        .filter(|l| l.created_at >= cutoff)
-        .collect();
+    let window_loops: Vec<_> = all_loops.iter().collect();
 
     let total_loops = window_loops.len();
     let terminal: Vec<_> = window_loops

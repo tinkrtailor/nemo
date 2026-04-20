@@ -79,3 +79,16 @@ theme = "dark"  # "dark", "light", or "high-contrast"
 ```
 
 The dashboard defaults to the system color scheme (`prefers-color-scheme` media query) and falls back to the configured theme.
+
+#### Cookie Secure Flag
+
+By default, the dashboard auto-detects whether to set the `Secure` flag on authentication cookies based on the `bind_addr`: cookies are marked `Secure` unless the server binds to a loopback address (`127.0.0.1`, `localhost`, `::1`).
+
+When running behind Tailscale without TLS termination, the auto-detection may incorrectly set the `Secure` flag (because the bind address is a non-loopback Tailscale IP), which prevents the browser from sending cookies over plain HTTP. Override this with:
+
+```toml
+[cluster]
+dashboard_secure_cookie = false  # Disable Secure flag for plain-HTTP Tailscale setups
+```
+
+Set to `true` to force the `Secure` flag when TLS is terminated externally (e.g., by a reverse proxy) and the auto-detection would otherwise disable it.

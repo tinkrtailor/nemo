@@ -33,23 +33,16 @@ fn render_header(active: &str, show_team: bool, csrf_token: &str) -> Markup {
                 a href="/dashboard" class=(if active == "grid" { "active" } else { "" }) { "Loops" }
                 a href="/dashboard/feed" class=(if active == "feed" { "active" } else { "" }) { "Feed" }
                 a href="/dashboard/stats" class=(if active == "stats" { "active" } else { "" }) { "Stats" }
-                @if show_team {
-                    div style="position:relative" {
+                div style="position:relative" {
                         button #menu-toggle class="menu-btn" { "\u{22EF}" }
                         div #menu-dropdown class="menu-dropdown hidden" {
-                            button #cancel-all-btn data-action="cancel-all" class="danger" { "Cancel all active loops" }
+                            button #cancel-all-btn data-action="cancel-all" class=(if show_team { "danger" } else { "danger hidden" }) { "Cancel all active loops" }
                             form action="/dashboard/logout" method="post" {
                                 input type="hidden" name="csrf_token" value=(csrf_token);
                                 button type="submit" { "Logout" }
                             }
                         }
                     }
-                } @else {
-                    form action="/dashboard/logout" method="post" style="display:inline" {
-                        input type="hidden" name="csrf_token" value=(csrf_token);
-                        button type="submit" class="menu-btn" style="font-size:0.75rem" { "Logout" }
-                    }
-                }
             }
         }
     }

@@ -407,6 +407,15 @@ a:hover { color: var(--primary-hover); }
   margin-bottom: var(--sp-md);
 }
 .log-pane .log-line { display: block; }
+.sse-disconnected {
+  padding: var(--sp-xs) var(--sp-sm);
+  margin-top: var(--sp-xs);
+  background: var(--warning-bg, rgba(255,200,0,0.15));
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  border-radius: var(--r-sm);
+  text-align: center;
+}
 
 /* Token breakdown */
 .token-table {

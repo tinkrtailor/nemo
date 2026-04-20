@@ -37,6 +37,15 @@ pub trait StateStore: Send + Sync + 'static {
         include_terminal: bool,
     ) -> Result<Vec<LoopRecord>>;
 
+    /// Get ALL loops created within a time window (no row LIMIT).
+    /// Used by fleet summary (FR-9) and stats (FR-14) aggregation where
+    /// completeness matters more than bounding result size.
+    /// The `since` parameter bounds results by `created_at >= since`.
+    async fn get_loops_for_aggregation(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<LoopRecord>>;
+
     /// Get terminal loops ordered by updated_at DESC, with optional filters.
     /// Unlike `get_loops_for_engineer`, this has no hard row limit and filters
     /// at the DB level for efficiency (FR-12, FR-9, FR-13, FR-14).
@@ -301,6 +310,18 @@ pub mod memory {
                     };
                     eng_match && (include_terminal || !l.state.is_terminal())
                 })
+                .cloned()
+                .collect())
+        }
+
+        async fn get_loops_for_aggregation(
+            &self,
+            since: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<LoopRecord>> {
+            let loops = self.loops.read().await;
+            Ok(loops
+                .values()
+                .filter(|l| l.created_at >= since)
                 .cloned()
                 .collect())
         }
