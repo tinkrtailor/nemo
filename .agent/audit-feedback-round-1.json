@@ -1,0 +1,48 @@
+{
+  "round": 1,
+  "source": "audit",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/ship-judge.md",
+      "description": "FR-1b specifies an OAuth bundle at /secrets/judge/credentials.json as an alternative auth mode, but never defines the JSON schema of that file, how OAuth tokens are extracted from it, or whether token refresh logic is needed. The Anthropic API uses 'x-api-key' for API keys and 'Authorization: Bearer' for OAuth — the implementer cannot determine the correct behavior from the spec alone.",
+      "suggestion": "Add a sub-requirement specifying the expected credentials.json schema (e.g., {\"api_key\": \"...\"} or {\"oauth_token\": \"...\", \"refresh_token\": \"...\", \"expires_at\": ...}), how to detect which auth header to use, and whether token refresh is in scope or deferred."
+    },
+    {
+      "severity": "medium",
+      "category": "clarity",
+      "file": "specs/ship-judge.md",
+      "description": "FR-5 (dogfooding plan) is listed as a functional requirement but describes a manual operational evaluation (run a spec 3 times, record subjective impressions, write a markdown note). It has no testable acceptance criterion, depends on a working deployment with live API keys, and mixes validation with implementation. An implementer may be confused about whether this is in-scope for the code PR or a follow-up operational step.",
+      "suggestion": "Move FR-5 to a separate 'Validation Plan' or 'Post-Ship' section outside the FRs, and clarify that the code PR is complete without it. Alternatively, if it IS required before the PR merges, add a concrete acceptance criterion (e.g., 'docs/convergence-learnings.md exists with data from 3 runs')."
+    },
+    {
+      "severity": "medium",
+      "category": "consistency",
+      "file": "specs/ship-judge.md",
+      "description": "FR-4c says 'Dashboard detail page shows a gavel icon on rounds where the judge fired (already planned in #147 FR-11a — verify it's rendering).' However, the actual dashboard render.rs (lines 625-652) renders judge decisions as styled HTML blocks with decision text, confidence %, reasoning, and hint — but no gavel icon exists. The spec is ambiguous about whether this is a verification-only task or requires adding a gavel icon that was never implemented.",
+      "suggestion": "Clarify: if the gavel icon was never added, either (a) add it as an explicit implementation requirement with design details, or (b) remove the gavel reference and state 'verify judge decisions render in the round detail view' as the actual requirement."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/ship-judge.md",
+      "description": "FR-4d asks for 'a structured log-count tracer / metric: tracing::span! with judge_decision_total tag so operators can grep log output for invocation rate.' This conflates tracing spans with metrics counters. A tracing::span! creates a span context, not a counter. A field on a span (e.g., judge_decision_total=1) is greppable but isn't a proper metric. The requirement is implementable but the phrasing may confuse the implementer about the intended mechanism.",
+      "suggestion": "Reword to either: 'emit an INFO-level tracing event with a consistent target/field (e.g., target=\"judge\", decision_total=count) that operators can grep for' or 'add a metrics counter via the metrics crate'. Pick one pattern."
+    },
+    {
+      "severity": "low",
+      "category": "consistency",
+      "file": "specs/ship-judge.md",
+      "description": "'Files Likely Touched' mentions adding 'judge_credentials_path: Option<String>' to config/mod.rs, but no FR requires a configurable credentials path — FR-1b hardcodes /secrets/judge/credentials.json. The spec contradicts itself on whether the path is configurable.",
+      "suggestion": "Either add a micro-requirement in FR-1b that the file path is configurable via config (and specify the config key name and default), or remove the mention from 'Files Likely Touched'."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/ship-judge.md",
+      "description": "FR-1a says DirectAnthropicClient 'calls https://api.anthropic.com/v1/messages directly' but doesn't specify HTTP timeout, retry policy, or anthropic-version header requirements. The existing SidecarJudgeClient uses a 30s timeout and specific request format, which can be inferred, but the Anthropic API also requires an 'anthropic-version' header that the sidecar may have been adding transparently.",
+      "suggestion": "Add a note: 'Follow the same request format and timeout (30s) as SidecarJudgeClient. Include required Anthropic API headers (anthropic-version, content-type).'"
+    }
+  ]
+}
