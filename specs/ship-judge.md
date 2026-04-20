@@ -42,12 +42,22 @@ Today neither is wired.
 
 **FR-1a.** Add a new `DirectAnthropicClient` in `control-plane/src/loop_engine/judge.rs` implementing `JudgeModelClient`. Calls `https://api.anthropic.com/v1/messages` directly with a bearer token (Anthropic API key) OR an OAuth bundle (Claude Code credentials).
 
-**FR-1b.** Auth mode determined by which env var is set:
-- `NAUTILOOP_JUDGE_API_KEY` — raw API key (for prod where operators provision their own Anthropic key)
-- OR reads from a cluster-level secret `nautiloop-judge-creds` mounted at `/secrets/judge/credentials.json` (for Claude Code OAuth bundle)
-- If neither is available, judge is disabled with a one-time startup warning. Loop continues working; heuristic fallback per existing code.
+**FR-1b.** Auth mode determined by which credential source is available (checked in order):
+1. `NAUTILOOP_JUDGE_API_KEY` env var — raw Anthropic API key. Sent as `x-api-key` header. For prod where operators provision their own Anthropic key.
+2. Credentials file at `/secrets/judge/credentials.json` (path configurable via `config.orchestrator.judge_credentials_path`, default `/secrets/judge/credentials.json`). Expected JSON schema:
+   ```json
+   {
+     "api_key": "sk-ant-..."
+   }
+   ```
+   When `api_key` is present, sent as `x-api-key` header (same as env var mode).
+3. If neither is available, judge is disabled with a one-time startup warning. Loop continues working; heuristic fallback per existing code.
+
+**Note:** OAuth token refresh is out of scope for v1. If OAuth-based auth is needed in the future, a new credential type can be added with `oauth_token` / `refresh_token` / `expires_at` fields and refresh logic. For now, only static API keys are supported.
 
 **FR-1c.** Uses the existing `claude-haiku-4-5` model by default. Model name from config `[orchestrator] judge_model`. No sticker price change from the spec's original $0.05/loop ceiling.
+
+**FR-1d.** `DirectAnthropicClient` must use the same request body format and timeout as `SidecarJudgeClient`: 30-second HTTP timeout, `Content-Type: application/json`, `anthropic-version: 2023-06-01` header, and `max_tokens=512` in the request body (matching `SidecarJudgeClient`'s existing value). Auth headers differ by design — `DirectAnthropicClient` adds `x-api-key` and targets `api.anthropic.com` instead of a localhost sidecar. No retry on failure — a failed invocation falls through to the heuristic path per NFR-1.
 
 ### FR-2: Wire the driver correctly in main.rs
 
@@ -68,24 +78,13 @@ Today neither is wired.
 
 ### FR-4: Observability of running judge
 
-**FR-4a.** Every judge invocation logs at INFO with: `loop_id`, `round`, `phase`, `trigger`, `decision`, `confidence`, `duration_ms`.
+**FR-4a.** Verify that every judge invocation logs at INFO with: `loop_id`, `round`, `phase`, `trigger`, `decision`, `confidence`, `duration_ms`. The existing `judge.rs` already logs at INFO level — confirm these fields are all present and add any that are missing.
 
 **FR-4b.** `nemo inspect <branch>` output includes the `judge_decisions` array (already planned in #128 FR-6c — verify it's actually rendering).
 
-**FR-4c.** Dashboard `/dashboard/loops/:id` detail page shows a gavel icon on rounds where the judge fired (already planned in #147 FR-11a — verify it's rendering when there's data, not just a placeholder).
+**FR-4c.** Dashboard `/dashboard/loops/:id` detail page: verify that judge decisions render in the round detail view (the existing implementation shows styled HTML blocks with decision text, confidence %, reasoning, and hint). If judge decisions are present in the data but not rendering, fix the rendering. No new gavel icon is required — the existing styled blocks are sufficient.
 
-**FR-4d.** A structured log-count tracer / metric: `tracing::span!` with `judge_decision_total` tag so operators can grep log output for invocation rate.
-
-### FR-5: Dogfooding plan
-
-**FR-5a.** Once wired, pick one spec (small, ~5 KB) and run it THREE times:
-1. `judge_enabled = false` (baseline heuristic)
-2. `judge_enabled = true` on default config
-3. `judge_enabled = true` with an adversarial prompt tweak to test `exit_escalate` triggering
-
-Record: rounds-to-converge, cost in tokens, judge decisions per loop, operator-perceived convergence quality (subjective).
-
-**FR-5b.** Ship results as a short note in `docs/convergence-learnings.md` or similar — even if "the judge doesn't help much yet, here's the data."
+**FR-4d.** Emit an INFO-level `tracing::info!` event with target `"judge"` and fields `judge_decision_total = <cumulative count for this loop>` after each invocation, so operators can grep logs for `judge_decision_total` to track invocation rate. This is a structured log field, not a metrics-crate counter.
 
 ## Non-Functional Requirements
 
@@ -103,7 +102,7 @@ Spec #128 capped at 10 judge invocations per loop. Verify that cap is enforced (
 
 ### NFR-4: Tests
 
-- **Unit**: `DirectAnthropicClient` constructs with env-var API key; with mounted OAuth bundle; errors cleanly when neither present.
+- **Unit**: `DirectAnthropicClient` constructs with env-var API key; with credentials file at configured path; errors cleanly when neither present.
 - **Unit**: `main.rs` initialization picks the right driver constructor based on env/config/secret availability.
 - **Integration**: loop runs end-to-end with judge enabled on a mock Anthropic endpoint; verify `judge_decisions` rows written.
 
@@ -116,7 +115,20 @@ A reviewer can verify by:
 3. **Actual decisions**: run a loop with the judge enabled. After it terminates, `SELECT COUNT(*) FROM judge_decisions WHERE loop_id = ?` is non-zero. `SELECT decision, reasoning FROM judge_decisions ...` shows structured output, not just nulls.
 4. **Graceful degrade**: during a running loop, revoke the API key server-side. Loop continues. Log shows judge invocation failures as WARN. Loop still terminates via heuristic path.
 5. **Cost ceiling**: instrument a loop to force 11 judge calls (manually, in test harness). The 11th short-circuits to heuristic with a log line.
-6. **Observable**: `nemo inspect <branch>` shows the `judge_decisions` field. Dashboard detail page shows the gavel icon for judged rounds.
+6. **Observable**: `nemo inspect <branch>` shows the `judge_decisions` field. Dashboard detail page renders judge decision blocks (decision text, confidence, reasoning) for judged rounds.
+
+## Post-Ship Validation (not required for code PR)
+
+The following dogfooding plan is operational follow-up work, not part of the implementation PR. It should be executed after the code ships and a deployment with valid `NAUTILOOP_JUDGE_API_KEY` is available.
+
+**V-1.** Pick one spec (small, ~5 KB) and run it THREE times:
+1. `judge_enabled = false` (baseline heuristic)
+2. `judge_enabled = true` on default config
+3. `judge_enabled = true` with an adversarial prompt tweak to test `exit_escalate` triggering
+
+Record: rounds-to-converge, cost in tokens, judge decisions per loop, operator-perceived convergence quality (subjective).
+
+**V-2.** Ship results as a short note in `docs/convergence-learnings.md` or similar — even if "the judge doesn't help much yet, here's the data."
 
 ## Out of Scope
 
@@ -130,7 +142,7 @@ A reviewer can verify by:
 
 - `control-plane/src/loop_engine/judge.rs` — add `DirectAnthropicClient`.
 - `control-plane/src/main.rs` — wire `with_judge` construction based on config + creds availability.
-- `control-plane/src/config/mod.rs` — maybe add `judge_credentials_path: Option<String>`.
+- `control-plane/src/config/mod.rs` — add `judge_credentials_path: Option<String>` (default `/secrets/judge/credentials.json`, per FR-1b).
 - `dev/setup.sh` — optional env var `NAUTILOOP_JUDGE_API_KEY` → `nautiloop-judge-creds` secret.
 - `dev/k8s/05-control-plane.yaml` (or terraform equivalent) — mount `nautiloop-judge-creds` secret into loop-engine deployment.
 - `terraform/modules/nautiloop/variables.tf` + `k8s.tf` — optional `judge_api_key` variable.

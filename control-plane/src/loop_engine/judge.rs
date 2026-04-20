@@ -186,13 +186,7 @@ impl SidecarJudgeClient {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to build reqwest client with timeout; falling back to default (no per-request timeout)"
-                );
-                reqwest::Client::default()
-            });
+            .expect("Failed to build reqwest client with 30s timeout");
         Self {
             client,
             base_url: sidecar_base_url.to_string(),
@@ -252,6 +246,156 @@ impl JudgeModelClient for SidecarJudgeClient {
             .to_string();
 
         Ok(text)
+    }
+}
+
+/// Direct Anthropic API client for the control-plane pod (FR-1a).
+///
+/// Unlike `SidecarJudgeClient` which routes through a per-pod auth sidecar,
+/// this client calls `https://api.anthropic.com/v1/messages` directly with
+/// an API key. Used by the loop engine which has no sidecar.
+pub struct DirectAnthropicClient {
+    client: reqwest::Client,
+    api_key: String,
+    base_url: String,
+}
+
+impl DirectAnthropicClient {
+    pub fn new(api_key: String) -> Self {
+        Self::with_base_url(api_key, "https://api.anthropic.com".to_string())
+    }
+
+    /// Construct with a custom base URL (used in tests with wiremock).
+    pub fn with_base_url(api_key: String, base_url: String) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to build reqwest client with 30s timeout — TLS backend misconfigured");
+        Self {
+            client,
+            api_key,
+            base_url,
+        }
+    }
+}
+
+#[async_trait]
+impl JudgeModelClient for DirectAnthropicClient {
+    async fn invoke(&self, model: &str, prompt: &str) -> Result<String> {
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 512,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        });
+
+        let url = format!("{}/v1/messages", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .header("x-api-key", &self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::error::NautiloopError::Internal(format!("Judge HTTP request failed: {e}"))
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(crate::error::NautiloopError::Internal(format!(
+                "Judge model returned {status}: {body}"
+            )));
+        }
+
+        let response_json: serde_json::Value = resp.json().await.map_err(|e| {
+            crate::error::NautiloopError::Internal(format!(
+                "Judge model response not valid JSON: {e}"
+            ))
+        })?;
+
+        // Extract text from Anthropic Messages API response
+        let text = response_json
+            .get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|block| block.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(text)
+    }
+}
+
+/// Credentials JSON file schema for the judge (FR-1b).
+#[derive(Debug, Deserialize)]
+struct JudgeCredentialsFile {
+    api_key: String,
+}
+
+/// Resolve judge API key from available credential sources (FR-1b).
+///
+/// Delegates to `resolve_judge_api_key_with` using the real environment.
+pub fn resolve_judge_api_key(credentials_path: &str) -> Option<String> {
+    resolve_judge_api_key_with(credentials_path, |name| std::env::var(name))
+}
+
+/// Inner resolver that accepts an env-reader function for testability.
+///
+/// Checked in order:
+/// 1. `NAUTILOOP_JUDGE_API_KEY` env var (via `env_reader`)
+/// 2. Credentials file at `credentials_path` containing `{"api_key": "..."}`
+/// 3. None (judge disabled with warning)
+pub fn resolve_judge_api_key_with<F>(credentials_path: &str, env_reader: F) -> Option<String>
+where
+    F: Fn(&str) -> std::result::Result<String, std::env::VarError>,
+{
+    // Source 1: env var
+    if let Ok(key) = env_reader("NAUTILOOP_JUDGE_API_KEY")
+        && !key.is_empty()
+    {
+        tracing::info!("Judge credentials resolved from NAUTILOOP_JUDGE_API_KEY env var");
+        return Some(key);
+    }
+
+    // Source 2: credentials file
+    match std::fs::read_to_string(credentials_path) {
+        Ok(contents) => match serde_json::from_str::<JudgeCredentialsFile>(&contents) {
+            Ok(creds) if !creds.api_key.is_empty() => {
+                tracing::info!(
+                    path = credentials_path,
+                    "Judge credentials resolved from credentials file"
+                );
+                Some(creds.api_key)
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    path = credentials_path,
+                    "Judge credentials file has empty api_key"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = credentials_path,
+                    error = %e,
+                    "Failed to parse judge credentials file"
+                );
+                None
+            }
+        },
+        Err(_) => {
+            // File not found is expected when creds aren't provisioned
+            None
+        }
     }
 }
 
@@ -366,23 +510,34 @@ impl OrchestratorJudge {
 
         let duration_ms = start.elapsed().as_millis() as i32;
 
+        // ship-judge FR-4d: read cumulative attempt count (includes this attempt)
+        // for structured logging on both success and failure paths.
+        let judge_decision_total = {
+            let counts = self.call_counts.lock().await;
+            counts.get(&context.loop_id).copied().unwrap_or(0)
+        };
+
         let response_text = match model_result {
             Ok(Ok(text)) => text,
             Ok(Err(e)) => {
                 tracing::warn!(
+                    target: "judge",
                     loop_id = %context.loop_id,
                     round = context.round,
                     error = %e,
                     duration_ms,
+                    judge_decision_total,
                     "Judge model invocation failed, falling back to heuristic"
                 );
                 return None;
             }
             Err(_) => {
                 tracing::warn!(
+                    target: "judge",
                     loop_id = %context.loop_id,
                     round = context.round,
                     duration_ms,
+                    judge_decision_total,
                     "Judge model timed out after 30s, falling back to heuristic"
                 );
                 return None;
@@ -394,9 +549,11 @@ impl OrchestratorJudge {
             Some(o) => o,
             None => {
                 tracing::warn!(
+                    target: "judge",
                     loop_id = %context.loop_id,
                     round = context.round,
                     response = %response_text,
+                    judge_decision_total,
                     "Failed to parse judge response, falling back to heuristic"
                 );
                 return None;
@@ -430,13 +587,18 @@ impl OrchestratorJudge {
             );
         }
 
-        // FR-6a: Log at INFO level
+        // ship-judge FR-4a/FR-4d: Log at INFO level with all required fields.
+        // judge_decision_total counts all attempts for this loop (including this one).
         tracing::info!(
+            target: "judge",
             loop_id = %context.loop_id,
             round = context.round,
+            phase = %context.phase,
+            trigger = %trigger,
             decision = %output.decision,
             confidence = ?output.confidence,
             duration_ms,
+            judge_decision_total,
             "Judge decision"
         );
 
@@ -735,6 +897,7 @@ mod tests {
             judge_model: "test-model".to_string(),
             judge_enabled: true,
             max_judge_calls: 10,
+            judge_credentials_path: "/nonexistent/test/credentials.json".to_string(),
         }
     }
 
@@ -1131,5 +1294,318 @@ mod tests {
         assert!(prompt.contains("orchestrator judge"));
         assert!(prompt.contains(&ctx.loop_id.to_string()));
         assert!(prompt.contains("specs/test.md"));
+    }
+
+    // --- DirectAnthropicClient construction tests ---
+
+    #[test]
+    fn test_direct_anthropic_client_constructs() {
+        let client = DirectAnthropicClient::new("sk-ant-test-key".to_string());
+        assert_eq!(client.api_key, "sk-ant-test-key");
+    }
+
+    // --- resolve_judge_api_key tests ---
+    // Uses resolve_judge_api_key_with() with a closure to avoid unsafe env var
+    // mutation, which is unsound under Rust's default multi-threaded test runner.
+
+    fn no_env(_name: &str) -> std::result::Result<String, std::env::VarError> {
+        Err(std::env::VarError::NotPresent)
+    }
+
+    #[test]
+    fn test_resolve_judge_api_key_from_env_var() {
+        let result = resolve_judge_api_key_with(
+            "/nonexistent/path/credentials.json",
+            |_| Ok("sk-ant-env-key".to_string()),
+        );
+        assert_eq!(result, Some("sk-ant-env-key".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_judge_api_key_from_credentials_file() {
+        let dir = std::env::temp_dir().join(format!("judge-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let creds_path = dir.join("credentials.json");
+        std::fs::write(
+            &creds_path,
+            r#"{"api_key": "sk-ant-file-key"}"#,
+        )
+        .unwrap();
+
+        let result = resolve_judge_api_key_with(creds_path.to_str().unwrap(), no_env);
+        assert_eq!(result, Some("sk-ant-file-key".to_string()));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_resolve_judge_api_key_none_when_missing() {
+        let result = resolve_judge_api_key_with("/nonexistent/path/credentials.json", no_env);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_judge_api_key_empty_env_var_ignored() {
+        let result = resolve_judge_api_key_with(
+            "/nonexistent/path/credentials.json",
+            |_| Ok(String::new()),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_judge_api_key_malformed_file() {
+        let dir = std::env::temp_dir().join(format!("judge-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let creds_path = dir.join("credentials.json");
+        std::fs::write(&creds_path, "not valid json").unwrap();
+
+        let result = resolve_judge_api_key_with(creds_path.to_str().unwrap(), no_env);
+        assert!(result.is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- NFR-1: Graceful degradation test ---
+
+    #[tokio::test]
+    async fn test_failing_judge_falls_through_to_heuristic() {
+        // Verify that a failing JudgeModelClient returns None (heuristic fallback)
+        let store = Arc::new(MemoryStateStore::new());
+        let judge = OrchestratorJudge::new(
+            test_config(),
+            Arc::new(FailingJudgeClient),
+            store,
+        );
+        let ctx = test_context();
+        let output = judge.invoke(&ctx, &JudgeTrigger::NotClean).await;
+        assert!(output.is_none(), "Failed judge must return None for heuristic fallback");
+    }
+
+    // --- NFR-3: Cost ceiling log test ---
+
+    #[tokio::test]
+    async fn test_cost_ceiling_logs_on_cap_hit() {
+        let config = OrchestratorConfig {
+            max_judge_calls: 1,
+            ..test_config()
+        };
+        let store = Arc::new(MemoryStateStore::new());
+        let response = r#"{"decision": "continue", "confidence": 0.8, "reasoning": "ok", "hint": null}"#;
+        let judge = OrchestratorJudge::new(
+            config,
+            Arc::new(MockJudgeClient::new(response)),
+            store,
+        );
+
+        let ctx = test_context();
+        // First call succeeds
+        assert!(judge.invoke(&ctx, &JudgeTrigger::NotClean).await.is_some());
+        // Second call short-circuits (cap is 1)
+        assert!(
+            judge.invoke(&ctx, &JudgeTrigger::NotClean).await.is_none(),
+            "Call exceeding cost ceiling must short-circuit to heuristic"
+        );
+    }
+
+    // --- Integration: judge writes decisions to store ---
+
+    #[tokio::test]
+    async fn test_judge_writes_decisions_to_store() {
+        let response = r#"{"decision": "exit_clean", "confidence": 0.95, "reasoning": "all good", "hint": null}"#;
+        let store = Arc::new(MemoryStateStore::new());
+        let judge = OrchestratorJudge::new(
+            test_config(),
+            Arc::new(MockJudgeClient::new(response)),
+            store.clone(),
+        );
+
+        let ctx = test_context();
+        let output = judge.invoke(&ctx, &JudgeTrigger::RecurringFindings).await.unwrap();
+        assert_eq!(output.decision, JudgeDecision::ExitClean);
+
+        // Verify decision row was written
+        let decisions = store.get_judge_decisions(ctx.loop_id).await.unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].decision, "exit_clean");
+        assert_eq!(decisions[0].trigger, "recurring_findings");
+        assert_eq!(decisions[0].phase, "review");
+        assert!(decisions[0].confidence.is_some());
+        assert!(decisions[0].duration_ms > 0 || decisions[0].duration_ms == 0);
+    }
+
+    // --- DirectAnthropicClient HTTP integration test (NFR-4) ---
+
+    #[tokio::test]
+    async fn test_direct_anthropic_client_http_request_format() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        // Set up mock to return an Anthropic Messages API response
+        let anthropic_response = serde_json::json!({
+            "id": "msg_test123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "{\"decision\": \"continue\", \"confidence\": 0.8, \"reasoning\": \"ok\", \"hint\": null}"
+                }
+            ],
+            "model": "claude-haiku-4-5-20251001",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-api-key", "sk-ant-test-key"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .and(header("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&anthropic_response))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client =
+            DirectAnthropicClient::with_base_url("sk-ant-test-key".to_string(), mock_server.uri());
+
+        let result = client.invoke("claude-haiku-4-5", "test prompt").await;
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(text.contains("continue"));
+        assert!(text.contains("confidence"));
+    }
+
+    #[tokio::test]
+    async fn test_direct_anthropic_client_non_success_status() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string("invalid x-api-key"),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client =
+            DirectAnthropicClient::with_base_url("bad-key".to_string(), mock_server.uri());
+
+        let result = client.invoke("claude-haiku-4-5", "test prompt").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("401"));
+    }
+
+    #[tokio::test]
+    async fn test_direct_anthropic_client_request_body_format() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        let expected_body = serde_json::json!({
+            "model": "test-model",
+            "max_tokens": 512,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "judge this"
+                }
+            ]
+        });
+
+        let anthropic_response = serde_json::json!({
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(body_json(&expected_body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&anthropic_response))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client =
+            DirectAnthropicClient::with_base_url("sk-ant-key".to_string(), mock_server.uri());
+
+        let result = client.invoke("test-model", "judge this").await;
+        assert!(result.is_ok());
+    }
+
+    // --- Full integration: DirectAnthropicClient → OrchestratorJudge → store write (NFR-4) ---
+
+    #[tokio::test]
+    async fn test_full_integration_direct_client_judge_store() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        // Mock Anthropic response with valid judge JSON
+        let anthropic_response = serde_json::json!({
+            "id": "msg_integration",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "{\"decision\": \"exit_clean\", \"confidence\": 0.92, \"reasoning\": \"All issues resolved in latest round.\", \"hint\": null}"
+                }
+            ],
+            "model": "claude-haiku-4-5-20251001",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 200, "output_tokens": 60}
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-api-key", "sk-ant-integration-key"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&anthropic_response))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        // Wire: DirectAnthropicClient → OrchestratorJudge → MemoryStateStore
+        let client = DirectAnthropicClient::with_base_url(
+            "sk-ant-integration-key".to_string(),
+            mock_server.uri(),
+        );
+        let store = Arc::new(MemoryStateStore::new());
+        let judge = OrchestratorJudge::new(
+            test_config(),
+            Arc::new(client),
+            store.clone(),
+        );
+
+        let ctx = test_context();
+        let output = judge
+            .invoke(&ctx, &JudgeTrigger::NotClean)
+            .await
+            .expect("Judge should return a decision");
+
+        // Verify decision output
+        assert_eq!(output.decision, JudgeDecision::ExitClean);
+        assert_eq!(output.confidence, Some(0.92));
+        assert_eq!(output.reasoning, Some("All issues resolved in latest round.".to_string()));
+
+        // Verify decision was persisted to the store
+        let decisions = store.get_judge_decisions(ctx.loop_id).await.unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].decision, "exit_clean");
+        assert_eq!(decisions[0].trigger, "not_clean");
+        assert_eq!(decisions[0].phase, "review");
+        assert_eq!(decisions[0].confidence, Some(0.92));
+        assert_eq!(decisions[0].reasoning, Some("All issues resolved in latest round.".to_string()));
     }
 }

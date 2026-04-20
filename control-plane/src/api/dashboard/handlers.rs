@@ -2504,4 +2504,96 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
+
+    // --- FR-4c: dashboard detail page renders judge decisions ---
+
+    #[tokio::test]
+    async fn test_detail_page_renders_judge_decisions() {
+        use crate::types::JudgeDecisionRecord;
+
+        let state = test_state();
+        let record = test_loop_record("bob", LoopState::Converged);
+        let loop_id = record.id;
+        state.store.create_loop(&record).await.unwrap();
+
+        // Add a round
+        let round = RoundRecord {
+            id: Uuid::new_v4(),
+            loop_id,
+            round: 1,
+            stage: "review".to_string(),
+            input: None,
+            output: Some(serde_json::json!({
+                "clean": false,
+                "issues": [],
+                "summary": "needs work",
+                "token_usage": {"input": 5000, "output": 1000},
+            })),
+            started_at: Some(Utc::now()),
+            completed_at: Some(Utc::now()),
+            duration_secs: Some(60),
+            job_name: Some("review-job-1".to_string()),
+        };
+        state.store.create_round(&round).await.unwrap();
+
+        // Add a judge decision for this round
+        let decision = JudgeDecisionRecord {
+            id: Uuid::new_v4(),
+            loop_id,
+            round: 1,
+            phase: "review".to_string(),
+            trigger: "not_clean".to_string(),
+            input_json: serde_json::json!({}),
+            decision: "exit_clean".to_string(),
+            confidence: Some(0.92),
+            reasoning: Some("Only cosmetic nits remain".to_string()),
+            hint: Some("Ship it".to_string()),
+            duration_ms: 800,
+            created_at: Utc::now(),
+            loop_final_state: None,
+            loop_terminated_at: None,
+        };
+        state.store.create_judge_decision(&decision).await.unwrap();
+
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/dashboard/loops/{}", loop_id))
+                    .header("accept", "text/html")
+                    .header("cookie", "nautiloop_api_key=test-api-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 524288)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+
+        // Verify judge decision content renders in the HTML
+        assert!(
+            html.contains("exit_clean"),
+            "Dashboard should render judge decision type"
+        );
+        assert!(
+            html.contains("Only cosmetic nits remain"),
+            "Dashboard should render judge reasoning"
+        );
+        assert!(
+            html.contains("92%"),
+            "Dashboard should render judge confidence percentage"
+        );
+        assert!(
+            html.contains("Judge Decisions"),
+            "Dashboard should have Judge Decisions section"
+        );
+    }
 }

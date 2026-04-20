@@ -2347,4 +2347,105 @@ mod tests {
         assert_eq!(calls[0].author_name, "bob");
         assert_eq!(calls[0].author_email, "bob@nautiloop.dev");
     }
+
+    // --- FR-4b: inspect endpoint includes judge_decisions ---
+
+    #[tokio::test]
+    async fn test_inspect_includes_judge_decisions() {
+        use crate::types::JudgeDecisionRecord;
+
+        let (app, store, _git) = test_app();
+
+        let record = LoopRecord {
+            id: Uuid::new_v4(),
+            engineer: "alice".to_string(),
+            spec_path: "specs/test.md".to_string(),
+            spec_content_hash: "abc12345".to_string(),
+            branch: "agent/alice/test-abc12345".to_string(),
+            kind: LoopKind::Implement,
+            state: LoopState::Converged,
+            sub_state: None,
+            round: 3,
+            max_rounds: 15,
+            harden: false,
+            harden_only: false,
+            auto_approve: true,
+            ship_mode: false,
+            cancel_requested: false,
+            approve_requested: false,
+            resume_requested: false,
+            paused_from_state: None,
+            reauth_from_state: None,
+            failed_from_state: None,
+            failure_reason: None,
+            current_sha: Some("abc123".to_string()),
+            opencode_session_id: None,
+            claude_session_id: None,
+            active_job_name: None,
+            retry_count: 0,
+            model_implementor: None,
+            model_reviewer: None,
+            merge_sha: None,
+            merged_at: None,
+            hardened_spec_path: None,
+            spec_pr_url: None,
+            resolved_default_branch: Some("main".to_string()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let loop_id = record.id;
+        store.create_loop(&record).await.unwrap();
+
+        // Add a judge decision
+        let decision = JudgeDecisionRecord {
+            id: Uuid::new_v4(),
+            loop_id,
+            round: 2,
+            phase: "review".to_string(),
+            trigger: "not_clean".to_string(),
+            input_json: serde_json::json!({}),
+            decision: "continue".to_string(),
+            confidence: Some(0.85),
+            reasoning: Some("Issues being fixed".to_string()),
+            hint: Some("Focus on the null check".to_string()),
+            duration_ms: 1200,
+            created_at: chrono::Utc::now(),
+            loop_final_state: None,
+            loop_terminated_at: None,
+        };
+        store.create_judge_decision(&decision).await.unwrap();
+
+        let response = send_request(
+            app,
+            Request::builder()
+                .method(http::Method::GET)
+                .uri(&format!(
+                    "/inspect?branch=agent/alice/test-abc12345"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: InspectResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp.loop_id, loop_id);
+        assert_eq!(resp.judge_decisions.len(), 1);
+        assert_eq!(resp.judge_decisions[0].decision, "continue");
+        assert_eq!(resp.judge_decisions[0].phase, "review");
+        assert_eq!(resp.judge_decisions[0].trigger, "not_clean");
+        assert_eq!(resp.judge_decisions[0].confidence, Some(0.85));
+        assert_eq!(
+            resp.judge_decisions[0].reasoning,
+            Some("Issues being fixed".to_string())
+        );
+        assert_eq!(
+            resp.judge_decisions[0].hint,
+            Some("Focus on the null check".to_string())
+        );
+    }
 }

@@ -11,7 +11,9 @@ use nautiloop_control_plane::config::NautiloopConfig;
 use nautiloop_control_plane::git::GitOperations;
 use nautiloop_control_plane::k8s::JobDispatcher;
 use nautiloop_control_plane::k8s::client::KubeJobDispatcher;
-use nautiloop_control_plane::loop_engine::{ConvergentLoopDriver, Reconciler, watcher::JobWatcher};
+use nautiloop_control_plane::loop_engine::{
+    self, JudgeResolution, Reconciler, watcher::JobWatcher,
+};
 use nautiloop_control_plane::state::StateStore;
 use nautiloop_control_plane::state::postgres::PgStateStore;
 
@@ -143,12 +145,27 @@ async fn main() -> anyhow::Result<()> {
                 nautiloop_control_plane::git::bare::BareRepoGitOperations::new(&bare_repo_path),
             );
 
-            let driver = Arc::new(ConvergentLoopDriver::new(
+            let (driver, judge_resolution) = loop_engine::build_loop_driver(
+                &config,
                 store.clone(),
                 dispatcher,
                 git,
-                config.clone(),
-            ));
+            );
+            match &judge_resolution {
+                JudgeResolution::Enabled { model } => {
+                    tracing::info!(
+                        "Orchestrator judge: enabled, model={model}",
+                    );
+                }
+                JudgeResolution::CredentialsMissing => {
+                    tracing::warn!(
+                        "Orchestrator judge: enabled in config but NAUTILOOP_JUDGE_API_KEY/credentials missing; skipping"
+                    );
+                }
+                JudgeResolution::Disabled => {
+                    tracing::info!("Orchestrator judge: disabled (judge_enabled=false)");
+                }
+            }
 
             let wake = Arc::new(Notify::new());
 

@@ -167,3 +167,10 @@ variable "image_pull_secret_dockerconfigjson" {
   default     = null
   sensitive   = true
 }
+
+variable "judge_api_key" {
+  description = "Anthropic API key for the orchestrator judge. If set, creates a nautiloop-judge-creds secret and mounts it in the loop engine. If null, judge falls back to heuristic."
+  type        = string
+  default     = null
+  sensitive   = true
+}

@@ -267,6 +267,9 @@ spec:
             - name: git-ssh-known-hosts
               mountPath: /etc/git-ssh-known-hosts
               readOnly: true
+            - name: judge-creds
+              mountPath: /secrets/judge
+              readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -294,6 +297,10 @@ spec:
         - name: git-ssh-known-hosts
           configMap:
             name: nautiloop-ssh-known-hosts
+        - name: judge-creds
+          secret:
+            secretName: nautiloop-judge-creds
+            optional: true
 YAML
 }
 

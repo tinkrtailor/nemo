@@ -211,6 +211,11 @@ pub struct OrchestratorConfig {
     /// heuristic fallback (NFR-1 cost ceiling). Default: 10.
     #[serde(default = "default_max_judge_calls")]
     pub max_judge_calls: u32,
+    /// Path to the judge credentials JSON file. The file should contain
+    /// `{"api_key": "sk-ant-..."}`. Checked after `NAUTILOOP_JUDGE_API_KEY`
+    /// env var. Default: `/secrets/judge/credentials.json`.
+    #[serde(default = "default_judge_credentials_path")]
+    pub judge_credentials_path: String,
 }
 
 impl Default for OrchestratorConfig {
@@ -219,6 +224,7 @@ impl Default for OrchestratorConfig {
             judge_model: default_judge_model(),
             judge_enabled: true,
             max_judge_calls: default_max_judge_calls(),
+            judge_credentials_path: default_judge_credentials_path(),
         }
     }
 }
@@ -228,6 +234,9 @@ fn default_judge_model() -> String {
 }
 fn default_max_judge_calls() -> u32 {
     10
+}
+fn default_judge_credentials_path() -> String {
+    "/secrets/judge/credentials.json".to_string()
 }
 
 /// Observability configuration from `[observability]` in nemo.toml.
