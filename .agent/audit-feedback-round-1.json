@@ -1,0 +1,34 @@
+{
+  "round": 1,
+  "source": "audit",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "specs/smoke-v060/spec.md",
+      "description": "FR-2 says 'reads it via env!(\"BUILD_SHA\") at compile time; falls back to \"unknown\" if the env var wasn't set'. This is contradictory: env!() is a compile-time macro that causes a compilation FAILURE if the variable is missing — it cannot fall back. The correct Rust idiom is option_env!(\"BUILD_SHA\").unwrap_or(\"unknown\"). An implementer following the spec literally would either use env!() and break dev builds, or silently deviate from the spec.",
+      "suggestion": "Replace 'reads it via env!(\"BUILD_SHA\")' with 'reads it via option_env!(\"BUILD_SHA\").unwrap_or(\"unknown\")' to match the stated fallback behavior."
+    },
+    {
+      "severity": "medium",
+      "category": "consistency",
+      "file": "specs/smoke-v060/spec.md",
+      "description": "The Overview section references env!(\"VERGEN_GIT_SHA_SHORT\") and a 'vergen-like crate', but FR-2 switches to a plain build.rs with BUILD_SHA. Two different env var names and two different mechanisms are described. An implementer must guess which is normative.",
+      "suggestion": "Remove the vergen reference from the Overview or explicitly state 'the Overview mentions vergen as prior art; the normative approach is the plain build.rs in FR-2 using BUILD_SHA'."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/smoke-v060/spec.md",
+      "description": "NFR-2 says 'Update the existing health_returns_ok_json_when_store_healthy test' but the actual test name in the codebase is test_health_returns_json_ok. A second test test_health_returns_degraded_on_db_failure also constructs the health response and would need updating for build_info. The spec doesn't mention the degraded-path test.",
+      "suggestion": "Reference both existing tests by their actual names, or say 'update all existing health tests to assert build_info presence'."
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/smoke-v060/spec.md",
+      "description": "FR-1 says '7-character short SHA' and AC says '7-char string'. git rev-parse --short HEAD defaults to 7 but can produce more characters in repos with hash prefix collisions. This is unlikely to matter but the spec is slightly imprecise.",
+      "suggestion": "Say 'short SHA (typically 7 characters)' or pass --short=7 explicitly in the build.rs command to guarantee exactly 7."
+    }
+  ]
+}
