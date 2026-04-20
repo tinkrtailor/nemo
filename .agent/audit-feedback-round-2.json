@@ -1,0 +1,62 @@
+{
+  "round": 2,
+  "source": "audit",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1b claims the page <title> already reads 'Nautiloop — Push a spec, get a clean PR.' (with trailing period) and says it's unchanged. The actual title at www/index.html:6 is 'Nautiloop — Push a spec, get a clean PR' (no period). If an implementer takes the spec literally and adds a period, it changes the title. If they leave it alone, the spec text is misleading.",
+      "suggestion": "Remove the trailing period from the FR-1b example to match the actual title, or explicitly state it should stay as-is without the period."
+    },
+    {
+      "severity": "medium",
+      "category": "clarity",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1e says to replace the 'Built with Nautiloop' data table with a 2-row summary table but specifies a 4-column table (Phase / What / PRs produced / Notes) while the existing table has 3 columns (Lane / Rounds / Findings). The new table's 'PRs produced' column contains prose like '3 lanes, 81 rounds, 331 findings' which isn't a PR count, and '12+ machine-produced convergent PRs' which is. The column header doesn't match the cell content for the first row. An implementer may question whether to use the exact columns given or adapt them.",
+      "suggestion": "Rename the 'PRs produced' column to something like 'Scale' or 'Output' that accommodates both rows, or restructure the first row so the PR count column has an appropriate value (e.g., the original 3 PRs for the 3 lanes)."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1e replaces the existing 5-row table with a 2-row table and replaces the introductory paragraph ('Nautiloop was built through the exact process it automates. Three parallel implementation lanes, each hardened by cross-model adversarial review.'). The spec says the per-lane breakdown is 'fully replaced' but doesn't specify what should happen to the lead paragraph (class 'built-lead'). Should it be replaced, updated, or kept as-is? Keeping it references 'three parallel implementation lanes' which no longer appear in the table.",
+      "suggestion": "Specify replacement text for the built-lead paragraph that works with the new 2-row summary table, or explicitly state it should be updated to reference both the original build and v0.6.0 dogfooding."
+    },
+    {
+      "severity": "medium",
+      "category": "clarity",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1d says to add a paragraph 'below the div.arch-flow container (before the closing </section>)'. However, between the arch-flow div and the closing </section> there is a closing </div> for the container. Should the new <p> go inside the container div (before </div></section>) or between the container and section closing tags? The placement affects styling.",
+      "suggestion": "Clarify: 'Add a <p> inside the .container div, after the .arch-flow div, before the closing </div> of the container.'"
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-3e specifies adding a '### What the module installs' subsection 'after the intro paragraph, before Quick start'. But deploy.md starts with a heading ('# Deploying Nautiloop'), one paragraph (line 3), then immediately '## Quick start (minimal)' at line 5. Adding a ### subsection before a ## heading violates markdown heading hierarchy (### under # with no ## parent). An implementer might use ## instead, which changes the document structure.",
+      "suggestion": "Specify '## What the module installs' (h2) rather than '### What the module installs' (h3) to maintain heading hierarchy, or explicitly state it should be a ## heading placed between the intro and Quick start."
+    },
+    {
+      "severity": "low",
+      "category": "consistency",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-1g references 'docs/dashboard-setup.md' as a link target with an absolute GitHub URL. The file exists, so the link is valid. However, the security section currently uses a plain <ul> list. The spec says 'add a bullet' but doesn't specify whether it should be a new <li> in the existing <ul class='security-list'> or a separate element.",
+      "suggestion": "Explicitly state: 'Add a new <li> to the existing <ul class=\"security-list\">'."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-2e asks to update the state machine diagram to include AWAITING_REAUTH and the extend flow. The existing state machine section at architecture.md:351 likely contains a Mermaid or ASCII diagram. The spec doesn't specify the exact transitions or diagram syntax to add, leaving the implementer to reverse-engineer the correct state transitions from code.",
+      "suggestion": "Provide the specific state transitions to add, e.g., 'IMPLEMENTING -> AWAITING_REAUTH (on auth expiry)', 'AWAITING_REAUTH -> IMPLEMENTING (on nemo resume)', 'FAILED -> IMPLEMENTING|REVIEWING (on nemo extend --add N, resumes at failed_from_state)'."
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/v060-docs-refresh.md",
+      "description": "FR-3d specifies cache configuration examples using nemo.toml [cache.env] syntax but doesn't provide the actual env var names for sccache, npm, pnpm, etc. An implementer would need to research the correct env vars.",
+      "suggestion": "Provide example env var names (e.g., SCCACHE_DIR=/cache/sccache, npm_config_cache=/cache/npm, PNPM_HOME=/cache/pnpm) or reference the pluggable-cache spec for the canonical list."
+    }
+  ]
+}
