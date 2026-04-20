@@ -37,6 +37,10 @@ fn render_header(active: &str, show_team: bool, csrf_token: &str) -> Markup {
                         button #menu-toggle class="menu-btn" { "\u{22EF}" }
                         div #menu-dropdown class="menu-dropdown hidden" {
                             button #cancel-all-btn data-action="cancel-all" class=(if show_team { "danger" } else { "danger hidden" }) { "Cancel all active loops" }
+                            label class="menu-toggle-label" {
+                                input #bell-toggle type="checkbox" class="menu-checkbox" {}
+                                " Bell on converge"
+                            }
                             form action="/dashboard/logout" method="post" {
                                 input type="hidden" name="csrf_token" value=(csrf_token);
                                 button type="submit" { "Logout" }

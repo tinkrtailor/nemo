@@ -164,6 +164,12 @@ pub trait StateStore: Send + Sync + 'static {
         terminated_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<()>;
 
+    /// Count loops grouped by state. Returns a map from LoopState to count.
+    /// Uses `SELECT state, COUNT(*) FROM loops GROUP BY state` in Postgres —
+    /// O(1) in result size regardless of total loops — giving exact counts
+    /// without fetching full row data (dashboard filter chip badges).
+    async fn get_loop_state_counts(&self) -> Result<std::collections::HashMap<LoopState, usize>>;
+
     /// Get distinct engineer names from terminal loops.
     /// Much lighter than fetching full loop records when only names are needed
     /// (e.g., for dashboard feed filter chips).
@@ -617,6 +623,15 @@ pub mod memory {
 
         async fn advisory_unlock(&self, _loop_id: Uuid) -> Result<()> {
             Ok(())
+        }
+
+        async fn get_loop_state_counts(&self) -> Result<std::collections::HashMap<LoopState, usize>> {
+            let loops = self.loops.read().await;
+            let mut counts = std::collections::HashMap::new();
+            for l in loops.values() {
+                *counts.entry(l.state).or_insert(0) += 1;
+            }
+            Ok(counts)
         }
 
         async fn get_distinct_engineers(&self) -> Result<Vec<String>> {

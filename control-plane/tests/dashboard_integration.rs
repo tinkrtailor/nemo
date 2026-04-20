@@ -565,6 +565,145 @@ async fn test_stats_page_renders() {
     assert!(html.contains("alice"));
 }
 
+// ── Test: Full session continuity (login → grid → detail → action) ──
+
+#[tokio::test]
+async fn test_session_continuity_login_through_action() {
+    let state = test_state();
+    let mut record = make_loop("alice", LoopState::AwaitingApproval);
+    record.state = LoopState::AwaitingApproval;
+    let loop_id = record.id;
+    state.store.create_loop(&record).await.unwrap();
+    let r1 = make_round(loop_id, 1, "implement");
+    state.store.create_round(&r1).await.unwrap();
+
+    // Step 1: GET /dashboard/login to get CSRF token
+    let app = build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/dashboard/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let login_page_cookies = extract_cookies(&resp);
+    let csrf_token = login_page_cookies
+        .iter()
+        .find(|c| c.starts_with("nautiloop_csrf="))
+        .expect("CSRF cookie on login page")
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("nautiloop_csrf=")
+        .unwrap()
+        .to_string();
+
+    // Step 2: POST /dashboard/login with valid key — get auth cookies
+    let app = build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(state.clone());
+    let body = format!(
+        "engineer_name=alice&api_key={}&csrf_token={}",
+        API_KEY, csrf_token
+    );
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", format!("nautiloop_csrf={}", csrf_token))
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let auth_cookies = extract_cookies(&resp);
+    let cookie_header = cookies_to_header(&auth_cookies);
+
+    // Step 3: GET /dashboard — card grid using session cookies
+    let app = build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/dashboard?state_filter=all&team=true")
+                .header("accept", "text/html")
+                .header("cookie", &cookie_header)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 262144).await.unwrap();
+    let html = String::from_utf8(body_bytes.to_vec()).unwrap();
+    assert!(html.contains("AWAITING_APPROVAL"), "Grid should show loop state");
+    // Extract fresh CSRF token from grid page cookies for action step
+    // The auth middleware sets a fresh CSRF on each authed request.
+
+    // Step 4: GET /dashboard/loops/:id — detail page using same session cookies
+    let app = build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/dashboard/loops/{}", loop_id))
+                .header("accept", "text/html")
+                .header("cookie", &cookie_header)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 262144).await.unwrap();
+    let html = String::from_utf8(body_bytes.to_vec()).unwrap();
+    assert!(html.contains("AWAITING_APPROVAL"), "Detail should show loop state");
+    assert!(html.contains("Approve"), "Detail should show approve button");
+    assert!(html.contains("implement"), "Detail should show round stage");
+
+    // Step 5: POST /dashboard/api/approve/:id — action using same session cookies
+    let app = build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/dashboard/api/approve/{}", loop_id))
+                .header("cookie", &cookie_header)
+                .header("content-type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Step 6: Verify side effect persisted
+    let updated = state.store.get_loop(loop_id).await.unwrap().unwrap();
+    assert!(
+        updated.approve_requested,
+        "approve_requested should be set after full session flow"
+    );
+
+    // Step 7: Verify the JSON state endpoint also works with same session cookies
+    let app = build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/dashboard/state?team=true&state_filter=all")
+                .header("cookie", &cookie_header)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+    let data: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(data["counts"]["active"], 1);
+}
+
 // ── Test: Static assets are public (no auth needed) ──
 
 #[tokio::test]

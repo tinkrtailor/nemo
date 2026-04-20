@@ -984,13 +984,18 @@ pub async fn specs_page(
 
     let mut items = Vec::new();
     let mut total_cost = 0.0;
-    let mut converged_count = 0;
-    let terminal_count = matching.iter().filter(|l| l.state.is_terminal()).count();
+    let mut converged_count = 0usize;
+    let mut terminal_count = 0usize;
+    let mut terminal_rounds_sum = 0f64;
 
     for l in &matching {
         let rounds = spec_rounds.get(&l.id).map(|v| v.as_slice()).unwrap_or(&[]);
         let (_, cost, _) = compute_round_metrics(rounds);
         total_cost += cost;
+        if l.state.is_terminal() {
+            terminal_count += 1;
+            terminal_rounds_sum += l.round as f64;
+        }
         if matches!(
             l.state,
             LoopState::Converged | LoopState::Hardened | LoopState::Shipped
@@ -1019,12 +1024,7 @@ pub async fn specs_page(
             0.0
         },
         avg_rounds: if terminal_count > 0 {
-            matching
-                .iter()
-                .filter(|l| l.state.is_terminal())
-                .map(|l| l.round as f64)
-                .sum::<f64>()
-                / terminal_count as f64
+            terminal_rounds_sum / terminal_count as f64
         } else {
             0.0
         },
@@ -1146,17 +1146,15 @@ async fn compute_fleet_cached(
         }
     }
     // Fleet summary: 14-day window (current + prior week for FR-9b trend).
+    // Counts use a lightweight GROUP BY query (O(1) result size) instead of
+    // fetching all loop records — accurate regardless of total loop count.
     let since = Utc::now() - Duration::days(14);
-    let (agg_loops, all_loops_for_counts) = tokio::join!(
+    let (agg_loops, state_counts) = tokio::join!(
         state.store.get_loops_for_aggregation(since),
-        // Counts must reflect ALL current-state loops, not just the 14-day
-        // window. An active loop running for 3 weeks must appear in the
-        // "Active (N)" chip badge. Use include_terminal=true to get every
-        // loop, then count by state.
-        state.store.get_loops_for_engineer(None, true, true),
+        state.store.get_loop_state_counts(),
     );
     let agg_loops = agg_loops?;
-    let all_loops_for_counts = all_loops_for_counts?;
+    let state_counts = state_counts?;
 
     let agg_ids: Vec<Uuid> = agg_loops.iter().map(|l| l.id).collect();
     let all_rounds = state.store.get_rounds_for_loops(&agg_ids).await?;
@@ -1174,19 +1172,18 @@ async fn compute_fleet_cached(
         converge_rate: fleet.converge_rate,
         avg_rounds: fleet.avg_rounds,
     };
-    // Counts from ALL loops (unbounded by time window).
+    // Counts from lightweight GROUP BY query — exact regardless of total loops.
+    let get_count = |s: &LoopState| *state_counts.get(s).unwrap_or(&0);
     let counts = CountsJson {
-        active: all_loops_for_counts.iter().filter(|l| !l.state.is_terminal()).count(),
-        converged: all_loops_for_counts
+        active: state_counts
             .iter()
-            .filter(|l| {
-                matches!(
-                    l.state,
-                    LoopState::Converged | LoopState::Hardened | LoopState::Shipped
-                )
-            })
-            .count(),
-        failed: all_loops_for_counts.iter().filter(|l| l.state == LoopState::Failed).count(),
+            .filter(|(s, _)| !s.is_terminal())
+            .map(|(_, c)| c)
+            .sum(),
+        converged: get_count(&LoopState::Converged)
+            + get_count(&LoopState::Hardened)
+            + get_count(&LoopState::Shipped),
+        failed: get_count(&LoopState::Failed),
     };
     {
         let mut guard = state.fleet_cache.write().await;

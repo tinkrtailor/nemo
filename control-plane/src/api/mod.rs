@@ -300,6 +300,11 @@ mod tests {
         async fn count_exit_clean_decisions(&self, _: Uuid) -> crate::error::Result<u32> {
             unimplemented!()
         }
+        async fn get_loop_state_counts(
+            &self,
+        ) -> crate::error::Result<std::collections::HashMap<LoopState, usize>> {
+            unimplemented!()
+        }
         async fn get_distinct_engineers(&self) -> crate::error::Result<Vec<String>> {
             unimplemented!()
         }

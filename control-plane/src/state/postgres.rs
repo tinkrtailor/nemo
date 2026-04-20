@@ -1013,6 +1013,21 @@ impl StateStore for PgStateStore {
         Ok(result.rows_affected())
     }
 
+    async fn get_loop_state_counts(&self) -> Result<std::collections::HashMap<LoopState, usize>> {
+        let rows = sqlx::query("SELECT state, COUNT(*) as cnt FROM loops GROUP BY state")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(crate::error::NautiloopError::Database)?;
+
+        let mut counts = std::collections::HashMap::new();
+        for row in &rows {
+            let state: LoopState = sqlx::Row::get(row, "state");
+            let cnt: i64 = sqlx::Row::get(row, "cnt");
+            counts.insert(state, cnt as usize);
+        }
+        Ok(counts)
+    }
+
     async fn get_distinct_engineers(&self) -> Result<Vec<String>> {
         let rows = sqlx::query(
             "SELECT DISTINCT engineer FROM loops \

@@ -670,6 +670,17 @@ a:hover { color: var(--primary-hover); }
 .menu-dropdown button:hover { background: var(--surface); }
 .menu-dropdown button.danger { color: var(--error); }
 .menu-dropdown button.danger:hover { background: rgba(196,57,45,0.1); }
+.menu-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-xs);
+  padding: var(--sp-sm) var(--sp-md);
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.menu-toggle-label:hover { background: var(--surface); }
+.menu-checkbox { margin: 0; cursor: pointer; }
 
 /* Back link */
 .back-link {
