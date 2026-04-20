@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use maud::{DOCTYPE, Markup, html};
+use maud::{DOCTYPE, Markup, PreEscaped, html};
 
 use crate::types::{JudgeDecisionRecord, LoopRecord, LoopState};
 
@@ -13,6 +13,7 @@ fn layout(title: &str, nav_active: &str, show_team: bool, csrf_token: &str, cont
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) }
+                (PreEscaped("<script>(function(){var t=localStorage.getItem(\"nautiloop_theme\");if(t===\"dark\"||t===\"light\")document.documentElement.setAttribute(\"data-theme\",t)})()</script>"))
                 link rel="stylesheet" href="/dashboard/static/dashboard.css";
             }
             body {
@@ -36,11 +37,25 @@ fn render_header(active: &str, show_team: bool, csrf_token: &str) -> Markup {
                 div style="position:relative" {
                         button #menu-toggle class="menu-btn" { "\u{22EF}" }
                         div #menu-dropdown class="menu-dropdown hidden" {
-                            button #cancel-all-btn data-action="cancel-all" class=(if show_team { "danger" } else { "danger hidden" }) { "Cancel all active loops" }
+                            fieldset class="theme-group" role="radiogroup" aria-label="Theme" {
+                                legend class="menu-section-label" { "Theme" }
+                                button class="theme-option active" role="radio" aria-checked="true" data-theme-value="system" {
+                                    span class="theme-check" { "●" } " System"
+                                }
+                                button class="theme-option" role="radio" aria-checked="false" data-theme-value="dark" {
+                                    span class="theme-check" {} " Dark"
+                                }
+                                button class="theme-option" role="radio" aria-checked="false" data-theme-value="light" {
+                                    span class="theme-check" {} " Light"
+                                }
+                            }
+                            hr class="menu-divider" {}
                             label class="menu-toggle-label" {
                                 input #bell-toggle type="checkbox" class="menu-checkbox" {}
                                 " Bell on converge"
                             }
+                            hr class="menu-divider" {}
+                            button #cancel-all-btn data-action="cancel-all" class=(if show_team { "danger" } else { "danger hidden" }) { "Cancel all active loops" }
                             form action="/dashboard/logout" method="post" {
                                 input type="hidden" name="csrf_token" value=(csrf_token);
                                 button type="submit" { "Logout" }

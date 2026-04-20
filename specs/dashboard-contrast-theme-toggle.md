@@ -3,31 +3,73 @@
 ## Overview
 
 Two focused polish items on the mobile dashboard shipped in PR #166:
-1. Increase foreground/background contrast to match the helm TUI's post-phase-2 palette. The dashboard is usable but noticeably washed out relative to helm and to operator expectations.
+1. Increase foreground/background contrast — particularly for secondary text — to improve readability. The dashboard's `--text-secondary` value matches helm's `muted` exactly (`#8A8784`), but at ~4.2:1 against `--bg: #0F0F0E` it falls below WCAG AA 4.5:1 for normal text, making the fleet summary line and filter chips feel washed out compared to helm (where muted text appears against a terminal background with different rendering characteristics).
 2. Add an explicit theme toggle (dark / light / system-auto) in the settings `⋯` menu so the user can override `prefers-color-scheme` without changing OS preferences.
 
 Both are small, neither adds new endpoints, both inherit the existing CSS-custom-property structure the dashboard already uses.
 
 ## Baseline
 
-Main at PR #166 merge (mobile dashboard). Current state:
+Main at HEAD after PR #171 merge (the spec docs commit for this work). Current state:
 
-- `control-plane/assets/dashboard.css` uses CSS custom properties for all colors: `--bg`, `--surface`, `--border`, `--text`, `--muted`, `--teal`, `--amber`, `--green`, `--red`, `--blue`.
-- Palette follows the helm TUI's phase-1 values (pre-phase-2).
-- Theme is chosen by `@media (prefers-color-scheme: dark)` with a default light. No manual override.
-- Settings `⋯` menu in the header exists (shown in the recent screenshot) but currently only holds the kill-switch item.
+- `control-plane/assets/dashboard.css` uses CSS custom properties for all colors. The actual variable names are:
+  - Layout: `--bg`, `--surface`, `--surface-raised`, `--border`
+  - Text: `--text-primary`, `--text-secondary`, `--text-tertiary`
+  - Brand: `--primary`, `--primary-hover`, `--primary-muted`, `--accent`, `--accent-muted`
+  - Semantic: `--success`, `--warning`, `--error`, `--info`
+  - Spacing: `--sp-xs`, `--sp-sm`, `--sp-md`, `--sp-lg`, `--sp-xl`
+  - Radii: `--r-sm`, `--r-md`, `--r-lg`
+  - Fonts: `--font-body`, `--font-data`, `--font-code`, `--font-display`
+- Dark mode is the `:root` default. Light mode is defined via `@media (prefers-color-scheme: light)`. No manual override.
+- Settings `⋯` menu in the header contains three items:
+  1. `Cancel all active loops` button (conditionally visible when team loops are active)
+  2. `Bell on converge` checkbox toggle (persisted via `localStorage` key `nautiloop_bell`)
+  3. `Logout` form (POST to `/dashboard/logout` with CSRF token)
+- The dark-mode palette already matches helm's dark theme values exactly (see comparison below). The contrast issue is specifically that `--text-secondary: #8A8784` (helm's `muted`) is below WCAG AA 4.5:1 against `--bg: #0F0F0E`.
+- The light-mode palette (`--bg: #F7F5F2`, `--surface: #EDEAE6`) does NOT match helm's light theme (`--bg: #FAFAF8`, `--surface: #F0EFED`).
 
-Observed: text-on-surface contrast ratio on dark mode is ~7:1 but muted-text-on-surface is ~3.2:1 — readable-but-washed compared to helm's tightened palette. The "Loops" heading and filter chips in the dashboard look dimmer than comparable helm UI elements, on the same monitor, at the same time.
+### Current dark-mode values vs helm dark theme
+
+| CSS Variable | Dashboard (current) | Helm dark | Match? |
+|---|---|---|---|
+| `--bg` | `#0F0F0E` | `#0F0F0E` | Yes |
+| `--surface` | `#1A1918` | `#1A1918` | Yes |
+| `--surface-raised` | `#242322` | (no equivalent) | N/A |
+| `--border` | `#2E2D2B` | `#2E2D2B` | Yes |
+| `--text-primary` | `#E8E6E3` | `#E8E6E3` (text) | Yes |
+| `--text-secondary` | `#8A8784` | `#8A8784` (muted) | Yes |
+| `--text-tertiary` | `#5C5A57` | (no equivalent) | N/A |
+| `--primary` | `#1B6B5A` | `#1B6B5A` (teal) | Yes |
+| `--accent` | `#E8A838` | `#E8A838` (amber) | Yes |
+| `--success` | `#2D7A4F` | `#2D7A4F` (green) | Yes |
+| `--error` | `#C4392D` | `#C4392D` (red) | Yes |
+| `--info` | `#3B7BC0` | `#3B7BC0` (blue) | Yes |
+
+### Current light-mode values vs helm light theme
+
+| CSS Variable | Dashboard (current) | Helm light | Match? |
+|---|---|---|---|
+| `--bg` | `#F7F5F2` | `#FAFAF8` | **No** |
+| `--surface` | `#EDEAE6` | `#F0EFED` | **No** |
+| `--surface-raised` | `#FFFFFF` | (no equivalent) | N/A |
+| `--border` | `#D9D6D0` | `#D2D0CD` | **No** |
+| `--text-primary` | `#1A1918` | `#1E1E1C` | **No** |
+| `--text-secondary` | `#5C5A57` | `#6E6C69` (muted) | **No** |
+| `--text-tertiary` | `#8A8784` | (no equivalent) | N/A |
+
+Observed: the fleet summary line (`This week · 4 loops · $1.98 · 50% converged ...`) renders in `--text-secondary` against `--bg`. At `#8A8784` on `#0F0F0E` the contrast ratio is ~4.2:1 — below WCAG AA 4.5:1 for normal text — making it hard to scan quickly outdoors on mobile.
 
 ## Problem Statement
 
-### Problem 1: Dashboard feels washed out vs helm
+### Problem 1: Secondary text contrast is below WCAG AA
 
-Operators switching between `nemo helm` (TUI) and the dashboard web view see a contrast drop. Helm phase 2 tightened its palette (text `#E8E6E3`, muted `#8A8784`, etc.). The dashboard kept older values with lower effective contrast, so reading quickly on a phone in bright conditions is harder than reading helm on a desktop terminal with the same color names.
+The dashboard's `--text-secondary` value (`#8A8784`) produces a contrast ratio of ~4.2:1 against `--bg` (`#0F0F0E`). While this matches helm's `muted` value exactly, the browser rendering context (subpixel antialiasing, mobile screens, outdoor viewing) makes it feel more washed out than the same value in a terminal emulator. The fleet summary line and filter chips — both important, always-visible data — are the most affected.
 
-Concrete impact: fleet summary line (`This week · 4 loops · $1.98 · 50% converged ...`) renders in `--muted` against `--bg`, and the muted value is too close to bg to scan quickly outdoors.
+### Problem 2: Light palette diverges from helm
 
-### Problem 2: No manual theme control
+The dashboard's light-mode values were set independently from helm's light theme. Operators who use both see inconsistent colors. The light palette should be aligned with the helm light theme source of truth (`cli/src/commands/helm/themes.rs`).
+
+### Problem 3: No manual theme control
 
 `prefers-color-scheme` is fine for most users but not all:
 - Mobile OS set to dark-at-night auto-switching — user wants dashboard consistent across the day, not flipping with sunset.
@@ -40,38 +82,34 @@ Today they have no way to override without changing OS preferences.
 
 ### FR-1: Contrast increase
 
-**FR-1a.** Adopt the helm phase-2 palette values in `control-plane/assets/dashboard.css`. Replace each `--` custom property's value with the helm equivalent:
+**FR-1a.** Bump `--text-secondary` in dark mode from `#8A8784` to `#A29F9B` in `control-plane/assets/dashboard.css`. This raises the contrast ratio against `--bg` (`#0F0F0E`) from ~4.2:1 to ~5.2:1, comfortably above WCAG AA 4.5:1.
 
-| Var | Current value | New value (helm-aligned) |
+**FR-1b.** `--text-secondary` on dark backgrounds MUST meet WCAG AA 4.5:1 contrast minimum against `--bg`. If `#A29F9B` doesn't hit 4.5:1 (verify with a contrast checker), bump to `#B8B5B2` (~6.3:1). The implementor MUST verify the final value and document the measured ratio.
+
+**FR-1c.** Align the light-mode palette with the helm light theme source of truth (`cli/src/commands/helm/themes.rs`). Replace the current light-mode values:
+
+| CSS Variable | Current (dashboard) | New value (helm light) |
 |---|---|---|
-| `--bg` (dark) | (current) | `#0F0F0E` |
-| `--surface` (dark) | (current) | `#1A1918` |
-| `--border` (dark) | (current) | `#2E2D2B` |
-| `--text` (dark) | (current) | `#E8E6E3` |
-| `--muted` (dark) | (current) | `#A29F9B` |
-| `--teal` | (current) | `#1B6B5A` |
-| `--amber` | (current) | `#E8A838` |
-| `--green` | (current) | `#2D7A4F` |
-| `--red` | (current) | `#C4392D` |
-| `--blue` | (current) | `#3B7BC0` |
+| `--bg` | `#F7F5F2` | `#FAFAF8` |
+| `--surface` | `#EDEAE6` | `#F0EFED` |
+| `--border` | `#D9D6D0` | `#D2D0CD` |
+| `--text-primary` | `#1A1918` | `#1E1E1C` |
+| `--text-secondary` | `#5C5A57` | `#6E6C69` |
+| `--text-tertiary` | `#8A8784` | (keep as-is, no helm equivalent) |
 
-The implementor SHOULD verify the helm source (`cli/src/commands/helm.rs`) for the exact hex values if the TUI's constants moved during phase 2; those are the source of truth.
+The `--surface-raised` light value (`#FFFFFF`) has no helm equivalent; keep it unchanged.
 
-**FR-1b.** `--muted` on dark backgrounds MUST meet WCAG AA 4.5:1 contrast minimum against `--bg`. If the helm value above doesn't hit that, bump `--muted` to `#B8B5B2` (a touch brighter). Verify with a contrast checker.
+Verify that the new `--text-secondary` light value (`#6E6C69`) meets WCAG AA 4.5:1 against `--bg` (`#FAFAF8`). `#6E6C69` on `#FAFAF8` is ~3.8:1 — this does NOT meet AA for normal text. **Bump light `--text-secondary` to `#5C5A57`** (the current value, ~5.0:1 against `#FAFAF8`) or `#4A4844` (~6.5:1). The implementor must verify and pick the value that passes 4.5:1 while remaining readable. Document the measured ratio.
 
-**FR-1c.** Light-mode palette (currently also defined via `prefers-color-scheme: light`) gets a corresponding pass: text ~13:1 against bg, muted ~4.5:1. Reuse helm's light theme if it exists; otherwise:
+**FR-1d.** No changes to the dark-mode values for `--bg`, `--surface`, `--surface-raised`, `--border`, `--text-primary`, `--text-tertiary`, `--primary`, `--accent`, `--success`, `--warning`, `--error`, or `--info` — these already match helm's dark theme exactly.
 
-| Var | Light value |
-|---|---|
-| `--bg` | `#FBFAF8` |
-| `--surface` | `#F2F0EC` |
-| `--border` | `#D4D1CC` |
-| `--text` | `#1C1A17` |
-| `--muted` | `#4A4844` |
+**FR-1e.** Light-mode semantic and brand color alignment is **out of scope** for this spec. Helm's light theme defines different values for `teal` (`#145A4B`), `amber` (`#B47814`), `green` (`#1E643C`), `red` (`#B4281E`), and `blue` (`#2864AA`) vs the dark theme. Today the dashboard's light mode falls through to the dark-mode `:root` values for `--primary`, `--accent`, `--success`, `--error`, and `--info`. This is a known gap but is acceptable for v0.6.1 — a follow-up spec should align light-mode semantic colors with helm's light theme.
+
+**FR-1f.** Light-mode `--text-tertiary` WCAG fix. With the new light `--bg` (`#FAFAF8`), the current `--text-tertiary` value (`#8A8784`) produces ~3.5:1 contrast — below WCAG AA 4.5:1 for normal text. All 13 usages of `--text-tertiary` in `dashboard.css` are normal-sized text (0.6875rem–0.75rem / 11px–12px): card IDs, elapsed times, token/cost metrics, feed timestamps, etc. None meet the large-text threshold (≥18px or ≥14px bold). Therefore, bump light-mode `--text-tertiary` to `#5C5A57` (~5.0:1 against `#FAFAF8`). The implementor must verify the measured ratio and document it.
 
 ### FR-2: Theme toggle in settings menu
 
-**FR-2a.** The existing header settings `⋯` menu gains three new items above the existing `Cancel all active loops` kill switch:
+**FR-2a.** The existing header settings `⋯` menu (rendered in `control-plane/src/api/dashboard/render.rs` via Maud macros) gains a theme radio group. The menu order becomes:
 
 ```
 Theme
@@ -79,31 +117,67 @@ Theme
   · Dark
   · Light
 ─────────
+Bell on converge  [checkbox]
+─────────
 Cancel all active loops
+Logout
 ```
 
-Visual style: three radio-button-like items, the currently-active one has a checkmark or filled dot prefix. Tapping another item switches theme and updates the checkmark. Menu closes automatically.
+This reorders the existing menu items. The previous order was: Cancel all → Bell → Logout. The new order groups settings (theme, bell) at the top and actions (cancel, logout) at the bottom. Rationale: settings are adjusted more frequently during a session and grouping them together provides a clearer information hierarchy — passive configuration first, destructive actions last.
 
-**FR-2b.** The user's selection is persisted client-side in `localStorage` under key `nautiloop_theme` with values `"system"`, `"dark"`, or `"light"`. Default (first visit or cleared storage) is `"system"`.
+Visual style: three radio-button-like items, the currently-active one has a checkmark or filled dot prefix. Tapping another item switches theme and updates the checkmark. The theme section is visually separated from other menu items with a `<hr>` or border. Menu closes automatically after theme selection (see FR-2e for close behavior).
+
+Accessibility: use either native `<input type="radio">` elements within a `<fieldset>` (with a `<legend>` for the "Theme" label) or styled `<button>` elements with `role="radiogroup"` / `role="radio"` and `aria-checked` attributes. This ensures keyboard navigation (arrow keys cycle options, Tab moves focus in/out of the group) and screen-reader announcements. Plain styled `<div>` or `<span>` elements without ARIA roles are not acceptable.
+
+**FR-2b.** The user's selection is persisted client-side in `localStorage` under key `nautiloop_theme` with values `"system"`, `"dark"`, or `"light"`. Default (first visit or cleared storage) is `"system"`. This follows the same `nautiloop_*` naming convention as the existing `nautiloop_bell` key.
 
 **FR-2c.** Theme resolution at page load:
 - Read `localStorage.nautiloop_theme`.
 - If `"dark"` or `"light"`: set `<html data-theme="dark|light">` before CSS parses to prevent a flash.
 - If `"system"` or missing: leave `data-theme` unset; let `prefers-color-scheme` media queries apply.
 
-**FR-2d.** CSS structure: `:root { --bg: ...light... }` for the default/light base, `@media (prefers-color-scheme: dark) { :root { --bg: ...dark... } }` for system-auto-dark, and `[data-theme="dark"] { --bg: ...dark... }` / `[data-theme="light"] { --bg: ...light... }` overrides that win over media queries. Dark values are specified once and reused across both the media query and the `data-theme="dark"` selector (CSS variables or a `:where()` grouping).
+**FR-2d.** CSS structure: keep dark as the `:root` default (matching the current CSS structure). Add explicit `[data-theme]` selectors that override the media query:
 
-**FR-2e.** The toggle's JavaScript lives in the embedded `dashboard.js`. ~30 lines: click handler sets `data-theme` attribute, writes localStorage, updates the menu's active-item indicator. No theme-switching library.
+```css
+/* Default: dark */
+:root { --bg: #0F0F0E; ... }
 
-**FR-2f.** The pre-parse flash prevention: a 5-line inline `<script>` in the HTML `<head>` reads localStorage and sets `data-theme` before body renders. Must ship before any CSS or other JS runs.
+/* System-auto light (existing media query) */
+@media (prefers-color-scheme: light) {
+  :root { --bg: #FAFAF8; ... }
+}
+
+/* Explicit overrides — win over media queries */
+[data-theme="dark"] { --bg: #0F0F0E; ... }
+[data-theme="light"] { --bg: #FAFAF8; ... }
+```
+
+Additionally, include `color-scheme` declarations in the explicit override selectors so that native browser UI elements (scrollbars, checkboxes, select elements, form buttons) match the forced theme:
+
+```css
+[data-theme="dark"] { color-scheme: dark; --bg: #0F0F0E; ... }
+[data-theme="light"] { color-scheme: light; --bg: #FAFAF8; ... }
+```
+
+The existing `:root { color-scheme: dark light; }` remains as the system-auto fallback. Without these overrides, a user forcing `data-theme="light"` on a dark-OS system would see native controls (e.g., the bell checkbox, logout button) rendered in the OS-preferred dark style, clashing with the light palette.
+
+Duplication of the ~7–10 color variables across `:root` / `[data-theme="dark"]` and across `@media` / `[data-theme="light"]` is acceptable given the small count. A `:where()` grouping or CSS custom-property indirection may be used to reduce duplication but is not required — straightforward duplication is preferred over clever abstractions for this small a variable set.
+
+**FR-2e.** The toggle's JavaScript lives in the embedded `control-plane/assets/dashboard.js`. Follow the existing `initBell()` pattern: define an `initTheme()` function that reads the current `localStorage.nautiloop_theme` value, sets the active indicator in the menu, and attaches click handlers to the three theme radio items. Each click handler sets the `data-theme` attribute on `<html>`, writes `localStorage`, updates the menu's active-item indicator, and **explicitly closes the dropdown** (e.g., add the `hidden` class to `#menu-dropdown`). This explicit close is required because clicks inside the dropdown do not trigger the existing `document.onclick` outside-click handler. ~30 lines. No theme-switching library. `initTheme()` is called from the existing `init()` function alongside `initBell()`. The existing `dashboard.js` uses a compressed/minified coding style (single-line functions, short variable names); `initTheme()` should match this style for consistency.
+
+**FR-2f.** The pre-parse flash prevention: a 5-line inline `<script>` in the HTML `<head>` (in `control-plane/src/api/dashboard/render.rs`) reads localStorage and sets `data-theme` before body renders. Place the inline `<script>` immediately after `<meta>` tags and before the `<link rel="stylesheet">` tag in `<head>`. This ensures `data-theme` is set on `<html>` before the browser begins applying stylesheet rules. Since the template uses Maud macros, the inline script must be injected via `PreEscaped()` to emit raw JavaScript without HTML escaping.
 
 ### FR-3: Dashboard status-line + card contrast tune-up
 
-**FR-3a.** The fleet summary line in the header currently uses `color: var(--muted)`. Change to `color: var(--text)` with `opacity: 0.85` OR to a new custom property `--text-secondary` defined as `#CFC9C3` in dark / `#2E2C28` in light. Rationale: the line is primary always-visible data, not decorative — muted is too recessed.
+**FR-3a.** The fleet summary line in the header currently uses `color: var(--text-secondary)`. Since FR-1a bumps `--text-secondary` from `#8A8784` to `#A29F9B`, the summary line's contrast improves automatically. If that is still not prominent enough, change the summary line to use `color: var(--text-primary)` with `opacity: 0.85` instead. The implementor should judge visually after the FR-1a change and only apply the opacity approach if the bumped `--text-secondary` still feels recessed.
 
-**FR-3b.** Card metadata rows (engineer badge, elapsed time, token count) use `--muted` today; leave unchanged — they're genuinely secondary.
+**FR-3b.** Card metadata rows (engineer badge, elapsed time, token count) use `--text-secondary` today; leave unchanged — they're genuinely secondary and benefit from the FR-1a bump.
 
-**FR-3c.** Convergence-badge colors on cards (`--green` for CONVERGED, `--red` for FAILED) should pass 4.5:1 against both `--surface` variants. Verify the helm-aligned greens/reds meet this. If the new `--green` is too dark to pass contrast on dark surface, use `#3A9A65` instead.
+**FR-3c.** Convergence-badge colors on cards (`--success` for CONVERGED, `--error` for FAILED) should pass 4.5:1 against both `--surface` variants (dark: `#1A1918`, light: `#F0EFED`). Verify:
+- `--success` (`#2D7A4F`) against dark `--surface` (`#1A1918`): check passes 3:1 minimum for UI components. If it fails 4.5:1 for the badge text, apply a **per-element CSS override** on the badge (e.g., `.badge-converged { color: #3A9A65; }`) rather than changing the global `--success` variable — FR-1d requires dark-mode semantic variables to stay aligned with helm.
+- `--error` (`#C4392D`) against dark `--surface`: similarly verify, and if needed apply a per-element override (e.g., `.badge-failed { color: #D94A3F; }`) without changing the global `--error` variable.
+
+Document measured ratios.
 
 ## Non-Functional Requirements
 
@@ -116,6 +190,7 @@ No CSS framework, no theme library, no new JS runtime deps. Vanilla CSS custom p
 - URLs unchanged
 - Existing cookies unchanged
 - Existing endpoints unchanged
+- Existing `localStorage` keys (`nautiloop_bell`, `nf`) unchanged
 - A user with a pre-spec browser tab open will see the new colors on next refresh; no server-side coordination.
 
 ### NFR-3: Theme preference is per-browser, not per-user
@@ -136,12 +211,13 @@ New palette passes WCAG AA (4.5:1 for normal text, 3:1 for large text + UI compo
 
 A reviewer can verify by:
 
-1. **Contrast check**: open dashboard, compare header fleet-summary readability to `nemo helm` header. Side by side, they should feel the same weight. No more washed-out look.
+1. **Contrast check**: open dashboard, compare header fleet-summary readability to `nemo helm` header. Side by side, they should feel the same weight. No more washed-out look. Verify `--text-secondary` against `--bg` is >= 4.5:1 in both themes.
 2. **Manual theme toggle**: open `⋯` menu → see three theme options → pick `Light` → page immediately renders light → refresh page → still light (localStorage persistence).
 3. **System fallback**: pick `System` → page tracks OS preference. Toggle OS dark mode → dashboard follows.
 4. **No flash**: refresh page with `Dark` selected on an OS set to light mode. No light-to-dark flash at page-load; theme applied before first paint.
-5. **Helm consistency**: open `nemo helm` in one window, dashboard in another. Colors match.
-6. **Lighthouse**: accessibility score ≥ 90 for `/dashboard` route.
+5. **Light-mode helm consistency**: open `nemo helm` in one window with light theme, dashboard in another with Light selected. Layout colors match.
+6. **Lighthouse**: accessibility score >= 90 for `/dashboard` route.
+7. **Existing menu items preserved**: Bell toggle and Logout still work. Cancel-all still conditionally appears.
 
 ## Out of Scope
 
@@ -155,11 +231,30 @@ A reviewer can verify by:
 
 ## Files Likely Touched
 
-- `control-plane/assets/dashboard.css` — color values for dark/light + new `[data-theme]` selectors (FR-1, FR-2d).
-- `control-plane/assets/dashboard.js` — theme toggle click handler + localStorage (FR-2e).
-- `control-plane/src/api/dashboard/templates.rs` (or wherever the HTML is rendered) — inline `<script>` for flash prevention (FR-2f), new menu items in header `⋯` (FR-2a).
+- `control-plane/assets/dashboard.css` — bump `--text-secondary` dark value, align light-mode palette with helm, add `[data-theme="dark"]` and `[data-theme="light"]` selector blocks (FR-1, FR-2d).
+- `control-plane/assets/dashboard.js` — `initTheme()` function following the `initBell()` pattern, theme toggle click handlers + localStorage (FR-2e).
+- `control-plane/src/api/dashboard/render.rs` — inline `<script>` for flash prevention via Maud's `PreEscaped()` (FR-2f), new theme radio group in header `⋯` menu (FR-2a).
 - Tests / screenshots per NFR-5.
+
+## Helm Theme Source of Truth
+
+The authoritative color values are in `cli/src/commands/helm/themes.rs`. Key mappings between helm variable names and dashboard CSS variable names:
+
+| Helm name | Dashboard CSS variable |
+|---|---|
+| `bg` | `--bg` |
+| `surface` | `--surface` |
+| `border` | `--border` |
+| `text` | `--text-primary` |
+| `muted` | `--text-secondary` |
+| `teal` | `--primary` |
+| `amber` | `--accent` |
+| `green` | `--success` |
+| `red` | `--error` |
+| `blue` | `--info` |
+
+Dashboard-only variables with no helm equivalent: `--surface-raised`, `--text-tertiary`, `--primary-hover`, `--primary-muted`, `--accent-muted`, `--warning`.
 
 ## Baseline Branch
 
-`main` at PR #170 merge.
+`main` at HEAD after PR #171 merge (which added this spec's docs commit). PR #170 introduced the docs refresh; #171 added the spec document itself.

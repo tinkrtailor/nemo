@@ -8,7 +8,7 @@
   --surface-raised: #242322;
   --border: #2E2D2B;
   --text-primary: #E8E6E3;
-  --text-secondary: #8A8784;
+  --text-secondary: #A29F9B; /* bumped from #8A8784 for WCAG AA — verified 7.4:1 vs --bg #0F0F0E */
   --text-tertiary: #5C5A57;
 
   /* Brand */
@@ -47,14 +47,55 @@
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #F7F5F2;
-    --surface: #EDEAE6;
+    --bg: #FAFAF8;           /* aligned with helm light theme */
+    --surface: #F0EFED;      /* aligned with helm light theme */
     --surface-raised: #FFFFFF;
-    --border: #D9D6D0;
-    --text-primary: #1A1918;
-    --text-secondary: #5C5A57;
-    --text-tertiary: #8A8784;
+    --border: #D2D0CD;       /* aligned with helm light theme */
+    --text-primary: #1E1E1C; /* aligned with helm light theme */
+    --text-secondary: #5C5A57; /* verified 6.58:1 vs #FAFAF8, passes WCAG AA 4.5:1 */
+    --text-tertiary: #5C5A57;  /* bumped from #8A8784 (~3.5:1) to 6.58:1 vs #FAFAF8; same as --text-secondary (known limitation) */
   }
+}
+
+/* IMPORTANT: [data-theme] blocks must appear AFTER the @media query above to win by source order (both have specificity 0,1,0) */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0F0F0E;
+  --surface: #1A1918;
+  --surface-raised: #242322;
+  --border: #2E2D2B;
+  --text-primary: #E8E6E3;
+  --text-secondary: #A29F9B;
+  --text-tertiary: #5C5A57;
+  --primary: #1B6B5A;
+  --primary-hover: #237D6A;
+  --primary-muted: rgba(27,107,90,0.2);
+  --accent: #E8A838;
+  --accent-muted: rgba(232,168,56,0.2);
+  --success: #2D7A4F;
+  --warning: #C4841D;
+  --error: #C4392D;
+  --info: #3B7BC0;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #FAFAF8;
+  --surface: #F0EFED;
+  --surface-raised: #FFFFFF;
+  --border: #D2D0CD;
+  --text-primary: #1E1E1C;
+  --text-secondary: #5C5A57;
+  --text-tertiary: #5C5A57;
+  --primary: #1B6B5A;
+  --primary-hover: #237D6A;
+  --primary-muted: rgba(27,107,90,0.2);
+  --accent: #E8A838;
+  --accent-muted: rgba(232,168,56,0.2);
+  --success: #2D7A4F;
+  --warning: #C4841D;
+  --error: #C4392D;
+  --info: #3B7BC0;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -222,8 +263,22 @@ a:hover { color: var(--primary-hover); }
 }
 .badge-implementing, .badge-hardening, .badge-testing { background: var(--primary-muted); color: var(--primary); }
 .badge-reviewing { background: var(--accent-muted); color: var(--accent); }
-.badge-converged, .badge-hardened, .badge-shipped { background: rgba(45,122,79,0.2); color: var(--success); }
-.badge-failed { background: rgba(196,57,45,0.2); color: var(--error); }
+/* Badge contrast overrides — theme-aware per FR-3c.
+   Dark: #3A9A65 verified 5.0:1 vs #1A1918 (dark --surface). #E0564C verified 4.7:1 vs #1A1918.
+   Light: #2D7A4F verified 4.6:1 vs #F0EFED (light --surface). #C4392D verified 4.6:1 vs #F0EFED (passes AA 4.5:1). */
+.badge-converged, .badge-hardened, .badge-shipped { background: rgba(45,122,79,0.2); color: #3A9A65; }
+.badge-failed { background: rgba(196,57,45,0.2); color: #E0564C; }
+/* Light theme: revert badge text to semantic variables which pass 4.5:1 against light --surface */
+@media (prefers-color-scheme: light) {
+  :root .badge-converged, :root .badge-hardened, :root .badge-shipped { color: var(--success); }
+  :root .badge-failed { color: var(--error); }
+}
+[data-theme="light"] .badge-converged, [data-theme="light"] .badge-hardened, [data-theme="light"] .badge-shipped { color: var(--success); }
+[data-theme="light"] .badge-failed { color: var(--error); }
+/* Explicit dark overrides — needed when OS=light + data-theme="dark" so the media query
+   (specificity 0,1,1) doesn't revert dark badge colors back to insufficient-contrast semantic vars */
+[data-theme="dark"] .badge-converged, [data-theme="dark"] .badge-hardened, [data-theme="dark"] .badge-shipped { color: #3A9A65; }
+[data-theme="dark"] .badge-failed { color: #E0564C; }
 .badge-cancelled { background: rgba(92,90,87,0.2); color: var(--text-tertiary); }
 .badge-pending { background: rgba(59,123,192,0.2); color: var(--info); }
 .badge-awaiting-approval, .badge-paused, .badge-awaiting-reauth { background: rgba(196,132,29,0.2); color: var(--warning); }
@@ -670,6 +725,39 @@ a:hover { color: var(--primary-hover); }
 .menu-dropdown button:hover { background: var(--surface); }
 .menu-dropdown button.danger { color: var(--error); }
 .menu-dropdown button.danger:hover { background: rgba(196,57,45,0.1); }
+/* Theme radio group in menu */
+.theme-group {
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+.menu-section-label {
+  display: block;
+  padding: var(--sp-xs) var(--sp-md);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.theme-option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-xs);
+  width: 100%;
+  text-align: left;
+  padding: var(--sp-xs) var(--sp-md);
+  font-size: 0.8125rem;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.theme-option:hover { background: var(--surface); color: var(--text-primary); }
+.theme-option.active { color: var(--text-primary); }
+.theme-check { display: inline-block; width: 1em; text-align: center; }
+.menu-divider { border: none; border-top: 1px solid var(--border); margin: var(--sp-xs) 0; }
+
 .menu-toggle-label {
   display: flex;
   align-items: center;
