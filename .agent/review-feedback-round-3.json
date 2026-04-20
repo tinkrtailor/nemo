@@ -1,0 +1,53 @@
+{
+  "round": 3,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "security",
+      "file": "terraform/modules/nautiloop/k8s.tf",
+      "line": 478,
+      "description": "Shell injection via `var.judge_api_key` interpolated directly into a `remote-exec` inline shell command. If the API key contains shell metacharacters (`$(...)`, backticks, semicolons), they will be executed as arbitrary commands on the remote host. Every other secret in this file uses `base64encode()` to avoid this exact problem.",
+      "suggestion": "Use the same base64encode pattern as other secrets: construct a local YAML manifest with the secret data, then `echo '${base64encode(local.judge_creds_yaml)}' | base64 -d | kubectl apply -f -`."
+    },
+    {
+      "severity": "medium",
+      "category": "security",
+      "file": "dev/setup.sh",
+      "line": 142,
+      "description": "Shell injection risk: `NAUTILOOP_JUDGE_API_KEY` is interpolated into a JSON string inside a shell command. While the outer double-quotes protect against word splitting, command substitution (`$(...)`) and backtick expansion will still execute. An API key containing `$(rm -rf /)` or similar would be interpreted by the shell.",
+      "suggestion": "Use a heredoc or `printf` to construct the JSON, then pipe to `kubectl create secret --from-file`. Alternatively, use `jq -n --arg key \"$NAUTILOOP_JUDGE_API_KEY\" '{api_key: $key}'` to safely construct the JSON payload."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 1296,
+      "description": "Tests that call `std::env::set_var` / `std::env::remove_var` in `unsafe` blocks are unsound when run in parallel (Rust's default test runner is multi-threaded). Multiple tests mutate `NAUTILOOP_JUDGE_API_KEY` concurrently: `test_resolve_judge_api_key_from_env_var`, `test_resolve_judge_api_key_empty_env_var_ignored`, `test_resolve_judge_api_key_from_credentials_file`, etc. This causes data races and flaky test results.",
+      "suggestion": "Either (1) use `#[serial_test::serial]` on all env-var-mutating tests, or (2) refactor `resolve_judge_api_key` to accept an env-reader closure/trait so tests don't need to mutate process-global state, or (3) run these tests with `-- --test-threads=1`."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "control-plane/src/main.rs",
+      "description": "NFR-4 requires unit tests for main.rs initialization logic that picks the right driver constructor based on env/config/secret availability. No such tests exist. The driver selection logic (judge_enabled flag + resolve_judge_api_key) is only exercised in production, not in any test.",
+      "suggestion": "Extract the driver construction logic into a testable function (e.g., `build_loop_driver(config, store, dispatcher, git) -> Arc<ConvergentLoopDriver>`) and add unit tests covering the three branches: judge enabled + creds present, judge enabled + creds missing, judge disabled."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 569,
+      "description": "`judge_decision_total` is derived from `call_counts` which increments on every attempt (line 489), including failed API calls and parse failures. But the log line at 575 is only emitted on successful invocations. So the total includes failed attempts but operators only see it on success. The count may jump (e.g., from 1 to 4) if intermediate calls failed, which could confuse operators grepping for invocation rate.",
+      "suggestion": "Either rename to `judge_attempt_total` to be accurate, or maintain a separate successful-decision counter. Minor since the spec says 'after each invocation' which this satisfies."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "control-plane/src/loop_engine/judge.rs",
+      "line": 277,
+      "description": "The `unwrap_or_else` fallback in `DirectAnthropicClient::new` creates a client without the 30-second timeout if the builder fails. The builder failure is extremely unlikely (only fails with incompatible TLS backends), but a client without a timeout could hang indefinitely on a judge call, violating the 30s timeout requirement in FR-1d.",
+      "suggestion": "The `reqwest::Client::builder().timeout(...).build()` only fails in exotic TLS misconfiguration scenarios. Consider using `.expect()` instead since a client without timeout is arguably worse than panicking at startup."
+    }
+  ]
+}
