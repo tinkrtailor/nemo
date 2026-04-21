@@ -34,9 +34,9 @@
 |------|---------|
 | `images/base/Dockerfile` | Base agent image (FR-1 through FR-3) |
 | `images/base/nemo-agent-entry` | Agent entrypoint script (FR-4 through FR-13) |
-| `images/sidecar/main.go` | Auth sidecar binary (FR-14 through FR-23) |
-| `images/sidecar/go.mod` | Go module for sidecar |
-| `images/sidecar/Dockerfile` | Sidecar image build |
+| `sidecar/src/main.rs` | Auth sidecar binary entrypoint |
+| `sidecar/Cargo.toml` | Rust crate manifest for sidecar |
+| `sidecar/Dockerfile` | Sidecar image build |
 | `.nemo/prompts/implement.md` | Implement prompt template (FR-35) |
 | `.nemo/prompts/review.md` | Review prompt template (FR-36) |
 | `.nemo/prompts/spec-audit.md` | Spec audit prompt template (FR-37) |
@@ -103,12 +103,12 @@
 **Depends on:** Step 4
 **Blocks:** Step 6
 
-### Step 6: Auth Sidecar (Go)
+### Step 6: Auth Sidecar (Rust)
 
 **Why this first:** Separate binary, independent build
-**Files:** `images/sidecar/main.go`, `images/sidecar/go.mod`, `images/sidecar/Dockerfile`
-**Approach:** Single Go binary with three HTTP servers per FR-14-23
-**Tests:** Go unit tests
+**Files:** `sidecar/src/main.rs`, `sidecar/Cargo.toml`, `sidecar/Dockerfile`
+**Approach:** Rust sidecar binary with model proxy, git SSH proxy, egress logger, and health server per FR-14-23
+**Tests:** Rust unit and integration tests
 **Depends on:** nothing
 **Blocks:** Step 7
 

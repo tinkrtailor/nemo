@@ -165,7 +165,7 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
     //
     // The sidecar's /healthz handler returns 503 until ALL four proxy ports
     // (:9090 model, :9091 git SSH, :9092 egress, :9093 health) are listening,
-    // then flips to 200 (see `ready` atomic flag in images/sidecar/main.go).
+    // then flips to 200 once the sidecar marks itself fully ready.
     // So this probe genuinely gates the agent on full sidecar readiness, not
     // just on the health server having bound its own port.
     let startup_probe = Probe {
@@ -322,8 +322,7 @@ fn build_agent_env_vars(
         //
         // OPENAI_BASE_URL points at the sidecar's :9090 model proxy. The
         // sidecar reads /secrets/model-credentials/openai and OVERWRITES
-        // the Authorization header on every forwarded request (see
-        // modelProxyHandler in images/sidecar/main.go). So the real
+        // the Authorization header on every forwarded request. So the real
         // OpenAI Platform key never enters the agent container — the
         // agent sends a placeholder, the sidecar swaps in the real key.
         //

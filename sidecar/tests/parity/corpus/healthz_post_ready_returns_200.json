@@ -1,9 +1,0 @@
-{
-  "name": "healthz_post_ready_returns_200",
-  "category": "health",
-  "description": "GET /healthz after readiness must return 200 {\"status\":\"ok\"} on both sidecars",
-  "input": {
-    "method": "GET"
-  },
-  "expected_parity": true
-}

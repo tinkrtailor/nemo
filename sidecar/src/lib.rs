@@ -1,7 +1,6 @@
-//! Nautiloop auth sidecar — Rust rewrite of the Go implementation at
-//! `images/sidecar/main.go`.
+//! Nautiloop auth sidecar.
 //!
-//! See `specs/rust-sidecar.md` for the full requirements. The library
+//! The library
 //! surface exists so unit tests can exercise the modules without spinning
 //! up the full binary.
 //!

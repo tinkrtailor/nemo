@@ -2691,35 +2691,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nautiloop-sidecar-parity-harness"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "bytes",
- "chrono",
- "clap",
- "futures",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "ipnet",
- "reqwest",
- "russh",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
 name = "nemo-cli"
 version = "0.7.9"
 dependencies = [

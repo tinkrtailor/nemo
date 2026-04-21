@@ -25,7 +25,7 @@ const EGRESS_PORT: u16 = 9092;
 const HEALTH_PORT: u16 = 9093;
 const PARITY_BIND_ALL_INTERFACES_ENV: &str = "NAUTILOOP_BIND_ALL_INTERFACES";
 
-/// Graceful shutdown budget. Matches Go `main.go:826`.
+/// Graceful shutdown budget for tracked long-lived connections.
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {

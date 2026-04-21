@@ -13,13 +13,12 @@
 //! `/secrets/ssh-known-hosts/known_hosts` (mandatory — no bypass), and
 //! pipe stdin/stdout/stderr bidirectionally until the command completes.
 //!
-//! The three Go bugs this implementation fixes (documented in the spec):
+//! Key SSH proxy invariants:
 //!
 //! 1. Bare `git-upload-pack` with no repo argument is rejected with
-//!    exit status 1 (Go at `main.go:479` only validated when `len(parts)
-//!    == 2`).
+//!    exit status 1.
 //! 2. Upstream SSH user is always `git` regardless of `GIT_REPO_URL`
-//!    userinfo (fix for parity with FR-14).
+//!    userinfo.
 //! 3. Connection errors in upstream dial propagate exit status 1 to the
 //!    agent rather than hanging indefinitely (10s connect timeout per
 //!    FR-28).
@@ -223,13 +222,11 @@ pub enum ExecParseError {
 /// follows:
 ///
 /// - [`ExecParseError::InvalidUtf8`]: reject the request via
-///   `session.channel_failure(channel)` (no exit status) — mirrors
-///   Go's behaviour on malformed exec payloads at `main.go:456`.
+///   `session.channel_failure(channel)` (no exit status).
 /// - [`ExecParseError::Empty`]: same as above.
 /// - [`ExecParseError::NotAllowed`] or
 ///   [`ExecParseError::MissingRepoPath`]: send exit status 1 via
-///   `session.exit_status_request(channel, 1)` (matches Go at
-///   `main.go:471` and fixes the bare-exec bypass).
+///   `session.exit_status_request(channel, 1)`.
 pub fn parse_exec(data: &[u8]) -> Result<ExecParsed, ExecParseError> {
     let full = std::str::from_utf8(data).map_err(|_| ExecParseError::InvalidUtf8)?;
     if full.is_empty() {
@@ -619,8 +616,7 @@ impl server::Handler for GitSshHandler {
         let parsed = match parse_exec(data) {
             Ok(p) => p,
             Err(ExecParseError::InvalidUtf8) | Err(ExecParseError::Empty) => {
-                // Malformed payload — matches Go's silent failure at
-                // main.go:456.
+                // Malformed payloads are rejected without an exit status.
                 session.channel_failure(channel)?;
                 return Ok(());
             }

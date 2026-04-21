@@ -1,9 +1,0 @@
-{
-  "name": "healthz_head_method_parity",
-  "category": "health",
-  "description": "HEAD /healthz after readiness: both sidecars' mux do not method-check so both return 200",
-  "input": {
-    "method": "HEAD"
-  },
-  "expected_parity": true
-}

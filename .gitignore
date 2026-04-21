@@ -36,17 +36,6 @@ node_modules/
 !.env.1password
 !terraform/.env.1password
 
-# Parity harness test fixtures are TEST-ONLY, hermetic, and committed
-# on purpose (see specs/sidecar-parity-harness.md SR-1..SR-9 and the
-# loud warnings in sidecar/tests/parity/fixtures/test-ca/README.md).
-# The un-ignore patterns here are intentionally narrow so real
-# production secrets cannot slip into this tree.
-!sidecar/tests/parity/fixtures/**/*.pem
-!sidecar/tests/parity/fixtures/**/*.key
-# Python bytecode caches generated when running the mock services
-# locally — keep these out of the tree.
-sidecar/tests/parity/fixtures/**/__pycache__/
-
 # Terraform
 terraform/.terraform/
 terraform/**/.terraform/

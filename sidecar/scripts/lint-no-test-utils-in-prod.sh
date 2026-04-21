@@ -15,17 +15,11 @@
 #    feature combined with cargo build / install / release run.
 #
 # 2. (FR-28) The "extra CA bundle" escape-hatch env var used by the
-#    Rust sidecar's TLS layer must only appear in the two files
-#    named by SR-5:
-#       - sidecar/tests/parity/docker-compose.yml
-#       - .github/workflows/parity.yml
-#    Any other reference inside a file type that could actually
-#    propagate it into a running container (Dockerfile / YAML /
-#    shell / .env / Terraform / HCL) is a lint failure.
+#    Rust sidecar's TLS layer must not appear in runtime-propagation
+#    files at all. The old parity harness allowlist is gone.
 #
 # 3. The parity-only bind override env var follows the same rule: it
-#    may exist only in the parity compose/workflow files. Production
-#    manifests must never widen the sidecar listeners.
+#    must not appear in runtime-propagation files.
 #
 #    The env var names are intentionally built from fragments below so
 #    this script itself does not contain the literal tokens as a
@@ -84,12 +78,6 @@ SCOPED_PATHSPECS=(
   '*.hcl'
 )
 
-# Exactly two file exclusions per SR-5 / FR-28.
-ALLOWED_PATHS=(
-  ':!sidecar/tests/parity/docker-compose.yml'
-  ':!.github/workflows/parity.yml'
-)
-
 check_allowed_env_references() {
   local env_name="$1"
   local label="$2"
@@ -98,7 +86,7 @@ check_allowed_env_references() {
   pattern="^(?![[:space:]]*#).*${env_name}"
   matches=$(
     git grep -nP "$pattern" \
-      -- "${SCOPED_PATHSPECS[@]}" "${ALLOWED_PATHS[@]}" \
+      -- "${SCOPED_PATHSPECS[@]}" \
       2>/dev/null || true
   )
 
@@ -106,15 +94,11 @@ check_allowed_env_references() {
     echo "ERROR: ${env_name} referenced outside the parity allowlist (${label}):"
     echo "$matches"
     echo ""
-    echo "The only files allowed to reference this env var are:"
-    echo "  - sidecar/tests/parity/docker-compose.yml"
-    echo "  - .github/workflows/parity.yml"
-    echo ""
-    echo "Full-line comments in YAML / Dockerfile / shell are allowed,"
-    echo "but any non-comment reference inside a runtime-propagation"
-    echo "file type (Dockerfile / YAML / shell / .env / terraform / HCL)"
-    echo "is a violation. Rust/Go source and markdown docs are out"
-    echo "of scope because they cannot set env vars in a container."
+    echo "These env vars are no longer allowed in runtime-propagation files."
+    echo "Full-line comments in YAML / Dockerfile / shell are allowed, but"
+    echo "any non-comment reference inside Dockerfile / YAML / shell / .env /"
+    echo "terraform / HCL is a violation. Rust source and markdown docs are"
+    echo "out of scope because they cannot set env vars in a container."
     exit 1
   fi
 }

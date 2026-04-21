@@ -17,7 +17,7 @@ Current (spec-described, partly-implemented) state of judge auth:
 
 The real root cause: **the control-plane pod doesn't have a sidecar**, so the sidecar-based `JudgeModelClient` has nowhere to call. The solution introduced in #177 invented a new auth path to work around that. The correct solution is to give the control plane a sidecar.
 
-How agent pods do it (the pattern to copy): every agent Job pod has an `auth-sidecar` native init container (`restartPolicy: Always`) built from `images/sidecar/Dockerfile`. It:
+How agent pods do it (the pattern to copy): every agent Job pod has an `auth-sidecar` native init container (`restartPolicy: Always`) built from `sidecar/Dockerfile`. It:
 - Mounts `nautiloop-creds-<engineer>` Secret at `/secrets/model-credentials/`.
 - Listens on `localhost:9090`, proxies `/anthropic/v1/...` → `https://api.anthropic.com/v1/...`.
 - Reads the raw API key from `/secrets/model-credentials/anthropic` and injects it as `x-api-key` header.
