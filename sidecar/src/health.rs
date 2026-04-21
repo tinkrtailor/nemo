@@ -10,8 +10,7 @@
 //! - `200 OK` with body `{"status":"ok"}` after the startup readiness
 //!   verification has flipped the flag.
 //!
-//! Per FR-21 the handler accepts any HTTP method — matching Go's
-//! `mux.HandleFunc("/healthz", ...)` which does not method-check.
+//! Per FR-21 the handler accepts any HTTP method.
 //!
 //! Per FR-27 the `/healthz` endpoint does NOT drop to 503 on shutdown.
 
@@ -37,7 +36,6 @@ use tokio::sync::watch;
 use tokio::time::timeout;
 
 /// Default path of the readiness file for the agent entrypoint.
-/// Matches Go at `main.go:809`.
 pub const DEFAULT_READY_PATH: &str = "/tmp/shared/ready";
 
 /// Errors produced by the health endpoint server.

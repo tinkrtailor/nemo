@@ -27,7 +27,7 @@ This policy covers:
 
 - The Nautiloop control plane (`control-plane/`)
 - The CLI (`cli/`)
-- The auth sidecar (`images/sidecar/`)
+- The auth sidecar (`sidecar/`)
 - The Terraform module (`terraform/modules/nautiloop/`)
 - Agent base images (`images/base/`)
 

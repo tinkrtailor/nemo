@@ -5,9 +5,7 @@
 //! in the egress logger. FR-27 step 3 requires both to be tracked in a
 //! single wait group. This module owns that wait group.
 //!
-//! Go's implementation only tracks SSH sessions (see `images/sidecar/main.go:848`).
-//! Matching the spec's "improvement" note, we also track CONNECT
-//! tunnels.
+//! This tracker covers both SSH sessions and CONNECT tunnels.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

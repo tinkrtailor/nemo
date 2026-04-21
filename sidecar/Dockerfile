@@ -20,15 +20,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY control-plane/Cargo.toml control-plane/Cargo.toml
 COPY cli/Cargo.toml cli/Cargo.toml
 COPY sidecar/Cargo.toml sidecar/Cargo.toml
-COPY sidecar/tests/parity/Cargo.toml sidecar/tests/parity/Cargo.toml
-
-RUN mkdir -p control-plane/src cli/src sidecar/src sidecar/tests/parity/src && \
+RUN mkdir -p control-plane/src cli/src sidecar/src && \
     echo "fn main() {}" > control-plane/src/main.rs && \
     echo "" > control-plane/src/lib.rs && \
     echo "fn main() {}" > cli/src/main.rs && \
     echo "" > sidecar/src/lib.rs && \
-    echo "fn main() {}" > sidecar/src/main.rs && \
-    echo "fn main() {}" > sidecar/tests/parity/src/main.rs
+    echo "fn main() {}" > sidecar/src/main.rs
 
 RUN cargo build --release --package nautiloop-sidecar 2>/dev/null || true
 

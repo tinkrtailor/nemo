@@ -194,7 +194,7 @@ fi
 # -- Build: sidecar -----------------------------------------------------------
 
 if should_build "sidecar"; then
-    build_image "sidecar" "images/sidecar/Dockerfile" "images/sidecar"
+    build_image "sidecar" "sidecar/Dockerfile" "."
 fi
 
 # -- Summary ------------------------------------------------------------------
