@@ -19,13 +19,22 @@ use crate::git::GitOperations;
 use crate::state::StateStore;
 
 /// Cached stats entry: (window_key, stats_data, cached_at).
-pub type StatsCacheEntry = Option<(String, dashboard::render::StatsData, chrono::DateTime<chrono::Utc>)>;
+pub type StatsCacheEntry = Option<(
+    String,
+    dashboard::render::StatsData,
+    chrono::DateTime<chrono::Utc>,
+)>;
 
 /// Cached fleet summary + counts: (fleet_json, counts_json, full_fleet_summary, cached_at).
 /// Short TTL (10s) for the dashboard_state endpoint which is polled every 5s.
 /// The full `FleetSummary` is included so grid_page can use the cached data
 /// directly without recomputing (avoids LIMIT 10000 truncation on initial render).
-pub type FleetCacheEntry = Option<(dashboard::handlers::FleetSummaryJson, dashboard::handlers::CountsJson, dashboard::render::FleetSummary, chrono::DateTime<chrono::Utc>)>;
+pub type FleetCacheEntry = Option<(
+    dashboard::handlers::FleetSummaryJson,
+    dashboard::handlers::CountsJson,
+    dashboard::render::FleetSummary,
+    chrono::DateTime<chrono::Utc>,
+)>;
 
 /// Shared application state for all API handlers.
 #[derive(Clone)]
@@ -73,11 +82,15 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     match state.store.health_check().await {
         Ok(()) => (
             StatusCode::OK,
-            axum::Json(serde_json::json!({"status": "ok", "version": version, "build_info": build_info})),
+            axum::Json(
+                serde_json::json!({"status": "ok", "version": version, "build_info": build_info}),
+            ),
         ),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(serde_json::json!({"status": "degraded", "version": version, "build_info": build_info})),
+            axum::Json(
+                serde_json::json!({"status": "degraded", "version": version, "build_info": build_info}),
+            ),
         ),
     }
 }
@@ -110,13 +123,13 @@ fn build_routes(_state: AppState) -> Router<AppState> {
 mod tests {
     use super::*;
     use crate::config::NautiloopConfig;
+    use crate::error::NautiloopError;
     use crate::git::mock::MockGitOperations;
     use crate::state::memory::MemoryStateStore;
     use crate::state::{LoopFlag, StateStore};
     use crate::types::{
         EngineerCredential, LogEvent, LoopRecord, LoopState, MergeEvent, RoundRecord, SubState,
     };
-    use crate::error::NautiloopError;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -207,12 +220,7 @@ mod tests {
         async fn update_loop(&self, _: &LoopRecord) -> crate::error::Result<()> {
             unimplemented!()
         }
-        async fn set_loop_flag(
-            &self,
-            _: Uuid,
-            _: LoopFlag,
-            _: bool,
-        ) -> crate::error::Result<()> {
+        async fn set_loop_flag(&self, _: Uuid, _: LoopFlag, _: bool) -> crate::error::Result<()> {
             unimplemented!()
         }
         async fn set_current_sha(&self, _: Uuid, _: &str) -> crate::error::Result<()> {
@@ -254,10 +262,7 @@ mod tests {
         ) -> crate::error::Result<Vec<LogEvent>> {
             unimplemented!()
         }
-        async fn get_credentials(
-            &self,
-            _: &str,
-        ) -> crate::error::Result<Vec<EngineerCredential>> {
+        async fn get_credentials(&self, _: &str) -> crate::error::Result<Vec<EngineerCredential>> {
             unimplemented!()
         }
         async fn upsert_credential(&self, _: &EngineerCredential) -> crate::error::Result<()> {
@@ -346,7 +351,9 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
         assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
-        let build_info = json["build_info"].as_str().expect("build_info should be a string");
+        let build_info = json["build_info"]
+            .as_str()
+            .expect("build_info should be a string");
         assert!(!build_info.is_empty(), "build_info should not be empty");
     }
 
@@ -394,7 +401,9 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "degraded");
         assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
-        let build_info = json["build_info"].as_str().expect("build_info should be a string");
+        let build_info = json["build_info"]
+            .as_str()
+            .expect("build_info should be a string");
         assert!(!build_info.is_empty(), "build_info should not be empty");
     }
 }

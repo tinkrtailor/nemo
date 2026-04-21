@@ -13,14 +13,14 @@ use uuid::Uuid;
 
 use nautiloop_control_plane::config::NautiloopConfig;
 use nautiloop_control_plane::error::Result;
-use nautiloop_control_plane::git::mock::MockGitOperations;
 use nautiloop_control_plane::git::GitOperations;
+use nautiloop_control_plane::git::mock::MockGitOperations;
 use nautiloop_control_plane::k8s::mock::MockJobDispatcher;
 use nautiloop_control_plane::k8s::{JobDispatcher, JobStatus};
-use nautiloop_control_plane::loop_engine::judge::JudgeModelClient;
 use nautiloop_control_plane::loop_engine::ConvergentLoopDriver;
-use nautiloop_control_plane::state::memory::MemoryStateStore;
+use nautiloop_control_plane::loop_engine::judge::JudgeModelClient;
 use nautiloop_control_plane::state::StateStore;
+use nautiloop_control_plane::state::memory::MemoryStateStore;
 use nautiloop_control_plane::types::{LoopKind, LoopRecord, LoopState, RoundRecord, SubState};
 
 // ---------------------------------------------------------------------------
@@ -253,7 +253,8 @@ async fn setup_succeeded_job(dispatcher: &MockJobDispatcher, job_name: &str) {
 async fn setup_git_for_review(git: &MockGitOperations, branch: &str, current_sha: &str) {
     git.set_branch_sha(branch, current_sha).await;
     git.set_branch_sha("origin/main", "origin-main-sha").await;
-    git.add_file("specs/test.md", "# Test Spec\nSome content").await;
+    git.add_file("specs/test.md", "# Test Spec\nSome content")
+        .await;
 }
 
 /// Convenience wrapper: set up git mocks with the default `current_sha` ("aaa")
@@ -301,10 +302,7 @@ async fn test_review_exit_clean_converges() {
     let decisions = store.get_judge_decisions(record.id).await.unwrap();
     assert_eq!(decisions.len(), 1);
     assert_eq!(decisions[0].decision, "exit_clean");
-    assert_eq!(
-        decisions[0].loop_final_state.as_deref(),
-        Some("CONVERGED")
-    );
+    assert_eq!(decisions[0].loop_final_state.as_deref(), Some("CONVERGED"));
     assert!(decisions[0].loop_terminated_at.is_some());
 }
 
@@ -337,11 +335,13 @@ async fn test_review_exit_escalate_transitions_to_awaiting_approval() {
 
     let updated = store.get_loop(record.id).await.unwrap().unwrap();
     assert_eq!(updated.state, LoopState::AwaitingApproval);
-    assert!(updated
-        .failure_reason
-        .as_ref()
-        .unwrap()
-        .contains("escalated"));
+    assert!(
+        updated
+            .failure_reason
+            .as_ref()
+            .unwrap()
+            .contains("escalated")
+    );
 
     let decisions = store.get_judge_decisions(record.id).await.unwrap();
     assert_eq!(decisions.len(), 1);
@@ -376,11 +376,13 @@ async fn test_review_exit_fail_transitions_to_failed() {
 
     let updated = store.get_loop(record.id).await.unwrap().unwrap();
     assert_eq!(updated.state, LoopState::Failed);
-    assert!(updated
-        .failure_reason
-        .as_ref()
-        .unwrap()
-        .contains("fundamental spec contradiction"));
+    assert!(
+        updated
+            .failure_reason
+            .as_ref()
+            .unwrap()
+            .contains("fundamental spec contradiction")
+    );
 
     // Backfill should have fired
     let decisions = store.get_judge_decisions(record.id).await.unwrap();
@@ -427,7 +429,10 @@ async fn test_review_continue_dispatches_next_round() {
 
     // FR-3: Verify the hint is written into the feedback file
     let feedback_json = git
-        .read_file(".agent/review-feedback-round-2.json", "agent/alice/test-abc12345")
+        .read_file(
+            ".agent/review-feedback-round-2.json",
+            "agent/alice/test-abc12345",
+        )
         .await
         .unwrap();
     let feedback: serde_json::Value = serde_json::from_str(&feedback_json).unwrap();
@@ -479,10 +484,7 @@ async fn test_harden_exit_clean_converges_to_hardened() {
     let decisions = store.get_judge_decisions(record.id).await.unwrap();
     assert_eq!(decisions.len(), 1);
     assert_eq!(decisions[0].decision, "exit_clean");
-    assert_eq!(
-        decisions[0].loop_final_state.as_deref(),
-        Some("HARDENED")
-    );
+    assert_eq!(decisions[0].loop_final_state.as_deref(), Some("HARDENED"));
 }
 
 #[tokio::test]
@@ -546,11 +548,13 @@ async fn test_harden_exit_fail() {
     assert_eq!(new_state, LoopState::Failed);
 
     let updated = store.get_loop(record.id).await.unwrap().unwrap();
-    assert!(updated
-        .failure_reason
-        .as_ref()
-        .unwrap()
-        .contains("cannot converge"));
+    assert!(
+        updated
+            .failure_reason
+            .as_ref()
+            .unwrap()
+            .contains("cannot converge")
+    );
 
     let decisions = store.get_judge_decisions(record.id).await.unwrap();
     assert_eq!(decisions[0].loop_final_state.as_deref(), Some("FAILED"));
@@ -675,10 +679,7 @@ async fn test_fallback_at_max_rounds_matches_no_judge_behavior() {
 
     let mut record_without = make_reviewing_loop(15);
     record_without.id = Uuid::new_v4();
-    store_without
-        .create_loop(&record_without)
-        .await
-        .unwrap();
+    store_without.create_loop(&record_without).await.unwrap();
     store_without
         .create_round(&make_review_round_not_clean(record_without.id, 15))
         .await

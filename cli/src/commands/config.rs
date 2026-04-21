@@ -110,13 +110,10 @@ fn handle_get(
 
         let value = match key {
             "server_url" => Some(profile.server_url.clone()),
-            "api_key" => profile.api_key.as_ref().map(|k| {
-                if unmask {
-                    k.clone()
-                } else {
-                    redact_api_key(k)
-                }
-            }),
+            "api_key" => profile
+                .api_key
+                .as_ref()
+                .map(|k| if unmask { k.clone() } else { redact_api_key(k) }),
             "engineer" => {
                 if profile.engineer.is_empty() {
                     None
@@ -138,9 +135,7 @@ fn handle_get(
         }
     } else if is_root_key(key) {
         let value = match key {
-            "helm.desktop_notifications" => {
-                Some(config.helm.desktop_notifications.to_string())
-            }
+            "helm.desktop_notifications" => Some(config.helm.desktop_notifications.to_string()),
             "helm.theme" => config.helm.theme.clone(),
             "models.implementor" => config.models.implementor.clone(),
             "models.reviewer" => config.models.reviewer.clone(),
@@ -256,11 +251,7 @@ fn handle_set(config: &mut NemoConfig, kv: &str, profile_flag: Option<&str>) -> 
     }
 }
 
-fn display_config(
-    config: &NemoConfig,
-    profile_flag: Option<&str>,
-    unmask: bool,
-) -> Result<()> {
+fn display_config(config: &NemoConfig, profile_flag: Option<&str>, unmask: bool) -> Result<()> {
     // Try to resolve active profile
     let active_name = config.resolve_profile_name(profile_flag).ok();
 
@@ -325,11 +316,7 @@ fn display_config(
     println!("[models]");
     println!(
         "  implementor: {}",
-        config
-            .models
-            .implementor
-            .as_deref()
-            .unwrap_or("(not set)")
+        config.models.implementor.as_deref().unwrap_or("(not set)")
     );
     println!(
         "  reviewer: {}",

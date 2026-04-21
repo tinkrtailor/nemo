@@ -78,7 +78,11 @@ pub async fn start(
     }
     // Check for ".." as a path component (traversal), not as a substring.
     // This allows legitimate filenames containing ".." (e.g. "v2..final.md").
-    if req.spec_path.split('/').any(|seg| seg == ".." || seg == "." || seg.is_empty()) {
+    if req
+        .spec_path
+        .split('/')
+        .any(|seg| seg == ".." || seg == "." || seg.is_empty())
+    {
         return Err(NautiloopError::BadRequest(
             "spec_path must not contain '..', '.', or empty path segments".to_string(),
         ));
@@ -111,7 +115,8 @@ pub async fn start(
         }
         if stem.starts_with('.') {
             return Err(NautiloopError::BadRequest(
-                "spec_path filename must not be a hidden file (no leading '.' before '.md')".to_string(),
+                "spec_path filename must not be a hidden file (no leading '.' before '.md')"
+                    .to_string(),
             ));
         }
         if stem.ends_with(".md") {
@@ -258,7 +263,16 @@ pub async fn start(
     // Track whether push succeeded so cleanup can delete the remote branch if a later step fails.
     let mut pushed_to_remote = false;
     if spec_from_local {
-        match commit_spec_to_branch(&state, &req.engineer, &req.spec_path, &spec_content, &branch, loop_id).await {
+        match commit_spec_to_branch(
+            &state,
+            &req.engineer,
+            &req.spec_path,
+            &spec_content,
+            &branch,
+            loop_id,
+        )
+        .await
+        {
             Ok(new_sha) => {
                 branch_sha = new_sha;
                 pushed_to_remote = true;
@@ -951,10 +965,7 @@ pub async fn diff(
         .await?
         .ok_or(NautiloopError::LoopNotFound { id })?;
 
-    let default_branch = record
-        .resolved_default_branch
-        .as_deref()
-        .unwrap_or("main");
+    let default_branch = record.resolved_default_branch.as_deref().unwrap_or("main");
     let base_ref = format!("origin/{default_branch}");
 
     // FR-5d: truncate at 100KB
@@ -972,7 +983,8 @@ pub async fn diff(
             .filter(|r| r.round == round_num)
             .filter_map(|r| {
                 r.output.as_ref().and_then(|o| {
-                    o.get("new_sha").and_then(|v| v.as_str().map(|s| s.to_string()))
+                    o.get("new_sha")
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
                 })
             })
             .next_back();
@@ -990,7 +1002,8 @@ pub async fn diff(
                 .filter(|r| r.round == round_num - 1)
                 .filter_map(|r| {
                     r.output.as_ref().and_then(|o| {
-                        o.get("new_sha").and_then(|v| v.as_str().map(|s| s.to_string()))
+                        o.get("new_sha")
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
                     })
                 })
                 .next_back()
@@ -1248,8 +1261,7 @@ async fn commit_spec_to_branch(
         );
     }
     let engineer_name = engineer_name.unwrap_or_else(|| engineer.to_string());
-    let engineer_email =
-        engineer_email.unwrap_or_else(|| format!("{engineer}@nautiloop.dev"));
+    let engineer_email = engineer_email.unwrap_or_else(|| format!("{engineer}@nautiloop.dev"));
 
     let commit_message = format!("chore(spec): add {spec_path}");
 
@@ -1655,7 +1667,10 @@ mod tests {
         assert!(resp.branch.starts_with("agent/alice/local-only-"));
 
         // Verify the loop was stored
-        let loops = store.get_loops_for_engineer(Some("alice"), false, true).await.unwrap();
+        let loops = store
+            .get_loops_for_engineer(Some("alice"), false, true)
+            .await
+            .unwrap();
         assert_eq!(loops.len(), 1);
         assert_eq!(loops[0].spec_path, "specs/local-only.md");
 
@@ -1949,10 +1964,7 @@ mod tests {
             .await
             .unwrap();
         let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(err["error"]
-            .as_str()
-            .unwrap()
-            .contains("non-empty"));
+        assert!(err["error"].as_str().unwrap().contains("non-empty"));
     }
 
     #[tokio::test]
@@ -2010,7 +2022,12 @@ mod tests {
             .await
             .unwrap();
         let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(err["error"].as_str().unwrap().contains("empty path segments"));
+        assert!(
+            err["error"]
+                .as_str()
+                .unwrap()
+                .contains("empty path segments")
+        );
     }
 
     #[tokio::test]
@@ -2039,7 +2056,12 @@ mod tests {
             .await
             .unwrap();
         let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(err["error"].as_str().unwrap().contains("empty path segments"));
+        assert!(
+            err["error"]
+                .as_str()
+                .unwrap()
+                .contains("empty path segments")
+        );
     }
 
     #[tokio::test]
@@ -2068,7 +2090,12 @@ mod tests {
             .await
             .unwrap();
         let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(err["error"].as_str().unwrap().contains("empty or whitespace"));
+        assert!(
+            err["error"]
+                .as_str()
+                .unwrap()
+                .contains("empty or whitespace")
+        );
     }
 
     #[tokio::test]
@@ -2097,7 +2124,12 @@ mod tests {
             .await
             .unwrap();
         let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(err["error"].as_str().unwrap().contains("empty or whitespace"));
+        assert!(
+            err["error"]
+                .as_str()
+                .unwrap()
+                .contains("empty or whitespace")
+        );
     }
 
     #[tokio::test]
@@ -2211,7 +2243,10 @@ mod tests {
         assert_eq!(calls[0].content, "# Identity Test Spec");
         assert_eq!(calls[0].author_name, "Alice Smith");
         assert_eq!(calls[0].author_email, "alice@example.com");
-        assert_eq!(calls[0].commit_message, "chore(spec): add specs/identity-test.md");
+        assert_eq!(
+            calls[0].commit_message,
+            "chore(spec): add specs/identity-test.md"
+        );
     }
 
     #[tokio::test]
@@ -2419,9 +2454,7 @@ mod tests {
             app,
             Request::builder()
                 .method(http::Method::GET)
-                .uri(&format!(
-                    "/inspect?branch=agent/alice/test-abc12345"
-                ))
+                .uri("/inspect?branch=agent/alice/test-abc12345")
                 .body(Body::empty())
                 .unwrap(),
         )

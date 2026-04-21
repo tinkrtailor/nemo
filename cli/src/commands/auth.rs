@@ -106,22 +106,21 @@ pub async fn run(
         // For claude on macOS: if the disk file is missing but the keychain has a
         // fresh entry (Claude Code 2.x writes to keychain and only periodically
         // flushes to disk), use the keychain as a fallback rather than erroring.
-        let claude_keychain_fallback: Option<String> = if *provider == "claude"
-            && !std::path::Path::new(&cred_path).exists()
-        {
-            let now = crate::claude_creds::now_ms();
-            match crate::claude_creds::extract_from_keychain() {
-                Some(kc) if !crate::claude_creds::is_bundle_stale(&kc, now) => {
-                    eprintln!(
-                        "Note: no disk credentials at {cred_path}; using fresh keychain entry."
-                    );
-                    Some(kc)
+        let claude_keychain_fallback: Option<String> =
+            if *provider == "claude" && !std::path::Path::new(&cred_path).exists() {
+                let now = crate::claude_creds::now_ms();
+                match crate::claude_creds::extract_from_keychain() {
+                    Some(kc) if !crate::claude_creds::is_bundle_stale(&kc, now) => {
+                        eprintln!(
+                            "Note: no disk credentials at {cred_path}; using fresh keychain entry."
+                        );
+                        Some(kc)
+                    }
+                    _ => None,
                 }
-                _ => None,
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
         if !std::path::Path::new(&cred_path).exists() && claude_keychain_fallback.is_none() {
             if !json {
@@ -197,9 +196,8 @@ pub async fn run(
                 match file_content {
                     Ok(c) => c,
                     Err(e) => {
-                        let msg = format!(
-                            "could not read {provider} credentials at {cred_path}: {e}"
-                        );
+                        let msg =
+                            format!("could not read {provider} credentials at {cred_path}: {e}");
                         if !json {
                             eprintln!("Warning: {msg}");
                         }
@@ -237,9 +235,7 @@ pub async fn run(
             if trimmed.starts_with('{')
                 && serde_json::from_str::<serde_json::Value>(trimmed).is_err()
             {
-                let msg = format!(
-                    "{provider} credentials at {cred_path} contain malformed JSON"
-                );
+                let msg = format!("{provider} credentials at {cred_path} contain malformed JSON");
                 if !json {
                     eprintln!("Error: {msg}");
                 }
@@ -287,7 +283,9 @@ pub async fn run(
                 let msg = format!("Failed to register {provider} credentials: {e}");
                 if !json {
                     eprintln!("{msg}");
-                    eprintln!("  Credentials found locally at {cred_path} but could not be pushed.");
+                    eprintln!(
+                        "  Credentials found locally at {cred_path} but could not be pushed."
+                    );
                     eprintln!("  Ensure the control plane is reachable and your API key is valid.");
                 }
                 messages.push(msg);

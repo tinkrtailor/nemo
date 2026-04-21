@@ -14,10 +14,7 @@ const DASHBOARD: bool = false;
 
 /// Build the capabilities JSON from the live clap `Command` tree.
 pub fn run(cli_command: &Command) -> Result<()> {
-    let version = cli_command
-        .get_version()
-        .unwrap_or("unknown")
-        .to_string();
+    let version = cli_command.get_version().unwrap_or("unknown").to_string();
 
     let commands: Vec<String> = cli_command
         .get_subcommands()

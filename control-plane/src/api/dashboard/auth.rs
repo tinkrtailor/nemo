@@ -65,9 +65,11 @@ pub async fn dashboard_auth_middleware(
     if bearer_valid {
         let csrf_token = generate_csrf_token();
         // Extract engineer name before taking mutable borrow on extensions
-        let eng_name = extract_cookie_value(request.headers(), "nautiloop_engineer")
-            .map(|s| s.to_string());
-        request.extensions_mut().insert(CsrfToken(csrf_token.clone()));
+        let eng_name =
+            extract_cookie_value(request.headers(), "nautiloop_engineer").map(|s| s.to_string());
+        request
+            .extensions_mut()
+            .insert(CsrfToken(csrf_token.clone()));
         if let Some(eng) = eng_name {
             request.extensions_mut().insert(EngineerName(eng));
         }
@@ -82,9 +84,11 @@ pub async fn dashboard_auth_middleware(
 
     if cookie_valid {
         let csrf_token = generate_csrf_token();
-        let eng_name = extract_cookie_value(request.headers(), "nautiloop_engineer")
-            .map(|s| s.to_string());
-        request.extensions_mut().insert(CsrfToken(csrf_token.clone()));
+        let eng_name =
+            extract_cookie_value(request.headers(), "nautiloop_engineer").map(|s| s.to_string());
+        request
+            .extensions_mut()
+            .insert(CsrfToken(csrf_token.clone()));
         if let Some(eng) = eng_name {
             request.extensions_mut().insert(EngineerName(eng));
         }
@@ -143,10 +147,7 @@ fn set_csrf_cookie(response: &mut Response, csrf_token: &str) {
 /// Returns the **last** match when multiple cookies share the same name,
 /// which ensures we pick up the most recently set value (important for
 /// the CSRF token cookie that may accumulate across requests).
-pub fn extract_cookie_value<'a>(
-    headers: &'a axum::http::HeaderMap,
-    name: &str,
-) -> Option<&'a str> {
+pub fn extract_cookie_value<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
@@ -210,7 +211,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
-            "foo=bar; nautiloop_api_key=test123; baz=qux".parse().unwrap(),
+            "foo=bar; nautiloop_api_key=test123; baz=qux"
+                .parse()
+                .unwrap(),
         );
         assert_eq!(
             extract_cookie_value(&headers, "nautiloop_api_key"),

@@ -54,19 +54,19 @@ pub fn build_loop_driver_with(
 ) -> (Arc<ConvergentLoopDriver>, JudgeResolution) {
     if !config.orchestrator.judge_enabled {
         return (
-            Arc::new(ConvergentLoopDriver::new(store, dispatcher, git, config.clone())),
+            Arc::new(ConvergentLoopDriver::new(
+                store,
+                dispatcher,
+                git,
+                config.clone(),
+            )),
             JudgeResolution::Disabled,
         );
     }
 
     let model_client = Arc::new(judge::SidecarJudgeClient::new(sidecar_base_url));
-    let driver = ConvergentLoopDriver::with_judge(
-        store,
-        dispatcher,
-        git,
-        config.clone(),
-        model_client,
-    );
+    let driver =
+        ConvergentLoopDriver::with_judge(store, dispatcher, git, config.clone(), model_client);
     (
         Arc::new(driver),
         JudgeResolution::Enabled {
@@ -103,10 +103,8 @@ mod tests {
         let dispatcher: Arc<dyn JobDispatcher> = Arc::new(MockJobDispatcher::new());
         let git: Arc<dyn GitOperations> = Arc::new(MockGitOperations::new());
 
-        let (_, resolution) = build_loop_driver_with(
-            &config, store, dispatcher, git,
-            "http://localhost:9090",
-        );
+        let (_, resolution) =
+            build_loop_driver_with(&config, store, dispatcher, git, "http://localhost:9090");
         assert_eq!(resolution, JudgeResolution::Disabled);
     }
 
@@ -117,10 +115,8 @@ mod tests {
         let dispatcher: Arc<dyn JobDispatcher> = Arc::new(MockJobDispatcher::new());
         let git: Arc<dyn GitOperations> = Arc::new(MockGitOperations::new());
 
-        let (_, resolution) = build_loop_driver_with(
-            &config, store, dispatcher, git,
-            "http://localhost:9090",
-        );
+        let (_, resolution) =
+            build_loop_driver_with(&config, store, dispatcher, git, "http://localhost:9090");
         assert_eq!(
             resolution,
             JudgeResolution::Enabled {

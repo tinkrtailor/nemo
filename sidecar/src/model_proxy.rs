@@ -390,8 +390,10 @@ where
     };
 
     // Compute the upstream URI. In test mode, substitute base URLs from config.
-    let is_codex_oauth =
-        matches!(openai_credential.as_ref(), Some(OpenAiCredential::CodexOauth(_)));
+    let is_codex_oauth = matches!(
+        openai_credential.as_ref(),
+        Some(OpenAiCredential::CodexOauth(_))
+    );
 
     let uri_string = build_upstream_uri(
         &target,
@@ -406,8 +408,12 @@ where
     };
 
     // Determine host header value.
-    let host_header_value: String =
-        resolve_host_header(&target, openai_credential.as_ref(), is_codex_oauth, test_config);
+    let host_header_value: String = resolve_host_header(
+        &target,
+        openai_credential.as_ref(),
+        is_codex_oauth,
+        test_config,
+    );
 
     // For POST /v1/responses we must buffer the body to patch it before
     // forwarding. Two transforms are applied:
@@ -996,7 +1002,9 @@ const DEFAULT_INSTRUCTIONS: &str = "Follow the instructions provided in the inpu
 ///
 /// Returns the original bytes unchanged if the body is not valid JSON.
 fn patch_responses_body(bytes: Bytes, is_codex_oauth: bool) -> Bytes {
-    let Ok(mut payload) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes) else {
+    let Ok(mut payload) =
+        serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)
+    else {
         return bytes;
     };
     let mut modified = false;

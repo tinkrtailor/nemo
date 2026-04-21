@@ -6,9 +6,7 @@ use crate::error::{NautiloopError, Result};
 use crate::git::GitOperations;
 use crate::k8s::job_builder;
 use crate::k8s::{JobDispatcher, JobStatus};
-use crate::loop_engine::judge::{
-    self, JudgeDecision, JudgeModelClient, OrchestratorJudge,
-};
+use crate::loop_engine::judge::{self, JudgeDecision, JudgeModelClient, OrchestratorJudge};
 use crate::state::StateStore;
 use crate::types::verdict::{
     AuditVerdict, FeedbackFile, FeedbackSource, ReviewResultData, ReviewVerdict, TestOutput,
@@ -53,11 +51,8 @@ impl ConvergentLoopDriver {
         config: NautiloopConfig,
         model_client: Arc<dyn JudgeModelClient>,
     ) -> Self {
-        let judge = OrchestratorJudge::new(
-            config.orchestrator.clone(),
-            model_client,
-            store.clone(),
-        );
+        let judge =
+            OrchestratorJudge::new(config.orchestrator.clone(), model_client, store.clone());
         Self {
             store,
             dispatcher,
@@ -636,9 +631,7 @@ impl ConvergentLoopDriver {
                         match judge_decision {
                             Some(ref output) if output.decision == JudgeDecision::ExitClean => {
                                 // FR-7a: check DB for prior exit_clean (survives restarts)
-                                let already_used = self
-                                    .check_exit_clean_used(record.id)
-                                    .await;
+                                let already_used = self.check_exit_clean_used(record.id).await;
                                 if already_used {
                                     tracing::warn!(
                                         loop_id = %record.id,
@@ -662,10 +655,7 @@ impl ConvergentLoopDriver {
                                 record.active_job_name = None;
                                 record.failure_reason = Some(format!(
                                     "Judge escalated harden: {}",
-                                    output
-                                        .reasoning
-                                        .as_deref()
-                                        .unwrap_or("ambiguous findings")
+                                    output.reasoning.as_deref().unwrap_or("ambiguous findings")
                                 ));
                                 self.store.update_loop(record).await?;
                                 return Ok(LoopState::AwaitingApproval);
@@ -690,9 +680,7 @@ impl ConvergentLoopDriver {
                             // NFR-3: Only escalate to AwaitingApproval when the judge
                             // was actually invoked (judge_decision.is_some()). When judge
                             // is disabled or absent, preserve original direct-to-Failed behavior.
-                            if judge_decision.is_some()
-                                && !judge::has_blocking_issues(&v.issues)
-                            {
+                            if judge_decision.is_some() && !judge::has_blocking_issues(&v.issues) {
                                 record.state = LoopState::AwaitingApproval;
                                 record.sub_state = None;
                                 record.active_job_name = None;
@@ -962,9 +950,7 @@ impl ConvergentLoopDriver {
             });
 
         match verdict {
-            Some(v) if v.clean => {
-                self.converge_review_clean(record).await
-            }
+            Some(v) if v.clean => self.converge_review_clean(record).await,
             Some(v) => {
                 // Review found issues — invoke the orchestrator judge (FR-1a)
                 let recurring = judge::detect_recurring_findings(&rounds, &v.issues, record.round);
@@ -976,9 +962,7 @@ impl ConvergentLoopDriver {
                 match judge_decision {
                     Some(ref output) if output.decision == JudgeDecision::ExitClean => {
                         // FR-7a: check DB for prior exit_clean (survives restarts)
-                        let already_used = self
-                            .check_exit_clean_used(record.id)
-                            .await;
+                        let already_used = self.check_exit_clean_used(record.id).await;
                         if already_used {
                             tracing::warn!(
                                 loop_id = %record.id,
@@ -1034,9 +1018,7 @@ impl ConvergentLoopDriver {
                     // NFR-3: Only escalate to AwaitingApproval when the judge
                     // was actually invoked (judge_decision.is_some()). When judge
                     // is disabled or absent, preserve original direct-to-Failed behavior.
-                    if judge_decision.is_some()
-                        && !judge::has_blocking_issues(&v.issues)
-                    {
+                    if judge_decision.is_some() && !judge::has_blocking_issues(&v.issues) {
                         record.state = LoopState::AwaitingApproval;
                         record.sub_state = None;
                         record.active_job_name = None;
@@ -1118,20 +1100,14 @@ impl ConvergentLoopDriver {
                 tracing::warn!(loop_id = %record.id, error = %e, "Failed to clean up .agent/ artifacts, proceeding with PR");
             }
 
-            let pr_title =
-                format!("feat(agent): {} for {}", record.spec_path, record.engineer,);
+            let pr_title = format!("feat(agent): {} for {}", record.spec_path, record.engineer,);
             let pr_body = format!(
                 "Automated convergence loop completed in {} round(s).\n\nSpec: {}\nBranch: {}",
                 record.round, record.spec_path, record.branch,
             );
             let pr_url = self
                 .git
-                .create_pr(
-                    &record.branch,
-                    &pr_title,
-                    &pr_body,
-                    &default_branch,
-                )
+                .create_pr(&record.branch, &pr_title, &pr_body, &default_branch)
                 .await?;
             record.spec_pr_url = Some(pr_url);
             self.store.update_loop(record).await?;
@@ -1147,9 +1123,8 @@ impl ConvergentLoopDriver {
                             record.state = LoopState::Converged;
                             record.sub_state = None;
                             record.active_job_name = None;
-                            record.failure_reason = Some(
-                                "CI checks failed. PR created but not merged.".to_string(),
-                            );
+                            record.failure_reason =
+                                Some("CI checks failed. PR created but not merged.".to_string());
                             self.store.update_loop(record).await?;
                             return Ok(LoopState::Converged);
                         }
@@ -1268,12 +1243,7 @@ impl ConvergentLoopDriver {
             );
             let pr_url = self
                 .git
-                .create_pr(
-                    &record.branch,
-                    &pr_title,
-                    &pr_body,
-                    &default_branch,
-                )
+                .create_pr(&record.branch, &pr_title, &pr_body, &default_branch)
                 .await?;
             record.spec_pr_url = Some(pr_url);
 
@@ -1347,11 +1317,7 @@ impl ConvergentLoopDriver {
         });
 
         // FR-2: Load spec content for the judge to evaluate functional requirements
-        let spec_content = match self
-            .git
-            .read_file(&record.spec_path, &record.branch)
-            .await
-        {
+        let spec_content = match self.git.read_file(&record.spec_path, &record.branch).await {
             Ok(content) => Some(content),
             Err(e) => {
                 tracing::warn!(

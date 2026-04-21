@@ -6,9 +6,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::api_types::LoopSummary;
 use super::is_terminal_state;
 use super::themes::Theme;
+use crate::api_types::LoopSummary;
 
 /// Render the multi-loop split view (FR-6).
 /// Splits the area horizontally into N slots showing recent log lines per loop.
@@ -37,9 +37,7 @@ pub fn render(
             Block::default()
                 .title(Span::styled(
                     " multi-loop view ",
-                    Style::default()
-                        .fg(theme.text)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                 ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.border).bg(theme.surface))
@@ -51,9 +49,7 @@ pub fn render(
     }
 
     let n = active_loops.len();
-    let constraints: Vec<Constraint> = (0..n)
-        .map(|_| Constraint::Ratio(1, n as u32))
-        .collect();
+    let constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
 
     let slots = Layout::default()
         .direction(Direction::Vertical)
@@ -78,7 +74,12 @@ pub fn render(
                     .rev()
                     .take(visible)
                     .rev()
-                    .map(|line| Line::from(Span::styled(line.as_str().to_owned(), Style::default().fg(theme.text))))
+                    .map(|line| {
+                        Line::from(Span::styled(
+                            line.as_str().to_owned(),
+                            Style::default().fg(theme.text),
+                        ))
+                    })
                     .collect()
             }
             _ => vec![Line::from(Span::styled(
@@ -92,9 +93,7 @@ pub fn render(
                 Block::default()
                     .title(Span::styled(
                         title,
-                        Style::default()
-                            .fg(theme.teal)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
                     ))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.border).bg(theme.surface))
@@ -106,4 +105,3 @@ pub fn render(
         frame.render_widget(p, slots[i]);
     }
 }
-

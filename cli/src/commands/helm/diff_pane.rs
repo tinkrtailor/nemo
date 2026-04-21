@@ -49,9 +49,7 @@ pub fn render(
             Block::default()
                 .title(Span::styled(
                     " diff ",
-                    Style::default()
-                        .fg(theme.text)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                 ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.border).bg(theme.surface))

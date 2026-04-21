@@ -32,7 +32,9 @@ use crate::commands::{inspect, ps, status};
 use crate::config::HelmConfig;
 
 use self::actions::LoopCommand;
-use self::cost::{PricingConfig, calculate_loop_round_cost, format_cost, format_tokens, round_total_tokens};
+use self::cost::{
+    PricingConfig, calculate_loop_round_cost, format_cost, format_tokens, round_total_tokens,
+};
 use self::summary::approval_hints;
 use self::themes::{Theme, ThemeName};
 
@@ -59,7 +61,10 @@ enum AppEvent {
 
 /// Check if a loop state is terminal (shared across submodules).
 pub(crate) fn is_terminal_state(state: &str) -> bool {
-    matches!(state, "CONVERGED" | "FAILED" | "CANCELLED" | "HARDENED" | "SHIPPED")
+    matches!(
+        state,
+        "CONVERGED" | "FAILED" | "CANCELLED" | "HARDENED" | "SHIPPED"
+    )
 }
 
 /// Active main view (FR-5/FR-6/FR-9).
@@ -190,7 +195,9 @@ struct App {
 impl App {
     fn new(team_view: bool, helm_config: &HelmConfig, profile_name: String) -> Self {
         // Load theme from config (FR-8a)
-        let theme_name = helm_config.theme.as_deref()
+        let theme_name = helm_config
+            .theme
+            .as_deref()
             .and_then(|s| s.parse::<ThemeName>().ok())
             .unwrap_or(ThemeName::Dark);
 
@@ -324,7 +331,12 @@ impl App {
                         .next()
                         .unwrap_or(&loop_item.spec_path)
                         .to_string();
-                    Some((loop_item.loop_id, spec_name, new_state.clone(), loop_item.spec_pr_url.clone()))
+                    Some((
+                        loop_item.loop_id,
+                        spec_name,
+                        new_state.clone(),
+                        loop_item.spec_pr_url.clone(),
+                    ))
                 } else {
                     None
                 }
@@ -333,7 +345,8 @@ impl App {
 
         // Update previous_states
         for loop_item in &self.loops {
-            self.previous_states.insert(loop_item.loop_id, loop_item.state.clone());
+            self.previous_states
+                .insert(loop_item.loop_id, loop_item.state.clone());
         }
 
         // Now apply side effects
@@ -506,14 +519,12 @@ impl App {
         match self.main_view {
             MainView::RoundsTable => return self.handle_rounds_table_input(key),
             MainView::RoundDetail => return self.handle_round_detail_input(key),
-            MainView::Diff => {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('d') => return AppAction::EscapeView,
-                    KeyCode::PageUp | KeyCode::Char('b') => return AppAction::ScrollUp,
-                    KeyCode::PageDown | KeyCode::Char('f') => return AppAction::ScrollDown,
-                    _ => {}
-                }
-            }
+            MainView::Diff => match key.code {
+                KeyCode::Esc | KeyCode::Char('d') => return AppAction::EscapeView,
+                KeyCode::PageUp | KeyCode::Char('b') => return AppAction::ScrollUp,
+                KeyCode::PageDown | KeyCode::Char('f') => return AppAction::ScrollDown,
+                _ => {}
+            },
             MainView::MultiLoop => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('m')) {
                     return AppAction::EscapeView;
@@ -604,9 +615,11 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('R') => AppAction::EscapeView,
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.inspect.as_ref().is_some_and(|inspect| {
-                    self.rounds_table_selected + 1 < inspect.rounds.len()
-                }) {
+                if self
+                    .inspect
+                    .as_ref()
+                    .is_some_and(|inspect| self.rounds_table_selected + 1 < inspect.rounds.len())
+                {
                     self.rounds_table_selected += 1;
                 }
                 AppAction::None
@@ -642,7 +655,13 @@ enum StreamOutcome {
     Disconnected,
 }
 
-pub async fn run(client: &NemoClient, engineer: &str, team: bool, helm_config: &HelmConfig, profile_name: &str) -> Result<()> {
+pub async fn run(
+    client: &NemoClient,
+    engineer: &str,
+    team: bool,
+    helm_config: &HelmConfig,
+    profile_name: &str,
+) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -650,7 +669,15 @@ pub async fn run(client: &NemoClient, engineer: &str, team: bool, helm_config: &
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run_app(&mut terminal, client.clone(), engineer.to_string(), team, helm_config, profile_name.to_string()).await;
+    let result = run_app(
+        &mut terminal,
+        client.clone(),
+        engineer.to_string(),
+        team,
+        helm_config,
+        profile_name.to_string(),
+    )
+    .await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -681,7 +708,12 @@ async fn run_app(
     spawn_introspect_task(client.clone(), introspect_rx, event_tx.clone());
     spawn_diff_task(client.clone(), diff_rx, event_tx.clone());
     spawn_batch_inspect_task(client.clone(), loops_rx, event_tx.clone());
-    spawn_background_log_task(client.clone(), loops_tx.subscribe(), selection_tx.subscribe(), event_tx.clone());
+    spawn_background_log_task(
+        client.clone(),
+        loops_tx.subscribe(),
+        selection_tx.subscribe(),
+        event_tx.clone(),
+    );
 
     let mut app = App::new(team, helm_config, profile_name);
 
@@ -730,29 +762,28 @@ async fn run_app(
                     app.reset_logs();
                     let _ = selection_tx.send(app.current_log_selection());
                 }
-                AppAction::PanelToggle => {
-                    match app.side_panel {
-                        SidePanel::Introspect => {
-                            app.introspect = None;
-                            app.introspect_status = "Loading...".to_string();
-                            let _ = introspect_tx.send(app.selected_loop_id);
-                        }
-                        SidePanel::Inspect => {
-                            app.reset_inspect();
-                            let _ = inspect_tx.send(app.selected_branch());
-                            let _ = introspect_tx.send(None);
-                        }
-                        SidePanel::Closed => {
-                            let _ = introspect_tx.send(None);
-                        }
+                AppAction::PanelToggle => match app.side_panel {
+                    SidePanel::Introspect => {
+                        app.introspect = None;
+                        app.introspect_status = "Loading...".to_string();
+                        let _ = introspect_tx.send(app.selected_loop_id);
                     }
-                }
+                    SidePanel::Inspect => {
+                        app.reset_inspect();
+                        let _ = inspect_tx.send(app.selected_branch());
+                        let _ = introspect_tx.send(None);
+                    }
+                    SidePanel::Closed => {
+                        let _ = introspect_tx.send(None);
+                    }
+                },
                 AppAction::ViewSwitch(view) => {
                     app.main_view = view;
                     match view {
                         MainView::Diff => {
                             app.diff_scroll = 0;
-                            let diff_target = app.selected_loop().map(|l| (l.loop_id, l.branch.clone()));
+                            let diff_target =
+                                app.selected_loop().map(|l| (l.loop_id, l.branch.clone()));
                             if let Some((loop_id, branch)) = diff_target {
                                 app.diff_status = "Loading diff...".to_string();
                                 let _ = diff_tx.send(Some((loop_id, branch)));
@@ -768,12 +799,10 @@ async fn run_app(
                         _ => {}
                     }
                 }
-                AppAction::EscapeView => {
-                    match app.main_view {
-                        MainView::RoundDetail => app.main_view = MainView::RoundsTable,
-                        _ => app.main_view = MainView::Logs,
-                    }
-                }
+                AppAction::EscapeView => match app.main_view {
+                    MainView::RoundDetail => app.main_view = MainView::RoundsTable,
+                    _ => app.main_view = MainView::Logs,
+                },
                 AppAction::ThemeCycle => {
                     app.theme_name = app.theme_name.cycle();
                     app.set_status_flash(format!("theme: {}", app.theme_name.label()));
@@ -785,28 +814,24 @@ async fn run_app(
                         app.round_detail_scroll = 0;
                     }
                 }
-                AppAction::ScrollUp => {
-                    match app.main_view {
-                        MainView::Diff => {
-                            app.diff_scroll = app.diff_scroll.saturating_sub(10);
-                        }
-                        MainView::RoundDetail => {
-                            app.round_detail_scroll = app.round_detail_scroll.saturating_sub(5);
-                        }
-                        _ => {}
+                AppAction::ScrollUp => match app.main_view {
+                    MainView::Diff => {
+                        app.diff_scroll = app.diff_scroll.saturating_sub(10);
                     }
-                }
-                AppAction::ScrollDown => {
-                    match app.main_view {
-                        MainView::Diff => {
-                            app.diff_scroll = app.diff_scroll.saturating_add(10);
-                        }
-                        MainView::RoundDetail => {
-                            app.round_detail_scroll = app.round_detail_scroll.saturating_add(5);
-                        }
-                        _ => {}
+                    MainView::RoundDetail => {
+                        app.round_detail_scroll = app.round_detail_scroll.saturating_sub(5);
                     }
-                }
+                    _ => {}
+                },
+                AppAction::ScrollDown => match app.main_view {
+                    MainView::Diff => {
+                        app.diff_scroll = app.diff_scroll.saturating_add(10);
+                    }
+                    MainView::RoundDetail => {
+                        app.round_detail_scroll = app.round_detail_scroll.saturating_add(5);
+                    }
+                    _ => {}
+                },
                 AppAction::Trigger(command) => {
                     if let Some(loop_item) = app.selected_loop() {
                         // FR-3c: validate before sending
@@ -822,15 +847,19 @@ async fn run_app(
                             }
                         } else {
                             let loop_id = loop_item.loop_id;
-                            app.set_status_flash(format!("sending {} for {loop_id}", command.verb()));
+                            app.set_status_flash(format!(
+                                "sending {} for {loop_id}",
+                                command.verb()
+                            ));
                             match perform_loop_action(&client, command, loop_id).await {
                                 Ok(message) => {
                                     app.set_status_flash(message);
                                 }
                                 Err(error) => {
-                                    app.set_status_flash(
-                                        format!("{} failed for {loop_id}: {error}", command.verb()),
-                                    );
+                                    app.set_status_flash(format!(
+                                        "{} failed for {loop_id}: {error}",
+                                        command.verb()
+                                    ));
                                 }
                             }
 
@@ -848,9 +877,10 @@ async fn run_app(
                                     }
                                 }
                                 Err(error) => {
-                                    app.set_status_flash(
-                                        format!("{} sent, but refresh failed: {error}", command.verb()),
-                                    );
+                                    app.set_status_flash(format!(
+                                        "{} sent, but refresh failed: {error}",
+                                        command.verb()
+                                    ));
                                 }
                             }
                         }
@@ -1005,7 +1035,10 @@ async fn perform_loop_action(
         }
         LoopCommand::Extend => {
             let response: ExtendActionResponse = client
-                .post(&format!("/extend/{loop_id}"), &serde_json::json!({"add_rounds": 10}))
+                .post(
+                    &format!("/extend/{loop_id}"),
+                    &serde_json::json!({"add_rounds": 10}),
+                )
                 .await?;
             Ok(format!(
                 "extended {} by {} rounds (now {} max, {})",
@@ -1156,12 +1189,7 @@ fn spawn_introspect_task(
 
             // Debounce: after a change arrives, wait 300ms for additional rapid changes
             loop {
-                match tokio::time::timeout(
-                    Duration::from_millis(300),
-                    loop_id_rx.changed(),
-                )
-                .await
-                {
+                match tokio::time::timeout(Duration::from_millis(300), loop_id_rx.changed()).await {
                     Ok(Ok(())) => continue,
                     Ok(Err(_)) => {
                         if let Some(task) = current_task {
@@ -1755,14 +1783,20 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // FR-1: header summary
-            Constraint::Min(0),   // main content
+            Constraint::Min(0),    // main content
             Constraint::Length(1), // footer
         ])
         .split(frame.area());
 
     // FR-1: Header summary line
     // FR-5b: profile name portion uses dim/secondary text color
-    let header_text = summary::build_header(&app.loops, &app.all_inspect, &app.pricing, app.team_view, &app.profile_name);
+    let header_text = summary::build_header(
+        &app.loops,
+        &app.all_inspect,
+        &app.pricing,
+        app.team_view,
+        &app.profile_name,
+    );
     let bold_teal = Style::default().fg(theme.teal).add_modifier(Modifier::BOLD);
     let dim_style = Style::default().fg(theme.muted);
     // Split: "nautiloop · <profile>" from the rest; profile name gets dim style
@@ -1782,8 +1816,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     } else {
         Line::from(Span::styled(header_text, bold_teal))
     };
-    let header = Paragraph::new(header_line)
-        .style(Style::default().bg(theme.surface));
+    let header = Paragraph::new(header_line).style(Style::default().bg(theme.surface));
     frame.render_widget(header, root[0]);
 
     // Main content area
@@ -1820,41 +1853,51 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
                 MainView::RoundsTable => {
                     let is_harden = app.is_harden_loop();
                     let current_round = app.selected_loop().map(|l| l.round).unwrap_or(0);
-                    let current_stage = app.selected_loop().and_then(|l| l.current_stage.as_deref());
-                    let model_impl = app.selected_loop().and_then(|l| l.model_implementor.as_deref());
-                    let model_rev = app.selected_loop().and_then(|l| l.model_reviewer.as_deref());
-                    let table_widget = rounds_table::render_table(&rounds_table::RoundsTableConfig {
-                        inspect: app.inspect.as_ref(),
-                        inspect_status: &app.inspect_status,
-                        selected_row: app.rounds_table_selected,
-                        scroll: app.rounds_table_scroll,
-                        is_harden,
-                        current_round,
-                        current_stage,
-                        pricing: &app.pricing,
-                        model_implementor: model_impl,
-                        model_reviewer: model_rev,
-                        area: right[1],
-                        theme: &theme,
-                    });
+                    let current_stage =
+                        app.selected_loop().and_then(|l| l.current_stage.as_deref());
+                    let model_impl = app
+                        .selected_loop()
+                        .and_then(|l| l.model_implementor.as_deref());
+                    let model_rev = app
+                        .selected_loop()
+                        .and_then(|l| l.model_reviewer.as_deref());
+                    let table_widget =
+                        rounds_table::render_table(&rounds_table::RoundsTableConfig {
+                            inspect: app.inspect.as_ref(),
+                            inspect_status: &app.inspect_status,
+                            selected_row: app.rounds_table_selected,
+                            scroll: app.rounds_table_scroll,
+                            is_harden,
+                            current_round,
+                            current_stage,
+                            pricing: &app.pricing,
+                            model_implementor: model_impl,
+                            model_reviewer: model_rev,
+                            area: right[1],
+                            theme: &theme,
+                        });
                     frame.render_widget(table_widget, right[1]);
                 }
                 MainView::RoundDetail => {
                     if let Some(inspect) = &app.inspect
-                        && let Some(round) = inspect.rounds.get(app.rounds_table_selected) {
-                            let detail_widget = rounds_table::render_detail(
-                                &rounds_table::RoundDetailConfig {
-                                    round,
-                                    is_harden: app.is_harden_loop(),
-                                    pricing: &app.pricing,
-                                    model_implementor: app.selected_loop().and_then(|l| l.model_implementor.as_deref()),
-                                    model_reviewer: app.selected_loop().and_then(|l| l.model_reviewer.as_deref()),
-                                    scroll: app.round_detail_scroll,
-                                    area: right[1],
-                                    theme: &theme,
-                                },
-                            );
-                            frame.render_widget(detail_widget, right[1]);
+                        && let Some(round) = inspect.rounds.get(app.rounds_table_selected)
+                    {
+                        let detail_widget =
+                            rounds_table::render_detail(&rounds_table::RoundDetailConfig {
+                                round,
+                                is_harden: app.is_harden_loop(),
+                                pricing: &app.pricing,
+                                model_implementor: app
+                                    .selected_loop()
+                                    .and_then(|l| l.model_implementor.as_deref()),
+                                model_reviewer: app
+                                    .selected_loop()
+                                    .and_then(|l| l.model_reviewer.as_deref()),
+                                scroll: app.round_detail_scroll,
+                                area: right[1],
+                                theme: &theme,
+                            });
+                        frame.render_widget(detail_widget, right[1]);
                     }
                 }
                 MainView::MultiLoop => unreachable!(),
@@ -1894,7 +1937,10 @@ fn render_logs_with_side_panel(
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
                 .split(area);
-            frame.render_widget(render_logs(app, log_introspect[0], theme), log_introspect[0]);
+            frame.render_widget(
+                render_logs(app, log_introspect[0], theme),
+                log_introspect[0],
+            );
             frame.render_widget(render_introspect_pane(app, theme), log_introspect[1]);
         }
     }
@@ -1913,29 +1959,30 @@ fn render_loop_selector(app: &App, theme: &Theme) -> List<'static> {
                 let stage = loop_item.current_stage.as_deref().unwrap_or("-");
 
                 // FR-2: Add token and cost columns (per-round cost for accuracy)
-                let (tokens_str, cost_str) = if let Some(inspect_data) = app.all_inspect.get(&loop_item.loop_id) {
-                    let mut total_tokens = 0u64;
-                    let mut total_cost = 0.0f64;
-                    let mut any_priced = false;
-                    for round in &inspect_data.rounds {
-                        let (inp, out) = round_total_tokens(round);
-                        total_tokens += inp + out;
-                        if let Some(c) = calculate_loop_round_cost(
-                            &app.pricing,
-                            loop_item.model_implementor.as_deref(),
-                            loop_item.model_reviewer.as_deref(),
-                            round,
-                        ) {
-                            total_cost += c;
-                            any_priced = true;
+                let (tokens_str, cost_str) =
+                    if let Some(inspect_data) = app.all_inspect.get(&loop_item.loop_id) {
+                        let mut total_tokens = 0u64;
+                        let mut total_cost = 0.0f64;
+                        let mut any_priced = false;
+                        for round in &inspect_data.rounds {
+                            let (inp, out) = round_total_tokens(round);
+                            total_tokens += inp + out;
+                            if let Some(c) = calculate_loop_round_cost(
+                                &app.pricing,
+                                loop_item.model_implementor.as_deref(),
+                                loop_item.model_reviewer.as_deref(),
+                                round,
+                            ) {
+                                total_cost += c;
+                                any_priced = true;
+                            }
                         }
-                    }
-                    let tokens = format_tokens(total_tokens);
-                    let cost = format_cost(if any_priced { Some(total_cost) } else { None });
-                    (tokens, cost)
-                } else {
-                    ("-".to_string(), "-".to_string())
-                };
+                        let tokens = format_tokens(total_tokens);
+                        let cost = format_cost(if any_priced { Some(total_cost) } else { None });
+                        (tokens, cost)
+                    } else {
+                        ("-".to_string(), "-".to_string())
+                    };
 
                 let line = format!(
                     "{: <10} {: <18} {: <8} r{: <3} {: <7} {: <7} {}",
@@ -1992,7 +2039,9 @@ fn render_details(app: &App, theme: &Theme) -> Paragraph<'static> {
             Line::from(vec![
                 Span::styled(
                     format!("{:>8} ", "state"),
-                    Style::default().fg(theme.muted).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.muted)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     state_label(loop_item),
@@ -2001,10 +2050,22 @@ fn render_details(app: &App, theme: &Theme) -> Paragraph<'static> {
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
-            detail_line("stage", loop_item.current_stage.as_deref().unwrap_or("-"), theme),
-            detail_line("round", &format!("{}/{}", loop_item.round, loop_item.max_rounds), theme),
+            detail_line(
+                "stage",
+                loop_item.current_stage.as_deref().unwrap_or("-"),
+                theme,
+            ),
+            detail_line(
+                "round",
+                &format!("{}/{}", loop_item.round, loop_item.max_rounds),
+                theme,
+            ),
             detail_line("kind", &loop_item.kind, theme),
-            detail_line("job", loop_item.active_job_name.as_deref().unwrap_or("-"), theme),
+            detail_line(
+                "job",
+                loop_item.active_job_name.as_deref().unwrap_or("-"),
+                theme,
+            ),
             detail_line("branch", &loop_item.branch, theme),
             detail_line("loop", &loop_item.loop_id.to_string(), theme),
             detail_line("spec", &loop_item.spec_path, theme),
@@ -2012,7 +2073,9 @@ fn render_details(app: &App, theme: &Theme) -> Paragraph<'static> {
             Line::from(vec![
                 Span::styled(
                     format!("{:>8} ", "inspect"),
-                    Style::default().fg(theme.muted).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.muted)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(app.inspect_status.clone(), Style::default().fg(theme.muted)),
             ]),
@@ -2021,7 +2084,11 @@ fn render_details(app: &App, theme: &Theme) -> Paragraph<'static> {
         if let Some(inspect) = &app.inspect
             && let Some(round) = latest_round(inspect)
         {
-            lines.push(detail_line("latest", &format!("round {}", round.round), theme));
+            lines.push(detail_line(
+                "latest",
+                &format!("round {}", round.round),
+                theme,
+            ));
             for (label, round_summary) in round_stage_summaries(round) {
                 lines.push(detail_line(label, &round_summary, theme));
             }
@@ -2065,7 +2132,12 @@ fn render_logs(app: &App, area: Rect, theme: &Theme) -> Paragraph<'static> {
         app.logs
             .iter()
             .skip(skip)
-            .map(|line| Line::from(Span::styled(line.as_str().to_owned(), Style::default().fg(theme.text))))
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.as_str().to_owned(),
+                    Style::default().fg(theme.text),
+                ))
+            })
             .collect()
     };
 
@@ -2091,7 +2163,11 @@ fn render_inspect_pane(app: &App, theme: &Theme) -> Paragraph<'static> {
                 Span::styled("Branch ", Style::default().fg(theme.muted)),
                 Span::styled(inspect.branch.clone(), Style::default().fg(theme.text)),
                 Span::styled(
-                    format!("  {} round{}", inspect.rounds.len(), if inspect.rounds.len() == 1 { "" } else { "s" }),
+                    format!(
+                        "  {} round{}",
+                        inspect.rounds.len(),
+                        if inspect.rounds.len() == 1 { "" } else { "s" }
+                    ),
                     Style::default().fg(theme.muted),
                 ),
             ]),
@@ -2108,7 +2184,9 @@ fn render_inspect_pane(app: &App, theme: &Theme) -> Paragraph<'static> {
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!("  {label:>7} "),
-                        Style::default().fg(theme.muted).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.muted)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(round_summary, Style::default().fg(theme.text)),
                 ]));
@@ -2141,30 +2219,31 @@ fn render_inspect_pane(app: &App, theme: &Theme) -> Paragraph<'static> {
 
 fn render_introspect_pane(app: &App, theme: &Theme) -> Paragraph<'static> {
     let body = if let Some(snapshot) = &app.introspect {
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("Pod ", Style::default().fg(theme.muted)),
-                Span::styled(snapshot.pod_name.clone(), Style::default().fg(theme.text)),
-                Span::styled("  Phase ", Style::default().fg(theme.muted)),
-                Span::styled(
-                    snapshot.pod_phase.clone(),
-                    Style::default()
-                        .fg(if snapshot.pod_phase == "Running" {
-                            theme.green
-                        } else {
-                            theme.amber
-                        })
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-        ];
+        let mut lines = vec![Line::from(vec![
+            Span::styled("Pod ", Style::default().fg(theme.muted)),
+            Span::styled(snapshot.pod_name.clone(), Style::default().fg(theme.text)),
+            Span::styled("  Phase ", Style::default().fg(theme.muted)),
+            Span::styled(
+                snapshot.pod_phase.clone(),
+                Style::default()
+                    .fg(if snapshot.pod_phase == "Running" {
+                        theme.green
+                    } else {
+                        theme.amber
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])];
 
         match &snapshot.container_stats {
             Some(stats) => {
                 let mem_mib = stats.memory_bytes / (1024 * 1024);
                 lines.push(Line::from(vec![
                     Span::styled("CPU ", Style::default().fg(theme.muted)),
-                    Span::styled(format!("{}m", stats.cpu_millicores), Style::default().fg(theme.text)),
+                    Span::styled(
+                        format!("{}m", stats.cpu_millicores),
+                        Style::default().fg(theme.text),
+                    ),
                     Span::styled("  Mem ", Style::default().fg(theme.muted)),
                     Span::styled(format!("{mem_mib} MiB"), Style::default().fg(theme.text)),
                 ]));
@@ -2178,7 +2257,11 @@ fn render_introspect_pane(app: &App, theme: &Theme) -> Paragraph<'static> {
         }
 
         let wt = &snapshot.worktree;
-        let head = wt.head_sha.as_deref().map(|s| &s[..s.len().min(7)]).unwrap_or("-");
+        let head = wt
+            .head_sha
+            .as_deref()
+            .map(|s| &s[..s.len().min(7)])
+            .unwrap_or("-");
         let target_info = match (wt.target_dir_bytes, wt.target_dir_artifacts) {
             (Some(bytes), Some(arts)) => {
                 let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -2194,11 +2277,16 @@ fn render_introspect_pane(app: &App, theme: &Theme) -> Paragraph<'static> {
                     Some(n) => format!("  dirty={n}"),
                     None => "  dirty=?".to_string(),
                 },
-                Style::default().fg(
-                    if wt.uncommitted_files.unwrap_or(0) > 0 { theme.amber } else { theme.text }
-                ),
+                Style::default().fg(if wt.uncommitted_files.unwrap_or(0) > 0 {
+                    theme.amber
+                } else {
+                    theme.text
+                }),
             ),
-            Span::styled(format!("  target={target_info}"), Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("  target={target_info}"),
+                Style::default().fg(theme.muted),
+            ),
         ]));
 
         lines.push(Line::from(Span::styled("", Style::default())));
@@ -2208,7 +2296,9 @@ fn render_introspect_pane(app: &App, theme: &Theme) -> Paragraph<'static> {
                 "{:<5}{:<5}{:<6}{:<6}{}",
                 "PID", "PPID", "CPU%", "AGE", "COMMAND"
             ),
-            Style::default().fg(theme.muted).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
         )));
         for p in snapshot.processes.iter().take(10) {
             let age = if p.age_seconds >= 3600 {
@@ -2218,11 +2308,18 @@ fn render_introspect_pane(app: &App, theme: &Theme) -> Paragraph<'static> {
             } else {
                 format!("{}s", p.age_seconds)
             };
-            let cpu_color = if p.cpu_percent > 10.0 { theme.amber } else { theme.text };
+            let cpu_color = if p.cpu_percent > 10.0 {
+                theme.amber
+            } else {
+                theme.text
+            };
             lines.push(Line::from(vec![
                 Span::styled(format!("{:<5}", p.pid), Style::default().fg(theme.text)),
                 Span::styled(format!("{:<5}", p.ppid), Style::default().fg(theme.muted)),
-                Span::styled(format!("{:<6.1}", p.cpu_percent), Style::default().fg(cpu_color)),
+                Span::styled(
+                    format!("{:<6.1}", p.cpu_percent),
+                    Style::default().fg(cpu_color),
+                ),
                 Span::styled(format!("{:<6}", age), Style::default().fg(theme.text)),
                 Span::styled(
                     p.cmd.chars().take(40).collect::<String>(),
@@ -2398,10 +2495,16 @@ fn render_footer(app: &App, theme: &Theme) -> Paragraph<'static> {
 
     let mut spans = vec![
         Span::styled("mode ", Style::default().fg(theme.muted)),
-        Span::styled(mode, Style::default().fg(theme.blue).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            mode,
+            Style::default().fg(theme.blue).add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  "),
         Span::styled("view ", Style::default().fg(theme.muted)),
-        Span::styled(view_label, Style::default().fg(theme.blue).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            view_label,
+            Style::default().fg(theme.blue).add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  "),
         Span::styled(app.theme_name.label(), Style::default().fg(theme.muted)),
         Span::raw("   "),
@@ -2411,7 +2514,9 @@ fn render_footer(app: &App, theme: &Theme) -> Paragraph<'static> {
     if let Some(flash) = app.active_status_flash() {
         spans.push(Span::styled(
             flash.to_string(),
-            Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw("   "));
     }
@@ -2420,38 +2525,66 @@ fn render_footer(app: &App, theme: &Theme) -> Paragraph<'static> {
     if let Some(loop_item) = app.selected_loop() {
         let hints = approval_hints(loop_item);
         for (key, label) in hints {
-            spans.push(Span::styled(key, Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
-            spans.push(Span::styled(format!(" {label}  "), Style::default().fg(theme.muted)));
+            spans.push(Span::styled(
+                key,
+                Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                format!(" {label}  "),
+                Style::default().fg(theme.muted),
+            ));
         }
     }
 
     // Standard keybinds
     spans.extend([
-        Span::styled("q", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "q",
+            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" quit  ", Style::default().fg(theme.muted)),
-        Span::styled("j/k", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "j/k",
+            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" move  ", Style::default().fg(theme.muted)),
-        Span::styled("l", Style::default().fg(theme.blue).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "l",
+            Style::default().fg(theme.blue).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" src  ", Style::default().fg(theme.muted)),
-        Span::styled("d", Style::default().fg(theme.blue).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "d",
+            Style::default().fg(theme.blue).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" diff  ", Style::default().fg(theme.muted)),
-        Span::styled("m", Style::default().fg(theme.blue).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "m",
+            Style::default().fg(theme.blue).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" multi  ", Style::default().fg(theme.muted)),
-        Span::styled("R", Style::default().fg(theme.blue).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "R",
+            Style::default().fg(theme.blue).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" rounds  ", Style::default().fg(theme.muted)),
-        Span::styled("T", Style::default().fg(theme.blue).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "T",
+            Style::default().fg(theme.blue).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" theme", Style::default().fg(theme.muted)),
     ]);
 
-    Paragraph::new(Line::from(spans))
-        .style(Style::default().fg(theme.text).bg(theme.bg))
+    Paragraph::new(Line::from(spans)).style(Style::default().fg(theme.text).bg(theme.bg))
 }
 
 fn detail_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!("{label:>8} "),
-            Style::default().fg(theme.muted).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(value.to_string(), Style::default().fg(theme.text)),
     ])

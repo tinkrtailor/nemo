@@ -16,17 +16,10 @@ pub fn validate_profile_name(name: &str) -> Result<()> {
     }
     let first = name.as_bytes()[0];
     if !first.is_ascii_alphanumeric() {
-        anyhow::bail!(
-            "Profile name must start with a letter or digit, got '{name}'"
-        );
+        anyhow::bail!("Profile name must start with a letter or digit, got '{name}'");
     }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    {
-        anyhow::bail!(
-            "Profile name may only contain letters, digits, and hyphens, got '{name}'"
-        );
+    if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        anyhow::bail!("Profile name may only contain letters, digits, and hyphens, got '{name}'");
     }
     Ok(())
 }
@@ -98,9 +91,7 @@ impl NemoConfig {
         if let Some(name) = flag {
             if !self.profiles.contains_key(name) {
                 let available = self.profile_names_sorted().join(", ");
-                anyhow::bail!(
-                    "Profile '{name}' not found. Available: {available}."
-                );
+                anyhow::bail!("Profile '{name}' not found. Available: {available}.");
             }
             return Ok(name.to_string());
         }
@@ -111,9 +102,7 @@ impl NemoConfig {
             if !env_name.is_empty() {
                 if !self.profiles.contains_key(&env_name) {
                     let available = self.profile_names_sorted().join(", ");
-                    anyhow::bail!(
-                        "Profile '{env_name}' not found. Available: {available}."
-                    );
+                    anyhow::bail!("Profile '{env_name}' not found. Available: {available}.");
                 }
                 return Ok(env_name);
             }
@@ -220,12 +209,11 @@ pub fn load_config_with_migration() -> Result<(NemoConfig, bool)> {
         return Ok((NemoConfig::default(), false));
     }
 
-    let contents = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let contents =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
 
     // Parse as raw TOML to detect shape
-    let raw: toml::Value = toml::from_str(&contents)
-        .with_context(|| "config file is malformed")?;
+    let raw: toml::Value = toml::from_str(&contents).with_context(|| "config file is malformed")?;
     let raw_table = raw.as_table();
 
     let has_profiles = raw_table
@@ -258,8 +246,8 @@ pub fn load_config_with_migration() -> Result<(NemoConfig, bool)> {
     }
 
     // Migration: server_url at root, no profiles table
-    let legacy: LegacyConfig = toml::from_str(&contents)
-        .with_context(|| "config file is malformed")?;
+    let legacy: LegacyConfig =
+        toml::from_str(&contents).with_context(|| "config file is malformed")?;
 
     // Migrate: flat fields → [profiles.default]
     let server_url = legacy.server_url.unwrap_or_default();
@@ -345,25 +333,17 @@ pub fn save_config(config: &NemoConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::fs;
-    use std::path::Path;
-
-    /// Helper: set up a temp HOME with a config file.
-    fn setup_temp_config(content: &str) -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().unwrap();
-        let nemo_dir = tmp.path().join(".nemo");
-        fs::create_dir_all(&nemo_dir).unwrap();
-        fs::write(nemo_dir.join("config.toml"), content).unwrap();
-        tmp
-    }
 
     /// Helper: load config from a string (same logic as load_config_with_migration, sans file I/O).
     fn load_from_str(content: &str) -> Result<(NemoConfig, bool)> {
         let raw: toml::Value = toml::from_str(content)?;
         let raw_table = raw.as_table();
-        let has_profiles = raw_table.map(|t| t.contains_key("profiles")).unwrap_or(false);
-        let has_server_url = raw_table.map(|t| t.contains_key("server_url")).unwrap_or(false);
+        let has_profiles = raw_table
+            .map(|t| t.contains_key("profiles"))
+            .unwrap_or(false);
+        let has_server_url = raw_table
+            .map(|t| t.contains_key("server_url"))
+            .unwrap_or(false);
 
         if has_profiles {
             let mut config: NemoConfig = toml::from_str(content)?;
@@ -375,12 +355,15 @@ mod tests {
 
         if !has_server_url {
             let legacy: LegacyConfig = toml::from_str(content)?;
-            return Ok((NemoConfig {
-                profiles: BTreeMap::new(),
-                helm: legacy.helm.unwrap_or_default(),
-                models: legacy.models.unwrap_or_default(),
-                ..Default::default()
-            }, false));
+            return Ok((
+                NemoConfig {
+                    profiles: BTreeMap::new(),
+                    helm: legacy.helm.unwrap_or_default(),
+                    models: legacy.models.unwrap_or_default(),
+                    ..Default::default()
+                },
+                false,
+            ));
         }
 
         // Migrate
@@ -394,12 +377,15 @@ mod tests {
         };
         let mut profiles = BTreeMap::new();
         profiles.insert("default".to_string(), profile);
-        Ok((NemoConfig {
-            current_profile: Some("default".to_string()),
-            profiles,
-            helm: legacy.helm.unwrap_or_default(),
-            models: legacy.models.unwrap_or_default(),
-        }, true))
+        Ok((
+            NemoConfig {
+                current_profile: Some("default".to_string()),
+                profiles,
+                helm: legacy.helm.unwrap_or_default(),
+                models: legacy.models.unwrap_or_default(),
+            },
+            true,
+        ))
     }
 
     #[test]
@@ -498,8 +484,10 @@ desktop_notifications = true
 
     #[test]
     fn resolve_profile_flag_wins() {
-        let mut config = NemoConfig::default();
-        config.current_profile = Some("default".to_string());
+        let mut config = NemoConfig {
+            current_profile: Some("default".to_string()),
+            ..Default::default()
+        };
         config.profiles.insert(
             "default".to_string(),
             ProfileConfig {
@@ -541,8 +529,10 @@ desktop_notifications = true
 
     #[test]
     fn resolve_profile_dangling_reference() {
-        let mut config = NemoConfig::default();
-        config.current_profile = Some("gone".to_string());
+        let mut config = NemoConfig {
+            current_profile: Some("gone".to_string()),
+            ..Default::default()
+        };
         config.profiles.insert(
             "remaining".to_string(),
             ProfileConfig {
