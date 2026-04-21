@@ -90,6 +90,7 @@ module "nautiloop" {
 | `postgres_password` | no | auto-generated | Postgres password |
 | `postgres_volume_size` | no | `20` | Postgres volume size (Gi) |
 | `cache_volume_size` | no | `50` | Size of the shared `/cache` compiler cache PVC in GiB; used by sccache, ccache, npm, pnpm, yarn, bun, pip, turbo, go, and any tool configured via `[cache.env]` in nemo.toml. Deprecated alias: `cargo_cache_volume_size` (exists for one release cycle, then removed). |
+| `ssh_known_hosts` | no | `""` | SSH known_hosts entries for the git remote. If unset, the module runs `ssh-keyscan` and manages the `nautiloop-ssh-known-hosts` ConfigMaps automatically. |
 
 ## Module outputs
 
@@ -238,6 +239,18 @@ terraform apply \
 ```
 
 All three images must be updated together to avoid version skew.
+
+If you leave `ssh_known_hosts` unset, the module populates `nautiloop-ssh-known-hosts` from `ssh-keyscan` during apply. Older module versions could leave those ConfigMaps empty on upgrade. If you are recovering a cluster that was upgraded from an older release, patch both namespaces once, replacing `<git-host>` with your Git server host:
+
+```bash
+kubectl -n nautiloop-system create configmap nautiloop-ssh-known-hosts \
+  --from-literal="known_hosts=$(ssh-keyscan <git-host>)" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl -n nautiloop-jobs create configmap nautiloop-ssh-known-hosts \
+  --from-literal="known_hosts=$(ssh-keyscan <git-host>)" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
 
 ## Legacy: root terraform
 

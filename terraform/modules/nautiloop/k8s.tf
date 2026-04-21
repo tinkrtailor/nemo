@@ -188,7 +188,7 @@ metadata:
 data:
 ${local._judge_creds_data}
 YAML
-  judge_creds_yaml = (local._judge_has_claude || local._judge_has_anthropic) ? local._judge_creds_yaml_template : ""
+  judge_creds_yaml           = (local._judge_has_claude || local._judge_has_anthropic) ? local._judge_creds_yaml_template : ""
 
   # Registry creds (only rendered when image_pull_secret provided)
   _dockerconfigjson_b64 = var.image_pull_secret_dockerconfigjson != null ? base64encode(var.image_pull_secret_dockerconfigjson) : ""
@@ -223,6 +223,7 @@ metadata:
 data:
   git_repo_url: "${var.git_repo_url}"
   domain: "${local.has_domain ? var.domain : var.server_ip}"
+${var.ssh_known_hosts != "" ? <<-YAML
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -242,9 +243,11 @@ data:
   known_hosts: |
     ${indent(4, var.ssh_known_hosts)}
 YAML
+: ""}
+YAML
 
-  # RBAC: service accounts, roles, role bindings
-  rbac_yaml = <<-YAML
+# RBAC: service accounts, roles, role bindings
+rbac_yaml = <<-YAML
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -335,11 +338,11 @@ subjects:
     namespace: nautiloop-system
 YAML
 
-  # Networking: TLS mode (domain set) — cert-manager resources + IngressRoutes
-  # Always rendered; only applied when has_domain is true (via count on null_resource)
-  _acme_email         = var.acme_email != null ? var.acme_email : ""
-  _domain             = var.domain != null ? var.domain : ""
-  networking_tls_yaml = <<-YAML
+# Networking: TLS mode (domain set) — cert-manager resources + IngressRoutes
+# Always rendered; only applied when has_domain is true (via count on null_resource)
+_acme_email         = var.acme_email != null ? var.acme_email : ""
+_domain             = var.domain != null ? var.domain : ""
+networking_tls_yaml = <<-YAML
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -418,8 +421,8 @@ spec:
     - ${local._domain}
 YAML
 
-  # Networking: IP-only mode (no domain) — LoadBalancer service
-  networking_ip_yaml = <<-YAML
+# Networking: IP-only mode (no domain) — LoadBalancer service
+networking_ip_yaml = <<-YAML
 apiVersion: v1
 kind: Service
 metadata:
@@ -577,6 +580,7 @@ resource "null_resource" "ssh_keyscan" {
 
   triggers = {
     git_repo_url = var.git_repo_url
+    config_hash  = sha256(local.config_yaml)
   }
 
   provisioner "local-exec" {
