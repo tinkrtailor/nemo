@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "nautiloop-control-plane"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "nautiloop-sidecar"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "bytes",
  "chrono",
@@ -2721,7 +2721,7 @@ dependencies = [
 
 [[package]]
 name = "nemo-cli"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "anyhow",
  "chrono",
