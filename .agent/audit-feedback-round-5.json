@@ -1,0 +1,48 @@
+{
+  "round": 5,
+  "source": "audit",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "specs/nemo-profiles.md",
+      "description": "NFR-3 redaction format claim is factually incorrect. The spec states the format is 'first 4 + **** + last 4 (e.g., abc1****789z)' and claims 'This matches the current config.rs redaction behavior.' However, the current code in cli/src/commands/config.rs uses '...' as the separator (prefix...suffix), not '****'. An implementer following the spec literally would produce a different format than the existing --get behavior, creating inconsistency.",
+      "suggestion": "Either (a) change the spec redaction format to 'first 4 + ... + last 4' to truly match current behavior, or (b) explicitly state this is a deliberate change from the current '...' separator to '****' for the new profile-aware commands, and update the existing --get code to match. Pick one format and be explicit about whether it's a change."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/nemo-profiles.md",
+      "description": "FR-2a migration detection mechanism is unspecified. The spec says migration triggers when the config has 'flat server_url/api_key/etc. at the root (pre-profile shape)' but doesn't define the exact detection heuristic. For example: does the presence of a top-level 'server_url' key trigger migration? What if both 'server_url' and 'profiles' exist (partially migrated or hand-edited)? What if only 'engineer' exists at root but 'server_url' doesn't? The implementer needs a clear predicate.",
+      "suggestion": "Add a detection rule, e.g.: 'Migration triggers if the TOML root contains a server_url key AND does not contain a profiles table. If both exist, treat as already migrated (profiles wins). If neither exists (empty/new file), no migration needed.'"
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/nemo-profiles.md",
+      "description": "FR-6g changes exit behavior for --get on unset keys. Current code prints '(not set)' and exits 0 for missing api_key. The spec says 'print nothing and exit with code 1'. This is a breaking change for scripts that parse the output. Similarly, name/email change from String (empty string default) to Option<String>, so --get on a migrated profile with name='' would now exit 1 instead of printing an empty line. The spec doesn't acknowledge this as a behavioral change.",
+      "suggestion": "Add a note that this is a deliberate behavioral change from the current --get implementation, and document that scripts checking for '(not set)' output should switch to checking the exit code."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/nemo-profiles.md",
+      "description": "FR-6d changes name/email from String to Option<String>, but FR-2a migration doesn't specify how empty strings map. Current EngineerConfig has 'name: String' with #[serde(default)] (empty string). During migration, should name: '' become Some('') or None in the ProfileConfig? This affects FR-6g (--get exit code) and FR-3b (default copying from current profile). If Some(''), then --get name prints '' and exits 0; if None, it prints nothing and exits 1.",
+      "suggestion": "Add migration rule: 'Empty strings for name/email in the flat config are migrated as None (not Some(\"\")).' Or conversely: 'Empty strings are preserved as Some(\"\") — they are not equivalent to absent.' Either is fine, but the choice must be explicit."
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/nemo-profiles.md",
+      "description": "FR-6d contains template artifacts '{{SPEC}}' in the code example: 'NemoConfig::active_profile({{SPEC}}self) -> {{SPEC}}ProfileConfig'. These appear to be escaped '&' references that didn't render correctly.",
+      "suggestion": "Replace '{{SPEC}}' with '&' to show the correct Rust signatures: 'active_profile(&self) -> &ProfileConfig'."
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/nemo-profiles.md",
+      "description": "FR-6c integer coercion edge cases. 'Values that parse as integers are stored as integers' — what about negative integers, very large integers, or values like '0x1F'? Also, TOML has native integer support, so '123' stored as integer is fine, but edge cases like leading zeros ('007') or numeric strings that shouldn't be integers (port numbers in some contexts) could surprise users.",
+      "suggestion": "Consider restricting integer coercion to only the keys where it makes sense (currently none of the defined keys are integers — desktop_notifications is boolean, everything else is string). A simpler rule: 'boolean coercion for true/false; everything else stored as string' would avoid surprises and still cover all current keys."
+    }
+  ]
+}
