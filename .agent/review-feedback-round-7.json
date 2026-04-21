@@ -1,0 +1,68 @@
+{
+  "round": 7,
+  "source": "review",
+  "issues": [
+    {
+      "severity": "high",
+      "category": "correctness",
+      "file": "cli/src/main.rs",
+      "line": 580,
+      "description": "The `--name` flag for `profile add` is defined as field `name_field: Option<String>` with `#[arg(long)]`. Clap derives the long flag name from the field name by converting underscores to hyphens, producing `--name-field` instead of `--name` as required by FR-3b. Users would need to type `nemo profile add foo --name-field 'Alice'` instead of `nemo profile add foo --name 'Alice'`.",
+      "suggestion": "Change to `#[arg(long = \"name\")]` to override the derived flag name, e.g.:\n```rust\n#[arg(long = \"name\")]\nname_field: Option<String>,\n```"
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/config.rs",
+      "line": 50,
+      "description": "FR-6g explicitly states: '`--profile` flag is ignored for this key' (the `current_profile` key). However, `handle_get` passes `profile_flag` to `resolve_profile_name` for the `current_profile` case, which means `nemo --profile work config --get current_profile` returns 'work' even if `current_profile` in the config is 'dev'. The spec says the flag should be ignored for `current_profile` to report the true resolved effective profile (NAUTILOOP_PROFILE > current_profile only).",
+      "suggestion": "For the `current_profile` key, pass `None` instead of `profile_flag` to `resolve_profile_name`:\n```rust\nif key == \"current_profile\" {\n    match config.resolve_profile_name(None) {\n```"
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/helm/mod.rs",
+      "line": 1760,
+      "description": "FR-5b requires the profile name portion of the helm header to use 'the theme's secondary/dim text color'. The current implementation concatenates the profile name into the same header string, which is then rendered entirely with `Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)`. The profile name gets the same bold teal styling as 'nautiloop' instead of a dim/secondary style.",
+      "suggestion": "Change the header rendering to use a `Line` with multiple `Span`s: one bold teal span for the main header text and a separate dim-styled span for the profile name. Use the theme's dim/secondary color (e.g., `theme.surface2` or similar muted color)."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/commands/config.rs",
+      "line": 38,
+      "description": "FR-6g says the error message for unrecognized keys should be 'updated to include current_profile in the list'. The `unknown_key_error` function does not include `current_profile` in its output. A user running `nemo config --get current_profle` (typo) gets an error listing profile keys and root keys but not `current_profile`, which is a valid gettable key.",
+      "suggestion": "Update `unknown_key_error` to include `current_profile` in the list, e.g.:\n```\n\"Unknown config key '{key}'. Gettable keys: current_profile. Profile keys: server_url, ...\"\n```\nAlso add a check for `current_profile` in the `is_profile_key`/`is_root_key` rejection path, since it's a read-only key that shouldn't be treated as unknown."
+    },
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "cli/src/config.rs",
+      "description": "HashMap<String, ProfileConfig> has non-deterministic iteration order in Rust. When `save_config` serializes via `toml::to_string_pretty`, profile sections in the TOML file will appear in arbitrary order and may change on every write. This means running `nemo config --set engineer=alice` could reorder all `[profiles.*]` sections in the file, producing noisy diffs and confusing users who version-control their config.",
+      "suggestion": "Use `BTreeMap<String, ProfileConfig>` instead of `HashMap<String, ProfileConfig>` for the `profiles` field. BTreeMap maintains sorted key order, ensuring stable serialization. Alternatively, use `indexmap::IndexMap` to preserve insertion order (but that adds a dependency)."
+    },
+    {
+      "severity": "low",
+      "category": "correctness",
+      "file": "cli/src/commands/config.rs",
+      "line": 80,
+      "description": "For `--get engineer`, the implementation returns `None` (triggering exit code 1) when `profile.engineer.is_empty()`. The spec defines `engineer` as `String` (non-optional), so it is always 'set'. The exit-code-1 behavior is defined for 'unset' keys (e.g., `Option::None`). Treating empty string as unset is a reasonable UX choice but isn't explicitly required by the spec, and could surprise a user who deliberately set `engineer=\"\"`.",
+      "suggestion": "Consider returning `Some(profile.engineer.clone())` unconditionally for `engineer`, matching the spec's struct definition where it's always present. Or document this behavior."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/tests/profiles.rs",
+      "description": "No integration test verifies that `--profile` flag takes precedence over `NAUTILOOP_PROFILE` env var (the full three-tier precedence chain). The `env_var_overrides_current_profile` test only tests env > current_profile, and `profile_flag_overrides_config_get` tests flag > current_profile. The spec explicitly defines the precedence as `--profile` > `NAUTILOOP_PROFILE` > `current_profile`.",
+      "suggestion": "Add a test that sets both `--profile` flag and `NAUTILOOP_PROFILE` env var to different profiles, and verifies the flag wins."
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "file": "cli/src/commands/config.rs",
+      "line": 62,
+      "description": "The `handle_get` function for `current_profile` calls `std::process::exit(1)` on error, bypassing Rust's normal drop/cleanup semantics. While there are no resources held at this point, `process::exit` is a sharp edge. Other None-value paths in the same function also use `process::exit(1)`.",
+      "suggestion": "Consider returning a typed error or using a dedicated exit-code mechanism instead of raw `process::exit`, though this is minor since no cleanup is needed."
+    }
+  ]
+}
