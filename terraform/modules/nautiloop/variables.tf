@@ -169,7 +169,19 @@ variable "image_pull_secret_dockerconfigjson" {
 }
 
 variable "judge_api_key" {
-  description = "Anthropic API key for the orchestrator judge. If set, creates a nautiloop-judge-creds secret and mounts it in the loop engine. If null, judge falls back to heuristic."
+  description = "REMOVED: use judge_anthropic_key instead. This variable exists only to produce a clear error."
+  type        = string
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.judge_api_key == null
+    error_message = "judge_api_key has been removed. Set judge_anthropic_key with a raw Anthropic API key instead."
+  }
+}
+
+variable "judge_anthropic_key" {
+  description = "Raw Anthropic API key for the orchestrator judge. Creates nautiloop-judge-creds secret with data.anthropic (same format as agent creds). If null, judge falls back to heuristic."
   type        = string
   default     = null
   sensitive   = true

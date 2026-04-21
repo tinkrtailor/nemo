@@ -134,16 +134,16 @@ kubectl -n nautiloop-jobs create secret generic "nautiloop-creds-${SAFE_ENGINEER
     "${CREDS_ARGS[@]}" \
     --dry-run=client -o yaml | kubectl apply -f -
 
-# Judge credentials (optional — enables the orchestrator judge in the loop engine)
-NAUTILOOP_JUDGE_API_KEY="${NAUTILOOP_JUDGE_API_KEY:-}"
-if [ -n "$NAUTILOOP_JUDGE_API_KEY" ]; then
-    echo "    Creating judge credentials secret (NAUTILOOP_JUDGE_API_KEY set)..."
-    JUDGE_CREDS_JSON=$(jq -n --arg key "$NAUTILOOP_JUDGE_API_KEY" '{"api_key": $key}')
+# Judge credentials secret (same API key as agent creds, judge-specific secret name).
+# Uses NAUTILOOP_ANTHROPIC_KEY — the same env var that provisions agent pod secrets.
+# The secret shape matches nautiloop-creds-<engineer>: data.anthropic = raw key string.
+if [ -n "$NAUTILOOP_ANTHROPIC_KEY" ]; then
+    echo "    Creating judge credentials secret from NAUTILOOP_ANTHROPIC_KEY..."
     kubectl -n nautiloop-system create secret generic nautiloop-judge-creds \
-        --from-literal="credentials.json=${JUDGE_CREDS_JSON}" \
+        --from-literal="anthropic=${NAUTILOOP_ANTHROPIC_KEY}" \
         --dry-run=client -o yaml | kubectl apply -f -
 else
-    echo "    NAUTILOOP_JUDGE_API_KEY not set — orchestrator judge will use heuristic fallback."
+    echo "    NAUTILOOP_ANTHROPIC_KEY not set — orchestrator judge will use heuristic fallback."
 fi
 
 # ── Wait for Postgres ─────────────────────────────────────────────────────────

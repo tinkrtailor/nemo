@@ -17,40 +17,41 @@ use crate::state::StateStore;
 /// Describes how the judge was resolved during driver construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JudgeResolution {
-    /// Judge is active with the given model name.
+    /// Judge is active with the given model name, via auth-sidecar.
     Enabled { model: String },
-    /// Judge is enabled in config but credentials are missing.
-    CredentialsMissing,
     /// Judge is disabled via config.
     Disabled,
 }
 
-/// Build the loop driver, resolving judge configuration from config and credentials.
+/// Default sidecar base URL used by the judge in control-plane pods.
+/// The auth-sidecar runs as a native sidecar initContainer on localhost:9090,
+/// identical to how agent pods access model APIs.
+const SIDECAR_BASE_URL: &str = "http://localhost:9090";
+
+/// Build the loop driver, wiring the judge via the auth-sidecar (FR-2b).
 ///
-/// Returns the constructed driver and how the judge was resolved (for logging).
-/// This function is extracted from main.rs for testability (NFR-4).
+/// When `judge_enabled = true`, unconditionally constructs a `SidecarJudgeClient`
+/// pointing at `http://localhost:9090`. The control-plane pod's auth-sidecar
+/// handles credential injection, egress logging, and proxying to Anthropic.
+///
+/// When `judge_enabled = false`, the judge is omitted entirely.
 pub fn build_loop_driver(
     config: &NautiloopConfig,
     store: Arc<dyn StateStore>,
     dispatcher: Arc<dyn JobDispatcher>,
     git: Arc<dyn GitOperations>,
 ) -> (Arc<ConvergentLoopDriver>, JudgeResolution) {
-    build_loop_driver_with(config, store, dispatcher, git, |path| {
-        judge::resolve_judge_api_key(path)
-    })
+    build_loop_driver_with(config, store, dispatcher, git, SIDECAR_BASE_URL)
 }
 
-/// Inner builder that accepts a credential resolver for testability.
-pub fn build_loop_driver_with<F>(
+/// Inner builder that accepts a sidecar base URL for testability.
+pub fn build_loop_driver_with(
     config: &NautiloopConfig,
     store: Arc<dyn StateStore>,
     dispatcher: Arc<dyn JobDispatcher>,
     git: Arc<dyn GitOperations>,
-    resolve_creds: F,
-) -> (Arc<ConvergentLoopDriver>, JudgeResolution)
-where
-    F: FnOnce(&str) -> Option<String>,
-{
+    sidecar_base_url: &str,
+) -> (Arc<ConvergentLoopDriver>, JudgeResolution) {
     if !config.orchestrator.judge_enabled {
         return (
             Arc::new(ConvergentLoopDriver::new(store, dispatcher, git, config.clone())),
@@ -58,28 +59,20 @@ where
         );
     }
 
-    match resolve_creds(&config.orchestrator.judge_credentials_path) {
-        Some(api_key) => {
-            let model_client = Arc::new(judge::DirectAnthropicClient::new(api_key));
-            let driver = ConvergentLoopDriver::with_judge(
-                store,
-                dispatcher,
-                git,
-                config.clone(),
-                model_client,
-            );
-            (
-                Arc::new(driver),
-                JudgeResolution::Enabled {
-                    model: config.orchestrator.judge_model.clone(),
-                },
-            )
-        }
-        None => (
-            Arc::new(ConvergentLoopDriver::new(store, dispatcher, git, config.clone())),
-            JudgeResolution::CredentialsMissing,
-        ),
-    }
+    let model_client = Arc::new(judge::SidecarJudgeClient::new(sidecar_base_url));
+    let driver = ConvergentLoopDriver::with_judge(
+        store,
+        dispatcher,
+        git,
+        config.clone(),
+        model_client,
+    );
+    (
+        Arc::new(driver),
+        JudgeResolution::Enabled {
+            model: config.orchestrator.judge_model.clone(),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -98,7 +91,6 @@ mod tests {
                 judge_enabled,
                 judge_model: "claude-haiku-4-5".to_string(),
                 max_judge_calls: 10,
-                judge_credentials_path: "/secrets/judge/credentials.json".to_string(),
             },
             ..NautiloopConfig::default()
         }
@@ -113,13 +105,13 @@ mod tests {
 
         let (_, resolution) = build_loop_driver_with(
             &config, store, dispatcher, git,
-            |_| panic!("should not resolve creds when judge disabled"),
+            "http://localhost:9090",
         );
         assert_eq!(resolution, JudgeResolution::Disabled);
     }
 
     #[test]
-    fn test_build_driver_judge_enabled_with_creds() {
+    fn test_build_driver_judge_enabled_uses_sidecar() {
         let config = test_config(true);
         let store: Arc<dyn StateStore> = Arc::new(MemoryStateStore::new());
         let dispatcher: Arc<dyn JobDispatcher> = Arc::new(MockJobDispatcher::new());
@@ -127,7 +119,7 @@ mod tests {
 
         let (_, resolution) = build_loop_driver_with(
             &config, store, dispatcher, git,
-            |_| Some("sk-ant-test-key".to_string()),
+            "http://localhost:9090",
         );
         assert_eq!(
             resolution,
@@ -135,19 +127,5 @@ mod tests {
                 model: "claude-haiku-4-5".to_string(),
             },
         );
-    }
-
-    #[test]
-    fn test_build_driver_judge_enabled_no_creds() {
-        let config = test_config(true);
-        let store: Arc<dyn StateStore> = Arc::new(MemoryStateStore::new());
-        let dispatcher: Arc<dyn JobDispatcher> = Arc::new(MockJobDispatcher::new());
-        let git: Arc<dyn GitOperations> = Arc::new(MockGitOperations::new());
-
-        let (_, resolution) = build_loop_driver_with(
-            &config, store, dispatcher, git,
-            |_| None,
-        );
-        assert_eq!(resolution, JudgeResolution::CredentialsMissing);
     }
 }

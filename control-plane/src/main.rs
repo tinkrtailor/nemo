@@ -154,16 +154,11 @@ async fn main() -> anyhow::Result<()> {
             match &judge_resolution {
                 JudgeResolution::Enabled { model } => {
                     tracing::info!(
-                        "Orchestrator judge: enabled, model={model}",
-                    );
-                }
-                JudgeResolution::CredentialsMissing => {
-                    tracing::warn!(
-                        "Orchestrator judge: enabled in config but NAUTILOOP_JUDGE_API_KEY/credentials missing; skipping"
+                        "Orchestrator judge: enabled, model={model}, via auth-sidecar at http://localhost:9090",
                     );
                 }
                 JudgeResolution::Disabled => {
-                    tracing::info!("Orchestrator judge: disabled (judge_enabled=false)");
+                    tracing::info!("Orchestrator judge: disabled");
                 }
             }
 

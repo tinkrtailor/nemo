@@ -166,10 +166,10 @@ data:
   id_ed25519: ${base64encode(local.deploy_private_key)}
 YAML
 
-  # Judge credentials (only rendered when judge_api_key provided).
-  # HCL's ternary cannot contain heredocs directly, so build the YAML
-  # unconditionally against a placeholder API key and then ternary-select
-  # the final string based on whether judge_api_key is set.
+  # Judge credentials (only rendered when judge_anthropic_key provided).
+  # Secret shape: data.anthropic = raw API key string (base64-encoded by K8s).
+  # This matches the format that nautiloop-creds-<engineer> secrets use,
+  # so the auth-sidecar reads /secrets/model-credentials/anthropic as-is.
   _judge_creds_yaml_template = <<-YAML
 apiVersion: v1
 kind: Secret
@@ -177,9 +177,9 @@ metadata:
   name: nautiloop-judge-creds
   namespace: nautiloop-system
 data:
-  credentials.json: ${base64encode(jsonencode({ api_key = coalesce(var.judge_api_key, "") }))}
+  anthropic: ${base64encode(coalesce(var.judge_anthropic_key, ""))}
 YAML
-  judge_creds_yaml           = var.judge_api_key != null ? local._judge_creds_yaml_template : ""
+  judge_creds_yaml           = var.judge_anthropic_key != null ? local._judge_creds_yaml_template : ""
 
   # Registry creds (only rendered when image_pull_secret provided)
   _dockerconfigjson_b64 = var.image_pull_secret_dockerconfigjson != null ? base64encode(var.image_pull_secret_dockerconfigjson) : ""
@@ -471,13 +471,13 @@ resource "null_resource" "k8s_secrets" {
   }
 }
 
-# Judge credentials (conditional — only when judge_api_key provided)
+# Judge credentials (conditional — only when judge_anthropic_key provided)
 resource "null_resource" "k8s_judge_creds" {
-  count      = var.judge_api_key != null ? 1 : 0
+  count      = var.judge_anthropic_key != null ? 1 : 0
   depends_on = [null_resource.k8s_foundation]
 
   triggers = {
-    key_hash  = sha256(var.judge_api_key)
+    key_hash  = sha256(var.judge_anthropic_key)
     server_ip = var.server_ip
   }
 

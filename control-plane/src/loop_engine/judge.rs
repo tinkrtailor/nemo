@@ -249,155 +249,6 @@ impl JudgeModelClient for SidecarJudgeClient {
     }
 }
 
-/// Direct Anthropic API client for the control-plane pod (FR-1a).
-///
-/// Unlike `SidecarJudgeClient` which routes through a per-pod auth sidecar,
-/// this client calls `https://api.anthropic.com/v1/messages` directly with
-/// an API key. Used by the loop engine which has no sidecar.
-pub struct DirectAnthropicClient {
-    client: reqwest::Client,
-    api_key: String,
-    base_url: String,
-}
-
-impl DirectAnthropicClient {
-    pub fn new(api_key: String) -> Self {
-        Self::with_base_url(api_key, "https://api.anthropic.com".to_string())
-    }
-
-    /// Construct with a custom base URL (used in tests with wiremock).
-    pub fn with_base_url(api_key: String, base_url: String) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("Failed to build reqwest client with 30s timeout — TLS backend misconfigured");
-        Self {
-            client,
-            api_key,
-            base_url,
-        }
-    }
-}
-
-#[async_trait]
-impl JudgeModelClient for DirectAnthropicClient {
-    async fn invoke(&self, model: &str, prompt: &str) -> Result<String> {
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": 512,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        });
-
-        let url = format!("{}/v1/messages", self.base_url);
-        let resp = self
-            .client
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("anthropic-version", "2023-06-01")
-            .header("x-api-key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                crate::error::NautiloopError::Internal(format!("Judge HTTP request failed: {e}"))
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(crate::error::NautiloopError::Internal(format!(
-                "Judge model returned {status}: {body}"
-            )));
-        }
-
-        let response_json: serde_json::Value = resp.json().await.map_err(|e| {
-            crate::error::NautiloopError::Internal(format!(
-                "Judge model response not valid JSON: {e}"
-            ))
-        })?;
-
-        // Extract text from Anthropic Messages API response
-        let text = response_json
-            .get("content")
-            .and_then(|c| c.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|block| block.get("text"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        Ok(text)
-    }
-}
-
-/// Credentials JSON file schema for the judge (FR-1b).
-#[derive(Debug, Deserialize)]
-struct JudgeCredentialsFile {
-    api_key: String,
-}
-
-/// Resolve judge API key from available credential sources (FR-1b).
-///
-/// Delegates to `resolve_judge_api_key_with` using the real environment.
-pub fn resolve_judge_api_key(credentials_path: &str) -> Option<String> {
-    resolve_judge_api_key_with(credentials_path, |name| std::env::var(name))
-}
-
-/// Inner resolver that accepts an env-reader function for testability.
-///
-/// Checked in order:
-/// 1. `NAUTILOOP_JUDGE_API_KEY` env var (via `env_reader`)
-/// 2. Credentials file at `credentials_path` containing `{"api_key": "..."}`
-/// 3. None (judge disabled with warning)
-pub fn resolve_judge_api_key_with<F>(credentials_path: &str, env_reader: F) -> Option<String>
-where
-    F: Fn(&str) -> std::result::Result<String, std::env::VarError>,
-{
-    // Source 1: env var
-    if let Ok(key) = env_reader("NAUTILOOP_JUDGE_API_KEY")
-        && !key.is_empty()
-    {
-        tracing::info!("Judge credentials resolved from NAUTILOOP_JUDGE_API_KEY env var");
-        return Some(key);
-    }
-
-    // Source 2: credentials file
-    match std::fs::read_to_string(credentials_path) {
-        Ok(contents) => match serde_json::from_str::<JudgeCredentialsFile>(&contents) {
-            Ok(creds) if !creds.api_key.is_empty() => {
-                tracing::info!(
-                    path = credentials_path,
-                    "Judge credentials resolved from credentials file"
-                );
-                Some(creds.api_key)
-            }
-            Ok(_) => {
-                tracing::warn!(
-                    path = credentials_path,
-                    "Judge credentials file has empty api_key"
-                );
-                None
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = credentials_path,
-                    error = %e,
-                    "Failed to parse judge credentials file"
-                );
-                None
-            }
-        },
-        Err(_) => {
-            // File not found is expected when creds aren't provisioned
-            None
-        }
-    }
-}
 
 /// The orchestrator judge. Holds config, model client, and state store references.
 pub struct OrchestratorJudge {
@@ -897,7 +748,6 @@ mod tests {
             judge_model: "test-model".to_string(),
             judge_enabled: true,
             max_judge_calls: 10,
-            judge_credentials_path: "/nonexistent/test/credentials.json".to_string(),
         }
     }
 
@@ -1296,74 +1146,78 @@ mod tests {
         assert!(prompt.contains("specs/test.md"));
     }
 
-    // --- DirectAnthropicClient construction tests ---
+    // --- SidecarJudgeClient construction test ---
 
     #[test]
-    fn test_direct_anthropic_client_constructs() {
-        let client = DirectAnthropicClient::new("sk-ant-test-key".to_string());
-        assert_eq!(client.api_key, "sk-ant-test-key");
+    fn test_sidecar_judge_client_constructs() {
+        let client = SidecarJudgeClient::new("http://localhost:9090");
+        assert_eq!(client.base_url, "http://localhost:9090");
     }
 
-    // --- resolve_judge_api_key tests ---
-    // Uses resolve_judge_api_key_with() with a closure to avoid unsafe env var
-    // mutation, which is unsound under Rust's default multi-threaded test runner.
+    // --- SidecarJudgeClient HTTP integration test ---
 
-    fn no_env(_name: &str) -> std::result::Result<String, std::env::VarError> {
-        Err(std::env::VarError::NotPresent)
+    #[tokio::test]
+    async fn test_sidecar_judge_client_http_request_format() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        let anthropic_response = serde_json::json!({
+            "id": "msg_test123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "{\"decision\": \"continue\", \"confidence\": 0.8, \"reasoning\": \"ok\", \"hint\": null}"
+                }
+            ],
+            "model": "claude-haiku-4-5-20251001",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .and(header("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&anthropic_response))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SidecarJudgeClient::new(&mock_server.uri());
+
+        let result = client.invoke("claude-haiku-4-5", "test prompt").await;
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(text.contains("continue"));
+        assert!(text.contains("confidence"));
     }
 
-    #[test]
-    fn test_resolve_judge_api_key_from_env_var() {
-        let result = resolve_judge_api_key_with(
-            "/nonexistent/path/credentials.json",
-            |_| Ok("sk-ant-env-key".to_string()),
-        );
-        assert_eq!(result, Some("sk-ant-env-key".to_string()));
-    }
+    #[tokio::test]
+    async fn test_sidecar_judge_client_non_success_status() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    #[test]
-    fn test_resolve_judge_api_key_from_credentials_file() {
-        let dir = std::env::temp_dir().join(format!("judge-test-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let creds_path = dir.join("credentials.json");
-        std::fs::write(
-            &creds_path,
-            r#"{"api_key": "sk-ant-file-key"}"#,
-        )
-        .unwrap();
+        let mock_server = MockServer::start().await;
 
-        let result = resolve_judge_api_key_with(creds_path.to_str().unwrap(), no_env);
-        assert_eq!(result, Some("sk-ant-file-key".to_string()));
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string("invalid x-api-key"),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
 
-        std::fs::remove_dir_all(&dir).ok();
-    }
+        let client = SidecarJudgeClient::new(&mock_server.uri());
 
-    #[test]
-    fn test_resolve_judge_api_key_none_when_missing() {
-        let result = resolve_judge_api_key_with("/nonexistent/path/credentials.json", no_env);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_resolve_judge_api_key_empty_env_var_ignored() {
-        let result = resolve_judge_api_key_with(
-            "/nonexistent/path/credentials.json",
-            |_| Ok(String::new()),
-        );
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_resolve_judge_api_key_malformed_file() {
-        let dir = std::env::temp_dir().join(format!("judge-test-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let creds_path = dir.join("credentials.json");
-        std::fs::write(&creds_path, "not valid json").unwrap();
-
-        let result = resolve_judge_api_key_with(creds_path.to_str().unwrap(), no_env);
-        assert!(result.is_none());
-
-        std::fs::remove_dir_all(&dir).ok();
+        let result = client.invoke("claude-haiku-4-5", "test prompt").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("401"));
     }
 
     // --- NFR-1: Graceful degradation test ---
@@ -1434,124 +1288,16 @@ mod tests {
         assert!(decisions[0].duration_ms > 0 || decisions[0].duration_ms == 0);
     }
 
-    // --- DirectAnthropicClient HTTP integration test (NFR-4) ---
+    // --- Full integration: SidecarJudgeClient → OrchestratorJudge → store write ---
 
     #[tokio::test]
-    async fn test_direct_anthropic_client_http_request_format() {
-        use wiremock::matchers::{header, method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let mock_server = MockServer::start().await;
-
-        // Set up mock to return an Anthropic Messages API response
-        let anthropic_response = serde_json::json!({
-            "id": "msg_test123",
-            "type": "message",
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "{\"decision\": \"continue\", \"confidence\": 0.8, \"reasoning\": \"ok\", \"hint\": null}"
-                }
-            ],
-            "model": "claude-haiku-4-5-20251001",
-            "stop_reason": "end_turn",
-            "usage": {"input_tokens": 100, "output_tokens": 50}
-        });
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(header("x-api-key", "sk-ant-test-key"))
-            .and(header("anthropic-version", "2023-06-01"))
-            .and(header("content-type", "application/json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&anthropic_response))
-            .expect(1)
-            .mount(&mock_server)
-            .await;
-
-        let client =
-            DirectAnthropicClient::with_base_url("sk-ant-test-key".to_string(), mock_server.uri());
-
-        let result = client.invoke("claude-haiku-4-5", "test prompt").await;
-        assert!(result.is_ok());
-        let text = result.unwrap();
-        assert!(text.contains("continue"));
-        assert!(text.contains("confidence"));
-    }
-
-    #[tokio::test]
-    async fn test_direct_anthropic_client_non_success_status() {
+    async fn test_full_integration_sidecar_client_judge_store() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
 
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(401).set_body_string("invalid x-api-key"),
-            )
-            .expect(1)
-            .mount(&mock_server)
-            .await;
-
-        let client =
-            DirectAnthropicClient::with_base_url("bad-key".to_string(), mock_server.uri());
-
-        let result = client.invoke("claude-haiku-4-5", "test prompt").await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("401"));
-    }
-
-    #[tokio::test]
-    async fn test_direct_anthropic_client_request_body_format() {
-        use wiremock::matchers::{body_json, method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let mock_server = MockServer::start().await;
-
-        let expected_body = serde_json::json!({
-            "model": "test-model",
-            "max_tokens": 512,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "judge this"
-                }
-            ]
-        });
-
-        let anthropic_response = serde_json::json!({
-            "content": [{"type": "text", "text": "ok"}],
-            "usage": {"input_tokens": 10, "output_tokens": 5}
-        });
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(body_json(&expected_body))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&anthropic_response))
-            .expect(1)
-            .mount(&mock_server)
-            .await;
-
-        let client =
-            DirectAnthropicClient::with_base_url("sk-ant-key".to_string(), mock_server.uri());
-
-        let result = client.invoke("test-model", "judge this").await;
-        assert!(result.is_ok());
-    }
-
-    // --- Full integration: DirectAnthropicClient → OrchestratorJudge → store write (NFR-4) ---
-
-    #[tokio::test]
-    async fn test_full_integration_direct_client_judge_store() {
-        use wiremock::matchers::{header, method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let mock_server = MockServer::start().await;
-
-        // Mock Anthropic response with valid judge JSON
+        // Mock sidecar response (sidecar proxies to Anthropic, injects API key)
         let anthropic_response = serde_json::json!({
             "id": "msg_integration",
             "type": "message",
@@ -1568,19 +1314,14 @@ mod tests {
         });
 
         Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(header("x-api-key", "sk-ant-integration-key"))
-            .and(header("anthropic-version", "2023-06-01"))
+            .and(path("/anthropic/v1/messages"))
             .respond_with(ResponseTemplate::new(200).set_body_json(&anthropic_response))
             .expect(1)
             .mount(&mock_server)
             .await;
 
-        // Wire: DirectAnthropicClient → OrchestratorJudge → MemoryStateStore
-        let client = DirectAnthropicClient::with_base_url(
-            "sk-ant-integration-key".to_string(),
-            mock_server.uri(),
-        );
+        // Wire: SidecarJudgeClient → OrchestratorJudge → MemoryStateStore
+        let client = SidecarJudgeClient::new(&mock_server.uri());
         let store = Arc::new(MemoryStateStore::new());
         let judge = OrchestratorJudge::new(
             test_config(),
