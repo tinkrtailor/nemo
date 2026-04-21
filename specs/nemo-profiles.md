@@ -105,6 +105,13 @@ desktop_notifications = false
 
 Migration is idempotent: no-op if already in profile shape.
 
+**Migration detection rule:** Migration triggers if the TOML root contains a `server_url` key AND does not contain a `profiles` table. Specifically:
+- **`server_url` at root, no `profiles` table** → migrate (move flat fields into `[profiles.default]`).
+- **`profiles` table exists (with or without root `server_url`)** → already migrated; no migration. Any stale flat fields at the root are ignored (not moved, not deleted). This handles partially hand-edited configs gracefully.
+- **Neither `server_url` nor `profiles` exists** → no migration needed (empty/new file or config with only `[helm]`/`[models]`).
+
+**Empty string handling during migration:** Empty strings for `name` and `email` in the flat config are migrated as `None` (not `Some("")`). This normalizes the serde default empty strings from the old `EngineerConfig` into the `Option<String>` representation used by `ProfileConfig`. All other fields (`server_url`, `api_key`, `engineer`) are migrated as-is (empty `engineer` stays as `""` per FR-6d).
+
 **Which commands trigger migration:** Any command that calls `load_config()` in the normal flow — i.e., all commands except `help`, `capabilities`, and `init` (which don't need config). The `nemo config` command, despite being dispatched before normal config loading (see FR-6e), MUST also perform migration before processing `--set` or `--get`.
 
 **FR-2b.** ~~Removed.~~ The CLI has never read `NAUTILOOP_API_KEY` from the environment — that variable is server-side only (control-plane, terraform, k8s manifests). No env-var override behavior exists to preserve. Adding `NAUTILOOP_API_KEY` support to the CLI is out of scope for this spec; if desired, it should be a separate feature request with its own acceptance criteria.
@@ -154,7 +161,7 @@ Active profile: work
 Profiles: default, personal, work*
 
   server_url: https://nautiloop.work.internal
-  api_key:    abc1****789z
+  api_key:    abc1...789z
   engineer:   ggylfason
   name:       Gunnar
   email:      gunnar@work.example.com
@@ -180,12 +187,14 @@ The active profile's fields are shown in full (with `api_key` redacted per NFR-3
 
 - **Profile-scoped keys** (written to the active profile): `server_url`, `api_key`, `engineer`, `name`, `email`.
 - **Root-scoped keys** (written to top-level, using dot notation): `helm.desktop_notifications` (boolean), `helm.theme` (string, one of `dark`, `light`, `high-contrast`), `models.implementor` (string), `models.reviewer` (string). Dot notation maps to TOML table nesting (e.g., `helm.desktop_notifications=true` writes `desktop_notifications = true` under the `[helm]` table). `helm.theme` is validated against the allowed values; invalid values are rejected with: `Invalid value for helm.theme: '<value>'. Must be one of: dark, light, high-contrast`.
-- **Value type coercion**: `true`/`false` (case-insensitive) are parsed as booleans; values that parse as integers are stored as integers; everything else is stored as a string.
+- **Value type coercion**: `true`/`false` (case-insensitive) are parsed as booleans; everything else is stored as a string. Integer coercion is intentionally omitted — none of the currently defined keys are integer-typed, and automatic integer parsing (e.g., turning a port number or version string into a TOML integer) would surprise users. If integer-typed keys are added in the future, extend the allow-list with explicit type annotations per key.
 - **Unrecognized keys** are rejected with an error: `Unknown config key '<key>'. Profile keys: server_url, api_key, engineer, name, email. Root keys: helm.desktop_notifications, helm.theme, models.implementor, models.reviewer`.
 
 ### FR-6g: `nemo config --get` aware of profiles
 
 **FR-6g.** `nemo config --get <key>` reads from the active profile for profile-scoped keys (`server_url`, `api_key`, `engineer`, `name`, `email`) and from the root for root-scoped keys (`helm.desktop_notifications`, `helm.theme`, `models.implementor`, `models.reviewer`). The same allow-list from FR-6c applies. `--profile` flag overrides which profile to read from, following the same precedence as FR-4b. `api_key` is printed redacted (per NFR-3 format) unless `--unmask` is passed. `--unmask` is a flag on the `nemo config` subcommand (not a global flag). It applies to both `--get api_key` and the no-args display (FR-5c). `nemo profile show` also accepts `--unmask` (see FR-3a). Unrecognized keys are rejected with the same error message as FR-6c. If a key is unset (e.g., `name` is `None`), print nothing and exit with code 1.
+
+**Behavioral change note:** This is a deliberate change from the current `--get` implementation, which prints `(not set)` and exits 0 for missing values. The new behavior (empty output + exit code 1) is more script-friendly: callers can check the exit code rather than parsing output strings. Scripts that currently check for `(not set)` in output should switch to checking the exit code after this change.
 
 ### FR-6d: Internal struct layout (implementation note)
 
@@ -209,6 +218,8 @@ struct ProfileConfig {
 ```
 
 `current_profile` is `Option<String>` to distinguish "not set" (`None`, cold-start case per FR-1c) from "set but dangling" (`Some(name)` where name is not in `profiles`). Serde deserializes a missing `current_profile` key as `None`. An empty string `""` is treated the same as `None` (normalized on load).
+
+`name` and `email` are `Option<String>`. During migration (FR-2a), empty strings for these fields are normalized to `None` (see migration empty-string rule in FR-2a). This means `--get name` on a migrated profile where `name` was `""` returns exit code 1 (not an empty line) — this is a deliberate behavioral change (see FR-6g note). For `nemo profile add`, `--name` and `--email` default to the current profile's values; if the current profile has `None`, the default is also `None`.
 
 `api_key` is `Option<String>` to match current behavior where `api_key` can be absent in the config file. Migration preserves whatever value (or absence) was in the flat config. Commands that require an API key (e.g., those hitting the server) bail at runtime if `api_key` is `None`, matching the current behavior. `nemo profile add --api-key` requires a non-empty value (FR-3b), but profiles created via migration may have `api_key = None`.
 
@@ -248,7 +259,9 @@ Any existing `~/.nemo/config.toml` works via FR-2 migration. First command after
 
 API keys in the file stay at 0600 permissions (matches current behavior). `nemo profile show` and `nemo config` redact api_key by default. No logging of keys.
 
-**Redaction format** (consistent across all display commands — `profile show`, `config`, `config --get api_key`): keys longer than 12 characters show first 4 + `****` + last 4 characters (e.g., `abc1****789z`); keys 12 characters or shorter show `****`. This matches the current `config.rs` redaction behavior. Pass `--unmask` on `nemo config` or `nemo profile show` to display the full key.
+**Redaction format** (consistent across all display commands — `profile show`, `config`, `config --get api_key`): keys longer than 12 characters show first 4 + `...` + last 4 characters (e.g., `abc1...789z`); keys 12 characters or shorter show `****`. This matches the current `config.rs` redaction behavior (which uses `...` as the separator, e.g., `prefix...suffix`). Pass `--unmask` on `nemo config` or `nemo profile show` to display the full key.
+
+**Note:** The `nemo config` no-args display (FR-5c) and `nemo profile show` use the same `...` redaction format. The example in FR-5c (`abc1****789z`) is illustrative only; the actual output uses `...` (i.e., `abc1...789z`).
 
 ### NFR-4: Tests
 
