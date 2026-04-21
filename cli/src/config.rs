@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::project_config::ModelsSection;
@@ -82,7 +82,7 @@ pub struct NemoConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_profile: Option<String>,
     #[serde(default)]
-    pub profiles: HashMap<String, ProfileConfig>,
+    pub profiles: BTreeMap<String, ProfileConfig>,
     #[serde(default)]
     pub helm: HelmConfig,
     #[serde(default)]
@@ -250,7 +250,7 @@ pub fn load_config_with_migration() -> Result<(NemoConfig, bool)> {
         let legacy: LegacyConfig = toml::from_str(&contents)?;
         let config = NemoConfig {
             current_profile: None,
-            profiles: HashMap::new(),
+            profiles: BTreeMap::new(),
             helm: legacy.helm.unwrap_or_default(),
             models: legacy.models.unwrap_or_default(),
         };
@@ -276,7 +276,7 @@ pub fn load_config_with_migration() -> Result<(NemoConfig, bool)> {
         email,
     };
 
-    let mut profiles = HashMap::new();
+    let mut profiles = BTreeMap::new();
     profiles.insert("default".to_string(), profile);
 
     let config = NemoConfig {
@@ -376,7 +376,7 @@ mod tests {
         if !has_server_url {
             let legacy: LegacyConfig = toml::from_str(content)?;
             return Ok((NemoConfig {
-                profiles: HashMap::new(),
+                profiles: BTreeMap::new(),
                 helm: legacy.helm.unwrap_or_default(),
                 models: legacy.models.unwrap_or_default(),
                 ..Default::default()
@@ -392,7 +392,7 @@ mod tests {
             name: legacy.name.filter(|s| !s.is_empty()),
             email: legacy.email.filter(|s| !s.is_empty()),
         };
-        let mut profiles = HashMap::new();
+        let mut profiles = BTreeMap::new();
         profiles.insert("default".to_string(), profile);
         Ok((NemoConfig {
             current_profile: Some("default".to_string()),

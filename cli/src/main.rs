@@ -588,7 +588,7 @@ enum ProfileAction {
         engineer: String,
 
         /// Display name (defaults to current profile's name)
-        #[arg(long)]
+        #[arg(long = "name")]
         name_field: Option<String>,
 
         /// Email (defaults to current profile's email)

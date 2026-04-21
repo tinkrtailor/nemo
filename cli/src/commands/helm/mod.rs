@@ -1761,12 +1761,29 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         .split(frame.area());
 
     // FR-1: Header summary line
+    // FR-5b: profile name portion uses dim/secondary text color
     let header_text = summary::build_header(&app.loops, &app.all_inspect, &app.pricing, app.team_view, &app.profile_name);
-    let header = Paragraph::new(Line::from(Span::styled(
-        header_text,
-        Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-    )))
-    .style(Style::default().bg(theme.surface));
+    let bold_teal = Style::default().fg(theme.teal).add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().fg(theme.muted);
+    // Split: "nautiloop · <profile>" from the rest; profile name gets dim style
+    let header_line = if let Some(rest) = header_text.strip_prefix("nautiloop") {
+        // rest starts with " · <profile> · ..." or " · <profile> · team ..."
+        // Find the profile name portion: " · <profile_name>"
+        let profile_marker = format!(" · {}", app.profile_name);
+        if let Some(after_profile) = rest.strip_prefix(&profile_marker) {
+            Line::from(vec![
+                Span::styled("nautiloop", bold_teal),
+                Span::styled(format!(" · {}", app.profile_name), dim_style),
+                Span::styled(after_profile.to_string(), bold_teal),
+            ])
+        } else {
+            Line::from(Span::styled(header_text, bold_teal))
+        }
+    } else {
+        Line::from(Span::styled(header_text, bold_teal))
+    };
+    let header = Paragraph::new(header_line)
+        .style(Style::default().bg(theme.surface));
     frame.render_widget(header, root[0]);
 
     // Main content area

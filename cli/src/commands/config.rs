@@ -26,7 +26,7 @@ fn is_root_key(key: &str) -> bool {
 
 fn unknown_key_error(key: &str) -> String {
     format!(
-        "Unknown config key '{key}'. Profile keys: server_url, api_key, engineer, name, email. Root keys: helm.desktop_notifications, helm.theme, models.implementor, models.reviewer."
+        "Unknown config key '{key}'. Gettable keys: current_profile. Profile keys: server_url, api_key, engineer, name, email. Root keys: helm.desktop_notifications, helm.theme, models.implementor, models.reviewer."
     )
 }
 
@@ -92,8 +92,9 @@ fn handle_get(
 ) -> Result<()> {
     // Special: current_profile
     if key == "current_profile" {
-        // Report the resolved effective profile (FR-6g)
-        match config.resolve_profile_name(profile_flag) {
+        // Report the resolved effective profile (FR-6g).
+        // --profile flag is ignored for this key per spec; only NAUTILOOP_PROFILE > current_profile.
+        match config.resolve_profile_name(None) {
             Ok(name) => {
                 println!("{name}");
                 Ok(())

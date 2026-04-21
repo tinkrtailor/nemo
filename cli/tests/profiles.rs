@@ -466,6 +466,47 @@ engineer = "dev"
     assert_eq!(stdout.trim(), "http://localhost:18080");
 }
 
+// ─── Full Precedence Chain Test ───────────────────────────────────────
+
+#[test]
+fn profile_flag_overrides_env_var() {
+    let config = r#"
+current_profile = "work"
+
+[profiles.work]
+server_url = "https://work.example.com"
+api_key = "key-1234567890123456"
+engineer = "alice"
+
+[profiles.dev]
+server_url = "http://localhost:18080"
+api_key = "key-dev-1234567890123456"
+engineer = "dev"
+
+[profiles.staging]
+server_url = "https://staging.example.com"
+api_key = "key-staging-1234567890"
+engineer = "stager"
+"#;
+    let home = setup_home(config);
+
+    // Set NAUTILOOP_PROFILE=staging but --profile=dev; flag should win
+    let output = Command::new(nemo_bin())
+        .args(["--profile", "dev", "config", "--get", "server_url"])
+        .env("HOME", home.path().to_str().unwrap())
+        .env("NAUTILOOP_PROFILE", "staging")
+        .output()
+        .expect("failed to execute nemo");
+
+    assert_eq!(output.status.code().unwrap(), 0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "http://localhost:18080",
+        "Flag --profile=dev should override NAUTILOOP_PROFILE=staging"
+    );
+}
+
 // ─── Profile Show Tests ───────────────────────────────────────────────
 
 #[test]
