@@ -89,9 +89,9 @@ desktop_notifications = false
 # empty; kept at root as engineer-global preference
 ```
 
-**FR-1b.** Profile names MUST match `^[a-zA-Z0-9][a-zA-Z0-9-]*$` (letters, digits, hyphens; start alphanumeric). Reserved name `default` is allowed.
+**FR-1b.** Profile names MUST match `^[a-zA-Z0-9][a-zA-Z0-9-]*$` (letters, digits, hyphens; start alphanumeric; minimum 1 character — single-char names like `d` are valid). Reserved name `default` is allowed. Profile names are **case-sensitive**: `Work` and `work` are distinct profiles. No normalization is performed.
 
-**FR-1c.** `current_profile` MUST point at a defined profile. If missing or invalid, CLI errors on any command that needs a server URL.
+**FR-1c.** `current_profile` MUST point at a defined profile. If missing or invalid, CLI errors on any command that needs a server URL. **Cold-start case (no config file):** When no `~/.nemo/config.toml` exists, `NemoConfig::default()` returns an empty `profiles` map and empty `current_profile`. Commands that require a server URL error with: `No profiles configured. Run 'nemo profile add <name> --server <url> --api-key <key> --engineer <id>' to get started.` This matches current behavior where an unconfigured CLI errors when hitting the server. Commands that don't need config (`help`, `capabilities`, `init`) work normally.
 
 ### FR-2: Backward-compatible migration
 
@@ -143,9 +143,30 @@ Migration is idempotent: no-op if already in profile shape.
 LOOP ID ...
 ```
 
-**FR-5b.** `nemo helm` TUI header (existing "NAUTILOOP" top-left) appends the profile in muted color: `NAUTILOOP · work`. Tells the operator at a glance which cluster they're driving.
+**FR-5b.** `nemo helm` TUI header (existing "nautiloop" top-left) appends the profile in muted color: `nautiloop · work`. Tells the operator at a glance which cluster they're driving.
 
-**FR-5c.** `nemo config` (with no args) now prints the active profile + all profile names, not just flat fields.
+**FR-5c.** `nemo config` (with no args) now prints the active profile + all profile names, not just flat fields. Output format:
+
+```
+Active profile: work
+Profiles: default, personal, work*
+
+  server_url: https://nautiloop.work.internal
+  api_key:    ****789
+  engineer:   ggylfason
+  name:       Gunnar
+  email:      gunnar@work.example.com
+
+[helm]
+  desktop_notifications: false
+  theme: dark
+
+[models]
+  implementor: (not set)
+  reviewer: (not set)
+```
+
+The active profile's fields are shown in full (with `api_key` redacted per NFR-3). Root-level sections (`[helm]`, `[models]`) are shown after the profile fields. Fields that are unset show `(not set)`.
 
 ### FR-6: `nemo config --set` aware of profiles
 
@@ -156,9 +177,13 @@ LOOP ID ...
 **FR-6c.** `nemo config --set helm.desktop_notifications=true` writes to the root (non-profile) section. **Note:** support for `helm.*` and `models.*` keys in `--set` is NEW behavior — the current implementation only supports flat profile-scoped keys. Key scoping is determined by an explicit allow-list:
 
 - **Profile-scoped keys** (written to the active profile): `server_url`, `api_key`, `engineer`, `name`, `email`.
-- **Root-scoped keys** (written to top-level, using dot notation): `helm.desktop_notifications` (boolean), `models.implementor` (string), `models.reviewer` (string). Dot notation maps to TOML table nesting (e.g., `helm.desktop_notifications=true` writes `desktop_notifications = true` under the `[helm]` table).
+- **Root-scoped keys** (written to top-level, using dot notation): `helm.desktop_notifications` (boolean), `helm.theme` (string, one of `dark`, `light`, `high-contrast`), `models.implementor` (string), `models.reviewer` (string). Dot notation maps to TOML table nesting (e.g., `helm.desktop_notifications=true` writes `desktop_notifications = true` under the `[helm]` table). `helm.theme` is validated against the allowed values; invalid values are rejected with: `Invalid value for helm.theme: '<value>'. Must be one of: dark, light, high-contrast`.
 - **Value type coercion**: `true`/`false` (case-insensitive) are parsed as booleans; values that parse as integers are stored as integers; everything else is stored as a string.
-- **Unrecognized keys** are rejected with an error: `Unknown config key '<key>'. Profile keys: server_url, api_key, engineer, name, email. Root keys: helm.desktop_notifications, models.implementor, models.reviewer`.
+- **Unrecognized keys** are rejected with an error: `Unknown config key '<key>'. Profile keys: server_url, api_key, engineer, name, email. Root keys: helm.desktop_notifications, helm.theme, models.implementor, models.reviewer`.
+
+### FR-6g: `nemo config --get` aware of profiles
+
+**FR-6g.** `nemo config --get <key>` reads from the active profile for profile-scoped keys (`server_url`, `api_key`, `engineer`, `name`, `email`) and from the root for root-scoped keys (`helm.desktop_notifications`, `helm.theme`, `models.implementor`, `models.reviewer`). The same allow-list from FR-6c applies. `--profile` flag overrides which profile to read from, following the same precedence as FR-4b. `api_key` is printed redacted unless `--unmask` is passed (consistent with `nemo profile show` redaction in NFR-3). Unrecognized keys are rejected with the same error message as FR-6c. If a key is unset (e.g., `name` is `None`), print nothing and exit with code 1.
 
 ### FR-6d: Internal struct layout (implementation note)
 
@@ -233,7 +258,8 @@ A reviewer can verify by:
 4. **Env var**: `NAUTILOOP_PROFILE=dev nemo status` uses dev without flag.
 5. **List + show**: `nemo profile ls` marks active with `*`. `nemo profile show work` prints the work profile with `api_key` redacted.
 6. **Cannot remove active**: `nemo profile rm <active>` errors clearly; no accidental lockout.
-7. **Helm indicator**: `nemo helm` top-left shows `NAUTILOOP · work` when work is active.
+7. **Helm indicator**: `nemo helm` top-left shows `nautiloop · work` when work is active.
+8. **Config get**: `nemo config --get server_url` returns the active profile's server URL. `nemo config --get --profile dev server_url` returns dev's server URL. `nemo config --get helm.theme` returns the root-level theme.
 
 ## Out of Scope
 
