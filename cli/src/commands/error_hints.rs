@@ -84,10 +84,7 @@ mod tests {
 
     #[test]
     fn hint_cancel_converged() {
-        let hint = find_hint(
-            409,
-            r#"{"error":"Cannot cancel: loop is in CONVERGED"}"#,
-        );
+        let hint = find_hint(409, r#"{"error":"Cannot cancel: loop is in CONVERGED"}"#);
         assert!(hint.unwrap().contains("nemo inspect"));
     }
 
@@ -125,7 +122,10 @@ mod tests {
     #[test]
     fn no_hint_wrong_status() {
         // Pattern matches but status does not
-        let hint = find_hint(500, r#"{"error":"Cannot approve: loop is in IMPLEMENTING"}"#);
+        let hint = find_hint(
+            500,
+            r#"{"error":"Cannot approve: loop is in IMPLEMENTING"}"#,
+        );
         assert!(hint.is_none());
     }
 }

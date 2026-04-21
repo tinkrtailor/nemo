@@ -210,7 +210,9 @@ pub mod bare {
                 .status()
                 .await
                 .map_err(|e| {
-                    crate::error::NautiloopError::Git(format!("git diff --cached spawn failed: {e}"))
+                    crate::error::NautiloopError::Git(format!(
+                        "git diff --cached spawn failed: {e}"
+                    ))
                 })?;
             if diff_check.success() {
                 // Exit 0 from `git diff --cached --quiet` means no staged changes.
@@ -785,7 +787,12 @@ pub mod bare {
             Ok(())
         }
 
-        async fn diff(&self, branch: &str, base_ref: &str, max_bytes: Option<usize>) -> Result<String> {
+        async fn diff(
+            &self,
+            branch: &str,
+            base_ref: &str,
+            max_bytes: Option<usize>,
+        ) -> Result<String> {
             let diff_range = format!("{base_ref}...{branch}");
             let output = self.run_git(&["diff", &diff_range]).await.map_err(|e| {
                 crate::error::NautiloopError::Git(format!(
@@ -797,7 +804,10 @@ pub mod bare {
                     let truncated = &output[..max];
                     // Find last newline to avoid cutting mid-line
                     let cut = truncated.rfind('\n').unwrap_or(max);
-                    Ok(format!("{}\n\n[truncated — open PR for full diff]", &output[..cut]))
+                    Ok(format!(
+                        "{}\n\n[truncated — open PR for full diff]",
+                        &output[..cut]
+                    ))
                 }
                 _ => Ok(output),
             }
@@ -1032,7 +1042,12 @@ pub mod mock {
             Ok(())
         }
 
-        async fn diff(&self, _branch: &str, _base_ref: &str, _max_bytes: Option<usize>) -> Result<String> {
+        async fn diff(
+            &self,
+            _branch: &str,
+            _base_ref: &str,
+            _max_bytes: Option<usize>,
+        ) -> Result<String> {
             Ok(String::new())
         }
     }

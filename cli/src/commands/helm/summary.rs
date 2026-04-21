@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 
-use crate::api_types::{InspectResponse, LoopSummary};
-use super::cost::{self, PricingConfig, format_cost, format_tokens, round_total_tokens, round_duration_secs, calculate_loop_round_cost};
+use super::cost::{
+    self, PricingConfig, calculate_loop_round_cost, format_cost, format_tokens,
+    round_duration_secs, round_total_tokens,
+};
 use super::is_terminal_state;
+use crate::api_types::{InspectResponse, LoopSummary};
 
 /// Build the compact one-line header summary (FR-1a).
 ///
@@ -21,7 +24,9 @@ pub fn build_header(
 
     if non_terminal.is_empty() {
         return if team {
-            format!("nautiloop · {profile_name} · team view · no active loops · press s to start a new spec")
+            format!(
+                "nautiloop · {profile_name} · team view · no active loops · press s to start a new spec"
+            )
         } else {
             format!("nautiloop · {profile_name} · no active loops · press s to start a new spec")
         };
@@ -86,11 +91,21 @@ pub fn build_header(
 
     // Build stage parts (always include at least impl count when stages are all zero)
     let mut stage_parts = Vec::new();
-    if impl_count > 0 { stage_parts.push(format!("{impl_count} impl")); }
-    if test_count > 0 { stage_parts.push(format!("{test_count} test")); }
-    if review_count > 0 { stage_parts.push(format!("{review_count} review")); }
-    if harden_count > 0 { stage_parts.push(format!("{harden_count} harden")); }
-    if awaiting_count > 0 { stage_parts.push(format!("{awaiting_count} awaiting")); }
+    if impl_count > 0 {
+        stage_parts.push(format!("{impl_count} impl"));
+    }
+    if test_count > 0 {
+        stage_parts.push(format!("{test_count} test"));
+    }
+    if review_count > 0 {
+        stage_parts.push(format!("{review_count} review"));
+    }
+    if harden_count > 0 {
+        stage_parts.push(format!("{harden_count} harden"));
+    }
+    if awaiting_count > 0 {
+        stage_parts.push(format!("{awaiting_count} awaiting"));
+    }
     if stage_parts.is_empty() {
         stage_parts.push("0 active stages".to_string());
     }
@@ -104,7 +119,10 @@ pub fn build_header(
         let mut engineers: Vec<_> = engineer_counts.into_iter().collect();
         engineers.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         let eng_parts: Vec<String> = engineers.iter().map(|(e, c)| format!("{e}:{c}")).collect();
-        format!("nautiloop · {profile_name} · team [{}]", eng_parts.join(" "))
+        format!(
+            "nautiloop · {profile_name} · team [{}]",
+            eng_parts.join(" ")
+        )
     } else {
         format!("nautiloop · {profile_name}")
     };
@@ -164,13 +182,25 @@ mod tests {
 
     #[test]
     fn header_no_active_loops() {
-        let header = build_header(&[], &HashMap::new(), &PricingConfig::default(), false, "default");
+        let header = build_header(
+            &[],
+            &HashMap::new(),
+            &PricingConfig::default(),
+            false,
+            "default",
+        );
         assert!(header.contains("no active loops"));
     }
 
     #[test]
     fn header_team_view_empty() {
-        let header = build_header(&[], &HashMap::new(), &PricingConfig::default(), true, "default");
+        let header = build_header(
+            &[],
+            &HashMap::new(),
+            &PricingConfig::default(),
+            true,
+            "default",
+        );
         assert!(header.contains("team view"));
     }
 
@@ -180,7 +210,13 @@ mod tests {
         l1.engineer = "alice".to_string();
         let mut l2 = make_loop("IMPLEMENTING");
         l2.engineer = "bob".to_string();
-        let header = build_header(&[l1, l2], &HashMap::new(), &PricingConfig::default(), true, "default");
+        let header = build_header(
+            &[l1, l2],
+            &HashMap::new(),
+            &PricingConfig::default(),
+            true,
+            "default",
+        );
         assert!(header.contains("team"));
         assert!(header.contains("alice:1"));
         assert!(header.contains("bob:1"));
@@ -194,7 +230,13 @@ mod tests {
             make_loop("REVIEWING"),
             make_loop("AWAITING_APPROVAL"),
         ];
-        let header = build_header(&loops, &HashMap::new(), &PricingConfig::default(), false, "default");
+        let header = build_header(
+            &loops,
+            &HashMap::new(),
+            &PricingConfig::default(),
+            false,
+            "default",
+        );
         assert!(header.contains("4 active"));
         assert!(header.contains("2 impl"));
         assert!(header.contains("1 review"));
@@ -208,7 +250,13 @@ mod tests {
             make_loop("CONVERGED"),
             make_loop("FAILED"),
         ];
-        let header = build_header(&loops, &HashMap::new(), &PricingConfig::default(), false, "default");
+        let header = build_header(
+            &loops,
+            &HashMap::new(),
+            &PricingConfig::default(),
+            false,
+            "default",
+        );
         assert!(header.contains("1 active"));
     }
 }

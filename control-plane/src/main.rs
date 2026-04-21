@@ -145,12 +145,8 @@ async fn main() -> anyhow::Result<()> {
                 nautiloop_control_plane::git::bare::BareRepoGitOperations::new(&bare_repo_path),
             );
 
-            let (driver, judge_resolution) = loop_engine::build_loop_driver(
-                &config,
-                store.clone(),
-                dispatcher,
-                git,
-            );
+            let (driver, judge_resolution) =
+                loop_engine::build_loop_driver(&config, store.clone(), dispatcher, git);
             match &judge_resolution {
                 JudgeResolution::Enabled { model } => {
                     tracing::info!(

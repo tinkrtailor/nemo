@@ -491,7 +491,8 @@ pub mod memory {
         ) -> Result<std::collections::HashMap<Uuid, Vec<RoundRecord>>> {
             let id_set: std::collections::HashSet<Uuid> = loop_ids.iter().copied().collect();
             let rounds = self.rounds.read().await;
-            let mut map: std::collections::HashMap<Uuid, Vec<RoundRecord>> = std::collections::HashMap::new();
+            let mut map: std::collections::HashMap<Uuid, Vec<RoundRecord>> =
+                std::collections::HashMap::new();
             for r in rounds.iter() {
                 if id_set.contains(&r.loop_id) {
                     map.entry(r.loop_id).or_default().push(r.clone());
@@ -591,10 +592,7 @@ pub mod memory {
 
         async fn count_judge_decisions(&self, loop_id: Uuid) -> Result<u32> {
             let decisions = self.judge_decisions.read().await;
-            Ok(decisions
-                .iter()
-                .filter(|d| d.loop_id == loop_id)
-                .count() as u32)
+            Ok(decisions.iter().filter(|d| d.loop_id == loop_id).count() as u32)
         }
 
         async fn count_exit_clean_decisions(&self, loop_id: Uuid) -> Result<u32> {
@@ -633,7 +631,9 @@ pub mod memory {
             Ok(())
         }
 
-        async fn get_loop_state_counts(&self) -> Result<std::collections::HashMap<LoopState, usize>> {
+        async fn get_loop_state_counts(
+            &self,
+        ) -> Result<std::collections::HashMap<LoopState, usize>> {
             let loops = self.loops.read().await;
             let mut counts = std::collections::HashMap::new();
             for l in loops.values() {

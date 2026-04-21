@@ -1,5 +1,5 @@
-use crate::api_types::LoopSummary;
 use super::is_terminal_state;
+use crate::api_types::LoopSummary;
 
 /// Loop command types (FR-3a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,21 +43,17 @@ pub fn validate_action(command: LoopCommand, loop_item: &LoopSummary) -> Result<
                 Ok(())
             }
         }
-        LoopCommand::Resume => {
-            match state {
-                "PAUSED" | "AWAITING_REAUTH" => Ok(()),
-                "FAILED" if loop_item.failed_from_state.is_some() => Ok(()),
-                "FAILED" => Err("cannot resume FAILED loop without resumable stage".to_string()),
-                _ => Err(format!("cannot resume in state {state}")),
-            }
-        }
-        LoopCommand::Extend => {
-            match state {
-                "FAILED" if loop_item.failed_from_state.is_some() => Ok(()),
-                "FAILED" => Err("cannot extend FAILED loop without resumable stage".to_string()),
-                _ => Err(format!("cannot extend in state {state}")),
-            }
-        }
+        LoopCommand::Resume => match state {
+            "PAUSED" | "AWAITING_REAUTH" => Ok(()),
+            "FAILED" if loop_item.failed_from_state.is_some() => Ok(()),
+            "FAILED" => Err("cannot resume FAILED loop without resumable stage".to_string()),
+            _ => Err(format!("cannot resume in state {state}")),
+        },
+        LoopCommand::Extend => match state {
+            "FAILED" if loop_item.failed_from_state.is_some() => Ok(()),
+            "FAILED" => Err("cannot extend FAILED loop without resumable stage".to_string()),
+            _ => Err(format!("cannot extend in state {state}")),
+        },
         LoopCommand::OpenPr => {
             if loop_item.spec_pr_url.is_some() {
                 Ok(())

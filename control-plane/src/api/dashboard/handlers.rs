@@ -17,9 +17,8 @@ use crate::types::LoopState;
 
 /// Extract the CSRF token string from the optional extension (set by auth middleware).
 fn csrf_from(ext: Option<axum::Extension<CsrfToken>>) -> String {
-    ext.map(|e| e.0 .0.clone()).unwrap_or_default()
+    ext.map(|e| e.0.0.clone()).unwrap_or_default()
 }
-
 
 /// GET /dashboard/login — render login form with CSRF token.
 pub async fn login_page(Query(params): Query<HashMap<String, String>>) -> Response {
@@ -37,10 +36,9 @@ pub async fn login_page(Query(params): Query<HashMap<String, String>>) -> Respon
     );
     let clear_old_csrf = "nautiloop_csrf=; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=0";
     let mut response = Html(html).into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        csrf_cookie.parse().unwrap(),
-    );
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, csrf_cookie.parse().unwrap());
     if let Ok(val) = clear_old_csrf.parse() {
         response.headers_mut().append(header::SET_COOKIE, val);
     }
@@ -57,10 +55,11 @@ pub async fn login_submit(
     // Uses `nautiloop_login_csrf` — a dedicated cookie set by the login page —
     // to avoid collision with the auth middleware's `nautiloop_csrf` cookie.
     let csrf_form = form.get("csrf_token").map(|s| s.as_str()).unwrap_or("");
-    let csrf_cookie = super::auth::extract_cookie_value(&headers, "nautiloop_login_csrf")
-        .unwrap_or("");
+    let csrf_cookie =
+        super::auth::extract_cookie_value(&headers, "nautiloop_login_csrf").unwrap_or("");
     if !super::auth::validate_csrf_token(csrf_form, csrf_cookie) {
-        return Redirect::to("/dashboard/login?error=Invalid+request,+please+try+again").into_response();
+        return Redirect::to("/dashboard/login?error=Invalid+request,+please+try+again")
+            .into_response();
     }
 
     let api_key = form.get("api_key").map(|s| s.as_str()).unwrap_or("");
@@ -86,7 +85,9 @@ pub async fn login_submit(
     }
 
     let env_key = std::env::var("NAUTILOOP_API_KEY").ok();
-    let expected = state.api_key.as_deref()
+    let expected = state
+        .api_key
+        .as_deref()
         .or(env_key.as_deref())
         .unwrap_or("");
     if !super::auth::validate_api_key_against(api_key, expected) {
@@ -95,7 +96,11 @@ pub async fn login_submit(
 
     // Set HttpOnly, SameSite=Strict cookies with 7-day expiry.
     // Secure flag controlled by explicit config (defaults to auto-detect from bind_addr).
-    let secure_flag = if state.config.dashboard_secure_cookie() { "; Secure" } else { "" };
+    let secure_flag = if state.config.dashboard_secure_cookie() {
+        "; Secure"
+    } else {
+        ""
+    };
     let api_cookie = format!(
         "nautiloop_api_key={}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800{}",
         api_key, secure_flag
@@ -106,14 +111,12 @@ pub async fn login_submit(
     );
 
     let mut response = Redirect::to("/dashboard").into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        api_cookie.parse().unwrap(),
-    );
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        engineer_cookie.parse().unwrap(),
-    );
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, api_cookie.parse().unwrap());
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, engineer_cookie.parse().unwrap());
     response
 }
 
@@ -125,13 +128,17 @@ pub async fn logout(
 ) -> Response {
     // Validate CSRF token (double-submit cookie pattern)
     let csrf_form = form.get("csrf_token").map(|s| s.as_str()).unwrap_or("");
-    let csrf_cookie = super::auth::extract_cookie_value(&headers, "nautiloop_csrf")
-        .unwrap_or("");
+    let csrf_cookie = super::auth::extract_cookie_value(&headers, "nautiloop_csrf").unwrap_or("");
     if !super::auth::validate_csrf_token(csrf_form, csrf_cookie) {
-        return Redirect::to("/dashboard/login?error=Invalid+request,+please+try+again").into_response();
+        return Redirect::to("/dashboard/login?error=Invalid+request,+please+try+again")
+            .into_response();
     }
 
-    let secure_flag = if state.config.dashboard_secure_cookie() { "; Secure" } else { "" };
+    let secure_flag = if state.config.dashboard_secure_cookie() {
+        "; Secure"
+    } else {
+        ""
+    };
     let api_clear = format!(
         "nautiloop_api_key=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{}",
         secure_flag
@@ -141,12 +148,12 @@ pub async fn logout(
         secure_flag
     );
     let csrf_clear = "nautiloop_csrf=; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=0";
-    let login_csrf_clear = "nautiloop_login_csrf=; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=0";
+    let login_csrf_clear =
+        "nautiloop_login_csrf=; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=0";
     let mut response = Redirect::to("/dashboard/login").into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        api_clear.parse().unwrap(),
-    );
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, api_clear.parse().unwrap());
     if let Ok(val) = engineer_clear.parse() {
         response.headers_mut().append(header::SET_COOKIE, val);
     }
@@ -178,7 +185,7 @@ pub async fn grid_page(
     engineer_ext: Option<axum::Extension<super::auth::EngineerName>>,
 ) -> Result<Html<String>, NautiloopError> {
     let csrf_token = csrf_from(csrf_ext);
-    let viewer_engineer = engineer_ext.map(|e| e.0 .0.clone());
+    let viewer_engineer = engineer_ext.map(|e| e.0.0.clone());
     let show_team = query.team.unwrap_or(false);
 
     // Resolve engineer filter: explicit query param > 'mine' (default, uses viewer cookie) > all
@@ -221,7 +228,10 @@ pub async fn grid_page(
                 )
             })
             .count(),
-        failed: loops.iter().filter(|l| l.state == LoopState::Failed).count(),
+        failed: loops
+            .iter()
+            .filter(|l| l.state == LoopState::Failed)
+            .count(),
     };
 
     // Fetch rounds for all loops in a single query (avoids N+1)
@@ -231,7 +241,10 @@ pub async fn grid_page(
     let mut cards = Vec::with_capacity(loops.len());
     let mut loop_costs: HashMap<Uuid, f64> = HashMap::new();
     for record in &loops {
-        let rounds = all_rounds.get(&record.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        let rounds = all_rounds
+            .get(&record.id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         let (total_tokens, total_cost, last_verdict) = compute_round_metrics(rounds);
         let current_stage = resolve_current_stage_with_rounds(record, rounds);
         loop_costs.insert(record.id, total_cost);
@@ -324,7 +337,9 @@ pub async fn detail_page(
 
     for rr in &rounds {
         let (tokens, cost, verdict_clean, issues_count, confidence) = extract_round_output(rr);
-        let has_judge = judge_decisions.iter().any(|jd| jd.round == rr.round && jd.phase == rr.stage);
+        let has_judge = judge_decisions
+            .iter()
+            .any(|jd| jd.round == rr.round && jd.phase == rr.stage);
         let judge_decision = judge_decisions
             .iter()
             .find(|jd| jd.round == rr.round && jd.phase == rr.stage)
@@ -382,7 +397,9 @@ pub async fn detail_page(
         token_breakdown,
     };
 
-    Ok(Html(render::render_detail(&detail_data, &csrf_token).into_string()))
+    Ok(Html(
+        render::render_detail(&detail_data, &csrf_token).into_string(),
+    ))
 }
 
 /// GET /dashboard/stream/:id — SSE log stream (re-expose under dashboard namespace).
@@ -429,8 +446,10 @@ pub async fn static_css() -> impl IntoResponse {
     static CSS: &str = include_str!("../../../assets/dashboard.css");
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8"),
-         (header::CACHE_CONTROL, "public, max-age=86400")],
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
         CSS,
     )
 }
@@ -440,8 +459,13 @@ pub async fn static_js() -> impl IntoResponse {
     static JS: &str = include_str!("../../../assets/dashboard.js");
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
-         (header::CACHE_CONTROL, "public, max-age=86400")],
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
         JS,
     )
 }
@@ -659,11 +683,7 @@ pub async fn proxy_pod_introspect(
 ) -> Result<Response, NautiloopError> {
     // Delegate to the main pod_introspect handler logic.
     // We call it directly rather than re-implementing to keep the proxy thin.
-    let response = super::super::introspect::pod_introspect(
-        State(state),
-        Path(loop_id),
-    )
-    .await?;
+    let response = super::super::introspect::pod_introspect(State(state), Path(loop_id)).await?;
     Ok(response.into_response())
 }
 
@@ -713,7 +733,7 @@ pub async fn dashboard_state(
     Query(query): Query<GridQuery>,
     engineer_ext: Option<axum::Extension<super::auth::EngineerName>>,
 ) -> Result<Json<DashboardStateResponse>, NautiloopError> {
-    let viewer_engineer = engineer_ext.map(|e| e.0 .0.clone());
+    let viewer_engineer = engineer_ext.map(|e| e.0.0.clone());
     let show_team = query.team.unwrap_or(false);
 
     // Resolve engineer filter same as grid_page (FR-3e)
@@ -742,7 +762,10 @@ pub async fn dashboard_state(
 
     let mut summaries = Vec::with_capacity(loops.len());
     for record in &loops {
-        let rounds = all_rounds.get(&record.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        let rounds = all_rounds
+            .get(&record.id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         let (total_tokens, total_cost, last_verdict) = compute_round_metrics(rounds);
         let current_stage = resolve_current_stage_with_rounds(record, rounds);
 
@@ -806,7 +829,14 @@ pub async fn feed_page(
     let csrf_token = csrf_from(csrf_ext);
     let filter = query.filter.as_deref().unwrap_or("all");
     let engineer_filter = query.engineer.as_deref();
-    let (items, engineers) = fetch_feed_items_with_engineers(&state, filter, engineer_filter, query.cursor.as_deref(), 50).await?;
+    let (items, engineers) = fetch_feed_items_with_engineers(
+        &state,
+        filter,
+        engineer_filter,
+        query.cursor.as_deref(),
+        50,
+    )
+    .await?;
 
     let next_cursor = if items.len() >= 50 {
         items.last().map(|i| i.updated_at.to_rfc3339())
@@ -815,7 +845,15 @@ pub async fn feed_page(
     };
 
     Ok(Html(
-        render::render_feed(&items, next_cursor.as_deref(), filter, &engineers, engineer_filter, &csrf_token).into_string(),
+        render::render_feed(
+            &items,
+            next_cursor.as_deref(),
+            filter,
+            &engineers,
+            engineer_filter,
+            &csrf_token,
+        )
+        .into_string(),
     ))
 }
 
@@ -826,7 +864,14 @@ pub async fn feed_json(
 ) -> Result<Json<FeedJsonResponse>, NautiloopError> {
     let filter = query.filter.as_deref().unwrap_or("all");
     let engineer_filter = query.engineer.as_deref();
-    let (items, _) = fetch_feed_items_with_engineers(&state, filter, engineer_filter, query.cursor.as_deref(), 50).await?;
+    let (items, _) = fetch_feed_items_with_engineers(
+        &state,
+        filter,
+        engineer_filter,
+        query.cursor.as_deref(),
+        50,
+    )
+    .await?;
 
     let next_cursor = if items.len() >= 50 {
         items.last().map(|i| i.updated_at.to_rfc3339())
@@ -890,7 +935,11 @@ async fn fetch_feed_items_with_engineers(
     // Previously this was done in-memory, which could under-report results when
     // filtering for "converged" but most terminal loops were "failed" (or vice versa).
     let state_filter: Option<Vec<LoopState>> = match filter {
-        "converged" => Some(vec![LoopState::Converged, LoopState::Hardened, LoopState::Shipped]),
+        "converged" => Some(vec![
+            LoopState::Converged,
+            LoopState::Hardened,
+            LoopState::Shipped,
+        ]),
         "failed" => Some(vec![LoopState::Failed]),
         _ => None, // "all" — include all terminal states
     };
@@ -943,7 +992,9 @@ pub async fn specs_page(
     // - Active loops: use get_active_loops_for_spec with spec_path filter (DB-level)
     // Both queries filter at the database level to avoid fetching unrelated loops.
     let (terminal_loops, active_matching) = tokio::join!(
-        state.store.get_terminal_loops(None, Some(&spec_path), None, None, 500, None),
+        state
+            .store
+            .get_terminal_loops(None, Some(&spec_path), None, None, 500, None),
         state.store.get_active_loops_for_spec(&spec_path),
     );
     let terminal_loops = terminal_loops?;
@@ -1027,7 +1078,9 @@ pub async fn stats_page(
 ) -> Result<Html<String>, NautiloopError> {
     let csrf_token = csrf_from(csrf_ext);
     let stats = compute_stats_cached(&state, &query.window).await?;
-    Ok(Html(render::render_stats(&stats, &csrf_token).into_string()))
+    Ok(Html(
+        render::render_stats(&stats, &csrf_token).into_string(),
+    ))
 }
 
 /// GET /dashboard/stats/json — for API consumers (FR-14b).
@@ -1160,7 +1213,12 @@ async fn compute_fleet_cached(
     };
     {
         let mut guard = state.fleet_cache.write().await;
-        *guard = Some((fleet_json.clone(), counts.clone(), fleet.clone(), Utc::now()));
+        *guard = Some((
+            fleet_json.clone(),
+            counts.clone(),
+            fleet.clone(),
+            Utc::now(),
+        ));
     }
     Ok((fleet_json, counts, fleet))
 }
@@ -1168,9 +1226,7 @@ async fn compute_fleet_cached(
 // ── Shared helpers ──
 
 /// Compute token and cost metrics from round records.
-pub fn compute_round_metrics(
-    rounds: &[crate::types::RoundRecord],
-) -> (u64, f64, Option<String>) {
+pub fn compute_round_metrics(rounds: &[crate::types::RoundRecord]) -> (u64, f64, Option<String>) {
     let mut total_tokens: u64 = 0;
     let mut total_cost: f64 = 0.0;
     let mut last_verdict: Option<String> = None;
@@ -1313,10 +1369,7 @@ fn compute_fleet_summary(
 ) -> render::FleetSummary {
     let week_ago = Utc::now() - Duration::days(7);
     let prior_week_start = week_ago - Duration::days(7);
-    let this_week: Vec<_> = loops
-        .iter()
-        .filter(|l| l.created_at >= week_ago)
-        .collect();
+    let this_week: Vec<_> = loops.iter().filter(|l| l.created_at >= week_ago).collect();
     let prior_week: Vec<_> = loops
         .iter()
         .filter(|l| l.created_at >= prior_week_start && l.created_at < week_ago)
@@ -1325,10 +1378,7 @@ fn compute_fleet_summary(
     let total_loops = this_week.len();
 
     // Current window metrics
-    let terminal: Vec<_> = this_week
-        .iter()
-        .filter(|l| l.state.is_terminal())
-        .collect();
+    let terminal: Vec<_> = this_week.iter().filter(|l| l.state.is_terminal()).collect();
     let converged_count = terminal
         .iter()
         .filter(|l| {
@@ -1388,7 +1438,10 @@ fn compute_fleet_summary(
         None
     };
     let prior_avg_rounds = if !prior_terminal.is_empty() {
-        Some(prior_terminal.iter().map(|l| l.round as f64).sum::<f64>() / prior_terminal.len() as f64)
+        Some(
+            prior_terminal.iter().map(|l| l.round as f64).sum::<f64>()
+                / prior_terminal.len() as f64,
+        )
     } else {
         None
     };
@@ -1451,7 +1504,12 @@ fn format_fleet_text(fleet: &render::FleetSummary) -> String {
         let base = format!("{:.0}%", rate * 100.0);
         if let Some(delta) = fleet.converge_rate_trend {
             let arrow = if delta > 0.0 { "\u{2191}" } else { "\u{2193}" };
-            parts.push(format!("{} {}{:.0}% converged", base, arrow, (delta * 100.0).abs()));
+            parts.push(format!(
+                "{} {}{:.0}% converged",
+                base,
+                arrow,
+                (delta * 100.0).abs()
+            ));
         } else {
             parts.push(format!("{} converged", base));
         }
@@ -1485,10 +1543,7 @@ async fn compute_stats(
 
     // Use time-bounded aggregation query (no row LIMIT) so stats are
     // accurate on long-running deployments with >10k loops.
-    let all_loops = state
-        .store
-        .get_loops_for_aggregation(cutoff)
-        .await?;
+    let all_loops = state.store.get_loops_for_aggregation(cutoff).await?;
 
     let window_loops: Vec<_> = all_loops.iter().collect();
 
@@ -1568,31 +1623,39 @@ async fn compute_stats(
 
     let mut per_engineer: Vec<render::EngineerStats> = engineer_map
         .into_iter()
-        .map(|(eng, (loops, cost, converged, terminal_c))| render::EngineerStats {
-            engineer: eng.to_string(),
-            loops,
-            cost,
-            converge_rate: if terminal_c > 0 {
-                converged as f64 / terminal_c as f64
-            } else {
-                0.0
+        .map(
+            |(eng, (loops, cost, converged, terminal_c))| render::EngineerStats {
+                engineer: eng.to_string(),
+                loops,
+                cost,
+                converge_rate: if terminal_c > 0 {
+                    converged as f64 / terminal_c as f64
+                } else {
+                    0.0
+                },
             },
-        })
+        )
         .collect();
-    per_engineer.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal));
+    per_engineer.sort_by(|a, b| {
+        b.cost
+            .partial_cmp(&a.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut per_spec: Vec<render::SpecStats> = spec_map
         .into_iter()
-        .map(|(path, (runs, cost, converged, terminal_c))| render::SpecStats {
-            spec_path: path.to_string(),
-            runs,
-            cost,
-            converge_rate: if terminal_c > 0 {
-                converged as f64 / terminal_c as f64
-            } else {
-                0.0
+        .map(
+            |(path, (runs, cost, converged, terminal_c))| render::SpecStats {
+                spec_path: path.to_string(),
+                runs,
+                cost,
+                converge_rate: if terminal_c > 0 {
+                    converged as f64 / terminal_c as f64
+                } else {
+                    0.0
+                },
             },
-        })
+        )
         .collect();
     per_spec.sort_by_key(|s| std::cmp::Reverse(s.runs));
     per_spec.truncate(10);
@@ -1635,9 +1698,7 @@ async fn compute_stats(
         let failed = window_loops
             .iter()
             .filter(|l| {
-                l.updated_at >= day_start
-                    && l.updated_at < day_end
-                    && l.state == LoopState::Failed
+                l.updated_at >= day_start && l.updated_at < day_end && l.state == LoopState::Failed
             })
             .count();
 
@@ -1739,8 +1800,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_login_page_renders_html() {
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(test_state());
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(test_state());
 
         let response = app
             .oneshot(
@@ -1769,8 +1832,10 @@ mod tests {
         let state = test_state();
 
         // Step 1: GET the login page to obtain a valid CSRF token
-        let app1 = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state.clone());
+        let app1 = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state.clone());
         let get_response = app1
             .oneshot(
                 Request::builder()
@@ -1782,15 +1847,28 @@ mod tests {
             .unwrap();
         // Login page now sets `nautiloop_login_csrf` (not `nautiloop_csrf`) to avoid
         // collision with the auth middleware's CSRF cookie.
-        let csrf_cookie_hdr = get_response.headers().get("set-cookie").unwrap().to_str().unwrap();
+        let csrf_cookie_hdr = get_response
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap();
         let csrf_token = csrf_cookie_hdr
-            .split(';').next().unwrap()
-            .strip_prefix("nautiloop_login_csrf=").unwrap();
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("nautiloop_login_csrf=")
+            .unwrap();
 
         // Step 2: POST with valid CSRF but wrong API key
-        let app2 = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
-        let body = format!("engineer_name=alice&api_key=wrong-key&csrf_token={}", csrf_token);
+        let app2 = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
+        let body = format!(
+            "engineer_name=alice&api_key=wrong-key&csrf_token={}",
+            csrf_token
+        );
         let response = app2
             .oneshot(
                 Request::builder()
@@ -1806,9 +1884,18 @@ mod tests {
 
         // Should redirect to login with the specific "Invalid+API+key" error
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let location = response.headers().get("location").unwrap().to_str().unwrap();
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(location.contains("/dashboard/login"));
-        assert!(location.contains("Invalid+API+key"), "expected 'Invalid+API+key' in redirect, got: {}", location);
+        assert!(
+            location.contains("Invalid+API+key"),
+            "expected 'Invalid+API+key' in redirect, got: {}",
+            location
+        );
     }
 
     #[tokio::test]
@@ -1817,8 +1904,10 @@ mod tests {
         let state = test_state();
 
         // Step 1: GET the login page to obtain CSRF token cookie
-        let app1 = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state.clone());
+        let app1 = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state.clone());
         let get_response = app1
             .oneshot(
                 Request::builder()
@@ -1828,15 +1917,28 @@ mod tests {
             )
             .await
             .unwrap();
-        let csrf_cookie_hdr = get_response.headers().get("set-cookie").unwrap().to_str().unwrap();
+        let csrf_cookie_hdr = get_response
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap();
         let csrf_token = csrf_cookie_hdr
-            .split(';').next().unwrap()
-            .strip_prefix("nautiloop_login_csrf=").unwrap();
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("nautiloop_login_csrf=")
+            .unwrap();
 
         // Step 2: POST with CSRF token + API key
-        let app2 = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
-        let body = format!("engineer_name=alice&api_key=test-api-key&csrf_token={}", csrf_token);
+        let app2 = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
+        let body = format!(
+            "engineer_name=alice&api_key=test-api-key&csrf_token={}",
+            csrf_token
+        );
         let response = app2
             .oneshot(
                 Request::builder()
@@ -1851,24 +1953,39 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let location = response.headers().get("location").unwrap().to_str().unwrap();
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_eq!(location, "/dashboard");
         // Should set both api_key and engineer cookies
-        let cookies: Vec<_> = response.headers().get_all("set-cookie")
+        let cookies: Vec<_> = response
+            .headers()
+            .get_all("set-cookie")
             .iter()
             .filter_map(|v| v.to_str().ok())
             .collect();
-        let api_cookie = cookies.iter().find(|c| c.contains("nautiloop_api_key=test-api-key")).unwrap();
+        let api_cookie = cookies
+            .iter()
+            .find(|c| c.contains("nautiloop_api_key=test-api-key"))
+            .unwrap();
         assert!(api_cookie.contains("HttpOnly"));
         assert!(api_cookie.contains("SameSite=Strict"));
-        let eng_cookie = cookies.iter().find(|c| c.contains("nautiloop_engineer=alice")).unwrap();
+        let eng_cookie = cookies
+            .iter()
+            .find(|c| c.contains("nautiloop_engineer=alice"))
+            .unwrap();
         assert!(eng_cookie.contains("HttpOnly"));
     }
 
     #[tokio::test]
     async fn test_unauthenticated_redirect() {
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(test_state());
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(test_state());
 
         let response = app
             .oneshot(
@@ -1882,7 +1999,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let location = response.headers().get("location").unwrap().to_str().unwrap();
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_eq!(location, "/dashboard/login");
     }
 
@@ -1893,8 +2015,10 @@ mod tests {
         let record = test_loop_record("alice", LoopState::Implementing);
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
@@ -1941,13 +2065,15 @@ mod tests {
         };
         state.store.create_round(&round).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(&format!("/dashboard/loops/{}", loop_id))
+                    .uri(format!("/dashboard/loops/{}", loop_id))
                     .header("accept", "text/html")
                     .header("cookie", "nautiloop_api_key=test-api-key")
                     .body(Body::empty())
@@ -1972,8 +2098,10 @@ mod tests {
         let record = test_loop_record("alice", LoopState::Implementing);
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
@@ -1998,8 +2126,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_css() {
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(test_state());
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(test_state());
 
         let response = app
             .oneshot(
@@ -2012,14 +2142,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+        let ct = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(ct.contains("text/css"));
     }
 
     #[tokio::test]
     async fn test_static_js() {
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(test_state());
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(test_state());
 
         let response = app
             .oneshot(
@@ -2032,15 +2169,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+        let ct = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(ct.contains("javascript"));
     }
 
     #[tokio::test]
     async fn test_logout_clears_cookie() {
         let csrf_token = "test-csrf-token-12345678";
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(test_state());
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(test_state());
 
         let body = format!("csrf_token={}", csrf_token);
         let response = app
@@ -2049,7 +2193,13 @@ mod tests {
                     .method("POST")
                     .uri("/dashboard/logout")
                     .header("content-type", "application/x-www-form-urlencoded")
-                    .header("cookie", format!("nautiloop_api_key=test-api-key; nautiloop_csrf={}", csrf_token))
+                    .header(
+                        "cookie",
+                        format!(
+                            "nautiloop_api_key=test-api-key; nautiloop_csrf={}",
+                            csrf_token
+                        ),
+                    )
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -2057,11 +2207,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let cookies: Vec<_> = response.headers().get_all("set-cookie")
+        let cookies: Vec<_> = response
+            .headers()
+            .get_all("set-cookie")
             .iter()
             .filter_map(|v| v.to_str().ok())
             .collect();
-        let api_cookie = cookies.iter().find(|c| c.contains("nautiloop_api_key=")).unwrap();
+        let api_cookie = cookies
+            .iter()
+            .find(|c| c.contains("nautiloop_api_key="))
+            .unwrap();
         assert!(api_cookie.contains("Max-Age=0"));
     }
 
@@ -2072,8 +2227,10 @@ mod tests {
         record.spec_pr_url = Some("https://github.com/test/repo/pull/1".to_string());
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
@@ -2102,8 +2259,10 @@ mod tests {
         let record = test_loop_record("alice", LoopState::Converged);
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
@@ -2170,8 +2329,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_bearer_auth_for_dashboard_state() {
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(test_state());
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(test_state());
 
         // Should succeed with bearer token
         let response = app
@@ -2190,8 +2351,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_unauthenticated_json_returns_401() {
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(test_state());
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(test_state());
 
         let response = app
             .oneshot(
@@ -2213,8 +2376,10 @@ mod tests {
         record.spec_pr_url = Some("https://github.com/test/repo/pull/2".to_string());
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
@@ -2242,8 +2407,10 @@ mod tests {
         let record = test_loop_record("bob", LoopState::Converged);
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
@@ -2271,8 +2438,10 @@ mod tests {
         let record = test_loop_record("alice", LoopState::Converged);
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
@@ -2304,8 +2473,10 @@ mod tests {
         state.store.create_loop(&active).await.unwrap();
         state.store.create_loop(&terminal).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
@@ -2338,14 +2509,16 @@ mod tests {
         let loop_id = record.id;
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/dashboard/api/approve/{}", loop_id))
+                    .uri(format!("/dashboard/api/approve/{}", loop_id))
                     .header("cookie", "nautiloop_api_key=test-api-key")
                     .header("content-type", "application/json")
                     .body(Body::empty())
@@ -2369,14 +2542,16 @@ mod tests {
         let loop_id = record.id;
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(&format!("/dashboard/api/cancel/{}", loop_id))
+                    .uri(format!("/dashboard/api/cancel/{}", loop_id))
                     .header("cookie", "nautiloop_api_key=test-api-key")
                     .body(Body::empty())
                     .unwrap(),
@@ -2399,14 +2574,16 @@ mod tests {
         let loop_id = record.id;
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(&format!("/dashboard/api/cancel/{}", loop_id))
+                    .uri(format!("/dashboard/api/cancel/{}", loop_id))
                     .header("cookie", "nautiloop_api_key=test-api-key")
                     .body(Body::empty())
                     .unwrap(),
@@ -2425,14 +2602,16 @@ mod tests {
         let loop_id = record.id;
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/dashboard/api/resume/{}", loop_id))
+                    .uri(format!("/dashboard/api/resume/{}", loop_id))
                     .header("cookie", "nautiloop_api_key=test-api-key")
                     .header("content-type", "application/json")
                     .body(Body::empty())
@@ -2456,14 +2635,16 @@ mod tests {
         let loop_id = record.id;
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/dashboard/api/extend/{}", loop_id))
+                    .uri(format!("/dashboard/api/extend/{}", loop_id))
                     .header("cookie", "nautiloop_api_key=test-api-key")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"add_rounds":10}"#))
@@ -2487,15 +2668,17 @@ mod tests {
         let loop_id = record.id;
         state.store.create_loop(&record).await.unwrap();
 
-        let app = crate::api::dashboard::build_dashboard_router_with_key(Some("test-api-key".to_string()))
-            .with_state(state);
+        let app = crate::api::dashboard::build_dashboard_router_with_key(Some(
+            "test-api-key".to_string(),
+        ))
+        .with_state(state);
 
         // No cookie or bearer → should be unauthorized
         let response = app
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(&format!("/dashboard/api/cancel/{}", loop_id))
+                    .uri(format!("/dashboard/api/cancel/{}", loop_id))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2563,7 +2746,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(&format!("/dashboard/loops/{}", loop_id))
+                    .uri(format!("/dashboard/loops/{}", loop_id))
                     .header("accept", "text/html")
                     .header("cookie", "nautiloop_api_key=test-api-key")
                     .body(Body::empty())

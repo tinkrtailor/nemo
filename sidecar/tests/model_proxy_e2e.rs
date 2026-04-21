@@ -29,7 +29,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use nautiloop_sidecar::model_proxy::{serve_for_test, TestProxyConfig};
+use nautiloop_sidecar::model_proxy::{TestProxyConfig, serve_for_test};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
@@ -50,9 +50,7 @@ struct CapturedRequest {
 /// Returns the bound address and a shared buffer of captured requests.
 /// Every request is answered with `200 OK` + `{}` body.
 async fn start_mock_upstream() -> (SocketAddr, Arc<Mutex<Vec<CapturedRequest>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("mock bind");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("mock bind");
     let addr = listener.local_addr().expect("mock addr");
     let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
     let captured_clone = Arc::clone(&captured);
@@ -118,9 +116,7 @@ async fn start_mock_upstream() -> (SocketAddr, Arc<Mutex<Vec<CapturedRequest>>>)
 ///
 /// Returns the sidecar's bound address and a shutdown sender.
 async fn start_proxy(config: TestProxyConfig) -> (SocketAddr, watch::Sender<bool>) {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("proxy bind");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("proxy bind");
     let addr = listener.local_addr().expect("proxy addr");
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let config = Arc::new(config);
@@ -163,11 +159,9 @@ async fn post(proxy_addr: SocketAddr, path: &str, body: &str) -> (u16, String) {
     use hyper_util::client::legacy::Client;
     use hyper_util::client::legacy::connect::HttpConnector;
 
-    let client: Client<HttpConnector, _> = Client::builder(TokioExecutor::new())
-        .build(HttpConnector::new());
-    let uri: hyper::Uri = format!("http://{proxy_addr}{path}")
-        .parse()
-        .expect("uri");
+    let client: Client<HttpConnector, _> =
+        Client::builder(TokioExecutor::new()).build(HttpConnector::new());
+    let uri: hyper::Uri = format!("http://{proxy_addr}{path}").parse().expect("uri");
     let req = Request::builder()
         .method("POST")
         .uri(uri)
@@ -219,7 +213,11 @@ async fn test_api_key_injects_instructions() {
     assert_eq!(status, 200);
 
     let guard = captured.lock().expect("lock");
-    assert_eq!(guard.len(), 1, "mock should have received exactly one request");
+    assert_eq!(
+        guard.len(),
+        1,
+        "mock should have received exactly one request"
+    );
     let req = &guard[0];
 
     // Auth header
@@ -375,8 +373,7 @@ async fn test_anthropic_route() {
     );
 
     // Body should be unchanged (no patching for /v1/messages)
-    let sent: serde_json::Value =
-        serde_json::from_slice(&req.body).expect("body must be JSON");
+    let sent: serde_json::Value = serde_json::from_slice(&req.body).expect("body must be JSON");
     let expected: serde_json::Value =
         serde_json::from_str(original_body).expect("original body must be JSON");
     assert_eq!(sent, expected, "body must be unchanged for Anthropic route");

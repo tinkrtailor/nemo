@@ -174,11 +174,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn template_renders_without_error() {
-        assert!(!HELP_AI_TEMPLATE.is_empty());
-    }
-
-    #[test]
     fn template_contains_state_machine_section() {
         assert!(HELP_AI_TEMPLATE.contains("## State Machine"));
     }
@@ -232,7 +227,11 @@ mod tests {
         // Also verify the count matches — if a variant is added to the enum
         // but not to the list above, this assertion catches it. The count must
         // match the number of variants in the LoopState enum.
-        assert_eq!(all_states.len(), 13, "LoopState variant count changed — update this test and help_ai.md");
+        assert_eq!(
+            all_states.len(),
+            13,
+            "LoopState variant count changed — update this test and help_ai.md"
+        );
     }
 
     #[test]
@@ -313,7 +312,10 @@ mod tests {
                     }
                     // Count lines that look like table data rows: start with |,
                     // are not the header separator (|--)
-                    if line.starts_with('|') && !line.starts_with("|--") && !line.starts_with("| From") {
+                    if line.starts_with('|')
+                        && !line.starts_with("|--")
+                        && !line.starts_with("| From")
+                    {
                         count += 1;
                     }
                 }
@@ -371,7 +373,10 @@ mod tests {
                     if line.starts_with("## ") {
                         break;
                     }
-                    if line.starts_with('|') && !line.starts_with("|--") && !line.starts_with("| Level") {
+                    if line.starts_with('|')
+                        && !line.starts_with("|--")
+                        && !line.starts_with("| Level")
+                    {
                         count += 1;
                     }
                 }
@@ -391,10 +396,7 @@ mod tests {
     fn json_state_machine_has_all_states() {
         let json = build_json();
         let states = json["state_machine"]["states"].as_array().unwrap();
-        let state_names: Vec<&str> = states
-            .iter()
-            .map(|s| s["name"].as_str().unwrap())
-            .collect();
+        let state_names: Vec<&str> = states.iter().map(|s| s["name"].as_str().unwrap()).collect();
         assert!(state_names.contains(&"PENDING"));
         assert!(state_names.contains(&"HARDENING"));
         assert!(state_names.contains(&"AWAITING_APPROVAL"));

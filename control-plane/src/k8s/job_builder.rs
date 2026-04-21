@@ -1149,7 +1149,11 @@ mod tests {
         let job = build_job(&ctx, &stage, &cfg);
         let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let mounts = agent.volume_mounts.as_ref().unwrap();
-        assert!(mounts.iter().any(|m| m.mount_path == "/secrets/claude-creds"));
+        assert!(
+            mounts
+                .iter()
+                .any(|m| m.mount_path == "/secrets/claude-creds")
+        );
     }
 
     #[test]
@@ -1196,7 +1200,8 @@ mod tests {
         assert!(
             !agent_mounts
                 .iter()
-                .any(|m| m.mount_path == "/secrets/model-credentials" || m.mount_path == "/secrets/ssh-key")
+                .any(|m| m.mount_path == "/secrets/model-credentials"
+                    || m.mount_path == "/secrets/ssh-key")
         );
     }
 

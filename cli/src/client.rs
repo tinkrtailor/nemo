@@ -56,7 +56,11 @@ impl NemoClient {
 
         if !status.is_success() {
             let body = resp.text().await?;
-            return Err(ApiError { status: status.as_u16(), body }.into());
+            return Err(ApiError {
+                status: status.as_u16(),
+                body,
+            }
+            .into());
         }
 
         Ok(resp.json().await?)
@@ -75,7 +79,11 @@ impl NemoClient {
 
         if !status.is_success() {
             let body = resp.text().await?;
-            return Err(ApiError { status: status.as_u16(), body }.into());
+            return Err(ApiError {
+                status: status.as_u16(),
+                body,
+            }
+            .into());
         }
 
         Ok(resp.json().await?)
@@ -94,7 +102,11 @@ impl NemoClient {
 
         if !status.is_success() {
             let body = resp.text().await?;
-            return Err(ApiError { status: status.as_u16(), body }.into());
+            return Err(ApiError {
+                status: status.as_u16(),
+                body,
+            }
+            .into());
         }
 
         Ok(resp.json().await?)
@@ -152,7 +164,11 @@ impl NemoClient {
 
         if !status.is_success() {
             let body = resp.text().await?;
-            return Err(ApiError { status: status.as_u16(), body }.into());
+            return Err(ApiError {
+                status: status.as_u16(),
+                body,
+            }
+            .into());
         }
 
         Ok(resp)

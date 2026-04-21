@@ -7,9 +7,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use crate::error::NautiloopError;
-use crate::types::api::{
-    ContainerStats, PodIntrospectResponse, ProcessInfo, WorktreeInfo,
-};
+use crate::types::api::{ContainerStats, PodIntrospectResponse, ProcessInfo, WorktreeInfo};
 
 /// GET /pod-introspect/:loop_id — runtime snapshot of the agent container (FR-1a).
 ///
@@ -28,8 +26,7 @@ pub async fn pod_introspect(
         state.store.get_loop(loop_id),
     )
     .await
-    .map_err(|_| NautiloopError::Internal("database query timed out".to_string()))?
-    ?
+    .map_err(|_| NautiloopError::Internal("database query timed out".to_string()))??
     .ok_or(NautiloopError::LoopNotFound { id: loop_id })?;
 
     // FR-1d: terminal loops have no pod to introspect
@@ -55,9 +52,10 @@ pub async fn pod_introspect(
             .into_response());
     };
 
-    let kube_client = state.kube_client.as_ref().ok_or_else(|| {
-        NautiloopError::Internal("K8s client not available".to_string())
-    })?;
+    let kube_client = state
+        .kube_client
+        .as_ref()
+        .ok_or_else(|| NautiloopError::Internal("K8s client not available".to_string()))?;
     let namespace = &state.config.cluster.jobs_namespace;
 
     // Validate job_name is a safe Kubernetes label value (alphanumeric + hyphens + dots)
@@ -170,9 +168,7 @@ pub async fn pod_introspect(
             // contains the processes line even when worktree collection
             // was slow and got cancelled.
             match partial_output {
-                Some(ref partial) if !partial.trim().is_empty() => {
-                    parse_introspect_output(partial)
-                }
+                Some(ref partial) if !partial.trim().is_empty() => parse_introspect_output(partial),
                 _ => (Vec::new(), default_worktree()),
             }
         }
@@ -295,47 +291,46 @@ async fn exec_introspect_script(
             let shared_output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
             let shared_output_writer = shared_output.clone();
 
-            let read_result = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                async {
-                    let mut stderr_output = String::new();
-                    // Take streams before async blocks to avoid double-borrow of `attached`
-                    let mut maybe_stdout = attached.stdout();
-                    let mut maybe_stderr = attached.stderr();
-                    // Read stdout (main output) and stderr (for debugging) concurrently
-                    let stdout_fut = async {
-                        if let Some(ref mut stdout) = maybe_stdout {
-                            let mut buf = vec![0u8; 65536];
-                            loop {
-                                match stdout.read(&mut buf).await {
-                                    Ok(0) => break,
-                                    Ok(n) => {
-                                        let chunk = String::from_utf8_lossy(&buf[..n]);
-                                        shared_output_writer.lock().unwrap().push_str(&chunk);
-                                    }
-                                    Err(_) => break,
+            let read_result = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                let mut stderr_output = String::new();
+                // Take streams before async blocks to avoid double-borrow of `attached`
+                let mut maybe_stdout = attached.stdout();
+                let mut maybe_stderr = attached.stderr();
+                // Read stdout (main output) and stderr (for debugging) concurrently
+                let stdout_fut = async {
+                    if let Some(ref mut stdout) = maybe_stdout {
+                        let mut buf = vec![0u8; 65536];
+                        loop {
+                            match stdout.read(&mut buf).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    let chunk = String::from_utf8_lossy(&buf[..n]);
+                                    shared_output_writer.lock().unwrap().push_str(&chunk);
                                 }
+                                Err(_) => break,
                             }
                         }
-                    };
-                    let stderr_fut = async {
-                        if let Some(ref mut stderr) = maybe_stderr {
-                            let mut buf = vec![0u8; 4096];
-                            loop {
-                                match stderr.read(&mut buf).await {
-                                    Ok(0) => break,
-                                    Ok(n) => stderr_output.push_str(&String::from_utf8_lossy(&buf[..n])),
-                                    Err(_) => break,
-                                }
-                            }
-                        }
-                    };
-                    tokio::join!(stdout_fut, stderr_fut);
-                    if !stderr_output.is_empty() {
-                        tracing::debug!(stderr = %stderr_output, "introspect exec stderr");
                     }
-                },
-            )
+                };
+                let stderr_fut = async {
+                    if let Some(ref mut stderr) = maybe_stderr {
+                        let mut buf = vec![0u8; 4096];
+                        loop {
+                            match stderr.read(&mut buf).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    stderr_output.push_str(&String::from_utf8_lossy(&buf[..n]))
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                };
+                tokio::join!(stdout_fut, stderr_fut);
+                if !stderr_output.is_empty() {
+                    tracing::debug!(stderr = %stderr_output, "introspect exec stderr");
+                }
+            })
             .await;
             match read_result {
                 Ok(()) => {
@@ -394,16 +389,12 @@ async fn fetch_container_metrics(
     pod_name: &str,
     namespace: &str,
 ) -> Option<ContainerStats> {
-    let url = format!(
-        "/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods/{pod_name}"
-    );
+    let url = format!("/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods/{pod_name}");
 
     // kube::Client::request takes http::Request<Vec<u8>>.
     // Import from `http` crate directly rather than through axum's re-export
     // to avoid breakage if axum and kube-rs diverge on http crate versions.
-    let request = http::Request::get(&url)
-        .body(Vec::new())
-        .ok()?;
+    let request = http::Request::get(&url).body(Vec::new()).ok()?;
 
     // 2s timeout: if the metrics API is reachable but slow (e.g. partial
     // network partition to metrics-server), avoid holding the HTTP connection
@@ -458,13 +449,21 @@ pub fn parse_cpu_to_millicores(cpu: &str) -> u64 {
 /// Parse Kubernetes memory quantity to bytes.
 pub fn parse_memory_to_bytes(mem: &str) -> u64 {
     if let Some(ei) = mem.strip_suffix("Ei") {
-        ei.parse::<u64>().unwrap_or(0).saturating_mul(1024 * 1024 * 1024 * 1024 * 1024 * 1024)
+        ei.parse::<u64>()
+            .unwrap_or(0)
+            .saturating_mul(1024 * 1024 * 1024 * 1024 * 1024 * 1024)
     } else if let Some(pi) = mem.strip_suffix("Pi") {
-        pi.parse::<u64>().unwrap_or(0).saturating_mul(1024 * 1024 * 1024 * 1024 * 1024)
+        pi.parse::<u64>()
+            .unwrap_or(0)
+            .saturating_mul(1024 * 1024 * 1024 * 1024 * 1024)
     } else if let Some(ti) = mem.strip_suffix("Ti") {
-        ti.parse::<u64>().unwrap_or(0).saturating_mul(1024 * 1024 * 1024 * 1024)
+        ti.parse::<u64>()
+            .unwrap_or(0)
+            .saturating_mul(1024 * 1024 * 1024 * 1024)
     } else if let Some(gi) = mem.strip_suffix("Gi") {
-        gi.parse::<u64>().unwrap_or(0).saturating_mul(1024 * 1024 * 1024)
+        gi.parse::<u64>()
+            .unwrap_or(0)
+            .saturating_mul(1024 * 1024 * 1024)
     } else if let Some(mi) = mem.strip_suffix("Mi") {
         mi.parse::<u64>().unwrap_or(0).saturating_mul(1024 * 1024)
     } else if let Some(ki) = mem.strip_suffix("Ki") {
@@ -544,13 +543,9 @@ pub fn parse_introspect_output(output: &str) -> (Vec<ProcessInfo>, WorktreeInfo)
                     .and_then(|v| v.as_str())
                     .unwrap_or("/work")
                     .to_string(),
-                target_dir_artifacts: w
-                    .get("target_dir_artifacts")
-                    .and_then(|v| v.as_u64()),
+                target_dir_artifacts: w.get("target_dir_artifacts").and_then(|v| v.as_u64()),
                 target_dir_bytes: w.get("target_dir_bytes").and_then(|v| v.as_u64()),
-                uncommitted_files: w
-                    .get("uncommitted_files")
-                    .and_then(|v| v.as_u64()),
+                uncommitted_files: w.get("uncommitted_files").and_then(|v| v.as_u64()),
                 head_sha: w
                     .get("head_sha")
                     .and_then(|v| v.as_str())
@@ -578,8 +573,8 @@ mod tests {
     use crate::api::AppState;
     use crate::config::NautiloopConfig;
     use crate::git::mock::MockGitOperations;
-    use crate::state::memory::MemoryStateStore;
     use crate::state::StateStore;
+    use crate::state::memory::MemoryStateStore;
     use crate::types::{LoopKind, LoopRecord, LoopState};
     use axum::body::Body;
     use axum::http::{self, Request};
@@ -660,8 +655,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), http::StatusCode::GONE);
-        let body: serde_json::Value =
-            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 1024 * 64).await.unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 64)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert!(body["error"].as_str().unwrap().contains("nemo inspect"));
     }
 
@@ -703,8 +702,12 @@ mod tests {
 
         // 425 Too Early — pod not yet running
         assert_eq!(response.status().as_u16(), 425);
-        let body: serde_json::Value =
-            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 1024 * 64).await.unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 64)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(body["error"].as_str().unwrap(), "pod not yet running");
     }
 
@@ -774,8 +777,14 @@ mod tests {
         assert_eq!(parse_memory_to_bytes("1000000"), 1000000);
         // Ti/Pi/Ei binary suffixes
         assert_eq!(parse_memory_to_bytes("1Ti"), 1024 * 1024 * 1024 * 1024);
-        assert_eq!(parse_memory_to_bytes("1Pi"), 1024u64 * 1024 * 1024 * 1024 * 1024);
-        assert_eq!(parse_memory_to_bytes("1Ei"), 1024u64 * 1024 * 1024 * 1024 * 1024 * 1024);
+        assert_eq!(
+            parse_memory_to_bytes("1Pi"),
+            1024u64 * 1024 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            parse_memory_to_bytes("1Ei"),
+            1024u64 * 1024 * 1024 * 1024 * 1024 * 1024
+        );
         // SI suffixes
         assert_eq!(parse_memory_to_bytes("1k"), 1000);
         assert_eq!(parse_memory_to_bytes("1M"), 1_000_000);
@@ -813,7 +822,8 @@ mod tests {
             ]
         }"#;
 
-        let metrics: PodMetrics = serde_json::from_str(json).expect("PodMetrics should deserialize");
+        let metrics: PodMetrics =
+            serde_json::from_str(json).expect("PodMetrics should deserialize");
         assert_eq!(metrics.containers.len(), 2);
 
         let agent = &metrics.containers[0];
@@ -927,7 +937,11 @@ mod tests {
             r#"{"worktree":{"path":"/work","target_dir_bytes":null,"target_dir_artifacts":null,"uncommitted_files":null,"head_sha":null}}"#,
         );
         let (processes, worktree) = parse_introspect_output(output);
-        assert_eq!(processes.len(), 1, "real processes from line 1 must be preserved");
+        assert_eq!(
+            processes.len(),
+            1,
+            "real processes from line 1 must be preserved"
+        );
         assert_eq!(processes[0].pid, 12);
         assert_eq!(processes[0].cmd, "claude");
         assert_eq!(worktree.path, "/work");

@@ -476,16 +476,12 @@ impl StateStore for PgStateStore {
         rows.iter().map(row_to_loop_record).collect()
     }
 
-    async fn get_loops_for_aggregation(
-        &self,
-        since: DateTime<Utc>,
-    ) -> Result<Vec<LoopRecord>> {
-        let rows = sqlx::query(
-            "SELECT * FROM loops WHERE created_at >= $1 ORDER BY created_at DESC",
-        )
-        .bind(since)
-        .fetch_all(&self.pool)
-        .await?;
+    async fn get_loops_for_aggregation(&self, since: DateTime<Utc>) -> Result<Vec<LoopRecord>> {
+        let rows =
+            sqlx::query("SELECT * FROM loops WHERE created_at >= $1 ORDER BY created_at DESC")
+                .bind(since)
+                .fetch_all(&self.pool)
+                .await?;
 
         rows.iter().map(row_to_loop_record).collect()
     }
@@ -503,7 +499,10 @@ impl StateStore for PgStateStore {
         // When `states` is provided, filter to exactly those states (DB-level).
         // Otherwise, default to all terminal states.
         let state_condition = if let Some(s) = states {
-            let state_strs: Vec<String> = s.iter().map(|st| format!("'{}'", loop_state_str(*st))).collect();
+            let state_strs: Vec<String> = s
+                .iter()
+                .map(|st| format!("'{}'", loop_state_str(*st)))
+                .collect();
             format!("state IN ({})", state_strs.join(", "))
         } else {
             "state IN ('CONVERGED', 'FAILED', 'CANCELLED', 'HARDENED', 'SHIPPED')".to_string()
@@ -738,7 +737,8 @@ impl StateStore for PgStateStore {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut map: std::collections::HashMap<Uuid, Vec<RoundRecord>> = std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<Uuid, Vec<RoundRecord>> =
+            std::collections::HashMap::new();
         for row in &rows {
             let record = row_to_round_record(row);
             map.entry(record.loop_id).or_default().push(record);
@@ -974,11 +974,10 @@ impl StateStore for PgStateStore {
     }
 
     async fn count_judge_decisions(&self, loop_id: Uuid) -> Result<u32> {
-        let row: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM judge_decisions WHERE loop_id = $1")
-                .bind(loop_id)
-                .fetch_one(&self.pool)
-                .await?;
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM judge_decisions WHERE loop_id = $1")
+            .bind(loop_id)
+            .fetch_one(&self.pool)
+            .await?;
         Ok(row.0 as u32)
     }
 

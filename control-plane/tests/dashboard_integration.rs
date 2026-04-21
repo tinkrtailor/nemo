@@ -12,8 +12,8 @@ use chrono::Utc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use nautiloop_control_plane::api::dashboard::build_dashboard_router_with_key;
 use nautiloop_control_plane::api::AppState;
+use nautiloop_control_plane::api::dashboard::build_dashboard_router_with_key;
 use nautiloop_control_plane::config::NautiloopConfig;
 use nautiloop_control_plane::git::mock::MockGitOperations;
 use nautiloop_control_plane::state::memory::MemoryStateStore;
@@ -162,8 +162,12 @@ async fn test_login_flow_with_cookie_propagation() {
         .iter()
         .find(|c| c.starts_with("nautiloop_login_csrf="))
         .expect("CSRF cookie missing");
-    let csrf_token = csrf_cookie.split(';').next().unwrap()
-        .strip_prefix("nautiloop_login_csrf=").unwrap();
+    let csrf_token = csrf_cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("nautiloop_login_csrf=")
+        .unwrap();
 
     // Step 3: POST /dashboard/login with valid credentials
     let app = build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(state.clone());
@@ -189,8 +193,16 @@ async fn test_login_flow_with_cookie_propagation() {
         "/dashboard"
     );
     let auth_cookies = extract_cookies(&resp);
-    assert!(auth_cookies.iter().any(|c| c.contains("nautiloop_api_key=")));
-    assert!(auth_cookies.iter().any(|c| c.contains("nautiloop_engineer=alice")));
+    assert!(
+        auth_cookies
+            .iter()
+            .any(|c| c.contains("nautiloop_api_key="))
+    );
+    assert!(
+        auth_cookies
+            .iter()
+            .any(|c| c.contains("nautiloop_engineer=alice"))
+    );
 
     // Step 4: GET /dashboard with auth cookies → 200 with card grid
     let cookie_header = cookies_to_header(&auth_cookies);
@@ -207,10 +219,18 @@ async fn test_login_flow_with_cookie_propagation() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), 262144).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 262144)
+        .await
+        .unwrap();
     let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(html.contains("dashboard-test.md"), "Card grid should show spec name");
-    assert!(html.contains("IMPLEMENTING"), "Card grid should show loop state");
+    assert!(
+        html.contains("dashboard-test.md"),
+        "Card grid should show spec name"
+    );
+    assert!(
+        html.contains("IMPLEMENTING"),
+        "Card grid should show loop state"
+    );
 }
 
 // ── Test: Authenticated card grid with loop data ──
@@ -235,7 +255,9 @@ async fn test_card_grid_with_loop_data() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), 262144).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 262144)
+        .await
+        .unwrap();
     let html = String::from_utf8(body.to_vec()).unwrap();
     assert!(html.contains("IMPLEMENTING"));
     assert!(html.contains("CONVERGED"));
@@ -262,7 +284,7 @@ async fn test_detail_page_with_rounds() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/dashboard/loops/{}", loop_id))
+                .uri(format!("/dashboard/loops/{}", loop_id))
                 .header("cookie", format!("nautiloop_api_key={}", API_KEY))
                 .body(Body::empty())
                 .unwrap(),
@@ -270,12 +292,23 @@ async fn test_detail_page_with_rounds() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), 262144).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 262144)
+        .await
+        .unwrap();
     let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(html.contains("dashboard-test.md"), "Detail page should show spec name");
+    assert!(
+        html.contains("dashboard-test.md"),
+        "Detail page should show spec name"
+    );
     assert!(html.contains("CONVERGED"), "Detail page should show state");
-    assert!(html.contains("implement"), "Rounds table should show implement stage");
-    assert!(html.contains("review"), "Rounds table should show review stage");
+    assert!(
+        html.contains("implement"),
+        "Rounds table should show implement stage"
+    );
+    assert!(
+        html.contains("review"),
+        "Rounds table should show review stage"
+    );
 }
 
 // ── Test: Approve action button side effect ──
@@ -294,7 +327,7 @@ async fn test_approve_action_side_effect() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/dashboard/api/approve/{}", loop_id))
+                .uri(format!("/dashboard/api/approve/{}", loop_id))
                 .header("cookie", format!("nautiloop_api_key={}", API_KEY))
                 .header("content-type", "application/json")
                 .body(Body::empty())
@@ -306,7 +339,10 @@ async fn test_approve_action_side_effect() {
 
     // Verify side effect: approve_requested flag set in state store
     let updated = state.store.get_loop(loop_id).await.unwrap().unwrap();
-    assert!(updated.approve_requested, "approve_requested should be true after approve action");
+    assert!(
+        updated.approve_requested,
+        "approve_requested should be true after approve action"
+    );
 }
 
 // ── Test: Cancel action button side effect ──
@@ -323,7 +359,7 @@ async fn test_cancel_action_side_effect() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(&format!("/dashboard/api/cancel/{}", loop_id))
+                .uri(format!("/dashboard/api/cancel/{}", loop_id))
                 .header("cookie", format!("nautiloop_api_key={}", API_KEY))
                 .body(Body::empty())
                 .unwrap(),
@@ -333,7 +369,10 @@ async fn test_cancel_action_side_effect() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let updated = state.store.get_loop(loop_id).await.unwrap().unwrap();
-    assert!(updated.cancel_requested, "cancel_requested should be true after cancel action");
+    assert!(
+        updated.cancel_requested,
+        "cancel_requested should be true after cancel action"
+    );
 }
 
 // ── Test: Extend action side effect ──
@@ -350,7 +389,7 @@ async fn test_extend_action_side_effect() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/dashboard/api/extend/{}", loop_id))
+                .uri(format!("/dashboard/api/extend/{}", loop_id))
                 .header("cookie", format!("nautiloop_api_key={}", API_KEY))
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"add_rounds":10}"#))
@@ -361,8 +400,14 @@ async fn test_extend_action_side_effect() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let updated = state.store.get_loop(loop_id).await.unwrap().unwrap();
-    assert_eq!(updated.max_rounds, 25, "max_rounds should be 15 + 10 = 25 after extend");
-    assert!(updated.resume_requested, "resume_requested should be true after extend");
+    assert_eq!(
+        updated.max_rounds, 25,
+        "max_rounds should be 15 + 10 = 25 after extend"
+    );
+    assert!(
+        updated.resume_requested,
+        "resume_requested should be true after extend"
+    );
 }
 
 // ── Test: Unauthenticated redirect chain ──
@@ -384,7 +429,8 @@ async fn test_unauthenticated_redirects() {
     ];
 
     for route in routes {
-        let app = build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(state.clone());
+        let app =
+            build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(state.clone());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -423,14 +469,10 @@ async fn test_json_endpoints_return_401_without_auth() {
     ];
 
     for route in json_routes {
-        let app = build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(state.clone());
+        let app =
+            build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(state.clone());
         let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri(route)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri(route).body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(
@@ -475,10 +517,17 @@ async fn test_dashboard_state_counts_reflect_all_loops() {
     let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
     // Counts should reflect ALL loops
-    assert_eq!(data["counts"]["active"], 2, "2 active loops (implementing + reviewing)");
+    assert_eq!(
+        data["counts"]["active"], 2,
+        "2 active loops (implementing + reviewing)"
+    );
     assert_eq!(data["counts"]["converged"], 1, "1 converged loop");
     assert_eq!(data["counts"]["failed"], 1, "1 failed loop");
-    assert_eq!(data["loops"].as_array().unwrap().len(), 4, "all 4 loops in response");
+    assert_eq!(
+        data["loops"].as_array().unwrap().len(),
+        4,
+        "all 4 loops in response"
+    );
 }
 
 // ─��� Test: Feed page with terminal loops ──
@@ -504,7 +553,9 @@ async fn test_feed_page_shows_terminal_loops() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), 262144).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 262144)
+        .await
+        .unwrap();
     let html = String::from_utf8(body.to_vec()).unwrap();
     // Feed should show the converged loop but not the active one
     assert!(html.contains("CONVERGED"));
@@ -533,7 +584,9 @@ async fn test_spec_history_page() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), 262144).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 262144)
+        .await
+        .unwrap();
     let html = String::from_utf8(body.to_vec()).unwrap();
     assert!(html.contains("dashboard-test.md"), "Should show spec path");
     assert!(html.contains("2 runs"), "Should show both runs");
@@ -559,7 +612,9 @@ async fn test_stats_page_renders() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), 262144).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 262144)
+        .await
+        .unwrap();
     let html = String::from_utf8(body.to_vec()).unwrap();
     assert!(html.contains("Stats"));
     assert!(html.contains("alice"));
@@ -637,9 +692,14 @@ async fn test_session_continuity_login_through_action() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body_bytes = axum::body::to_bytes(resp.into_body(), 262144).await.unwrap();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 262144)
+        .await
+        .unwrap();
     let html = String::from_utf8(body_bytes.to_vec()).unwrap();
-    assert!(html.contains("AWAITING_APPROVAL"), "Grid should show loop state");
+    assert!(
+        html.contains("AWAITING_APPROVAL"),
+        "Grid should show loop state"
+    );
     // Extract fresh CSRF token from grid page cookies for action step
     // The auth middleware sets a fresh CSRF on each authed request.
 
@@ -648,7 +708,7 @@ async fn test_session_continuity_login_through_action() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/dashboard/loops/{}", loop_id))
+                .uri(format!("/dashboard/loops/{}", loop_id))
                 .header("accept", "text/html")
                 .header("cookie", &cookie_header)
                 .body(Body::empty())
@@ -657,10 +717,18 @@ async fn test_session_continuity_login_through_action() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body_bytes = axum::body::to_bytes(resp.into_body(), 262144).await.unwrap();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 262144)
+        .await
+        .unwrap();
     let html = String::from_utf8(body_bytes.to_vec()).unwrap();
-    assert!(html.contains("AWAITING_APPROVAL"), "Detail should show loop state");
-    assert!(html.contains("Approve"), "Detail should show approve button");
+    assert!(
+        html.contains("AWAITING_APPROVAL"),
+        "Detail should show loop state"
+    );
+    assert!(
+        html.contains("Approve"),
+        "Detail should show approve button"
+    );
     assert!(html.contains("implement"), "Detail should show round stage");
 
     // Step 5: POST /dashboard/api/approve/:id — action using same session cookies
@@ -669,7 +737,7 @@ async fn test_session_continuity_login_through_action() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/dashboard/api/approve/{}", loop_id))
+                .uri(format!("/dashboard/api/approve/{}", loop_id))
                 .header("cookie", &cookie_header)
                 .header("content-type", "application/json")
                 .body(Body::empty())
@@ -719,7 +787,14 @@ async fn test_static_assets_public() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(resp.headers().get("content-type").unwrap().to_str().unwrap().contains("text/css"));
+    assert!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("text/css")
+    );
 
     let app = build_dashboard_router_with_key(Some(API_KEY.to_string())).with_state(test_state());
     let resp = app
@@ -732,5 +807,12 @@ async fn test_static_assets_public() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(resp.headers().get("content-type").unwrap().to_str().unwrap().contains("javascript"));
+    assert!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("javascript")
+    );
 }

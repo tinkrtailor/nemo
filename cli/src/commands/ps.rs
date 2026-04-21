@@ -2,7 +2,11 @@ use std::io::{self, Write};
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::{cursor::MoveTo, execute, terminal::{Clear, ClearType}};
+use crossterm::{
+    cursor::MoveTo,
+    execute,
+    terminal::{Clear, ClearType},
+};
 
 use crate::api_types::PodIntrospectResponse;
 use crate::client::NemoClient;
@@ -193,10 +197,14 @@ pub fn render_snapshot(snapshot: &PodIntrospectResponse, w: &mut dyn Write) -> R
 
     // Worktree line
     let wt = &snapshot.worktree;
-    let head = wt.head_sha.as_deref().map(|s| {
-        let len = s.len().min(7);
-        &s[..len]
-    }).unwrap_or("-");
+    let head = wt
+        .head_sha
+        .as_deref()
+        .map(|s| {
+            let len = s.len().min(7);
+            &s[..len]
+        })
+        .unwrap_or("-");
     let target_str = match (wt.target_dir_bytes, wt.target_dir_artifacts) {
         (Some(bytes), Some(artifacts)) => {
             format!("target: {} ({} artifacts)", format_bytes(bytes), artifacts)
@@ -373,7 +381,8 @@ mod tests {
     #[test]
     fn test_render_snapshot_with_warnings() {
         let mut snapshot = sample_snapshot();
-        snapshot.warnings = vec!["exec timed out (read timeout after 1s), showing partial data".to_string()];
+        snapshot.warnings =
+            vec!["exec timed out (read timeout after 1s), showing partial data".to_string()];
         snapshot.processes = Vec::new();
         let mut buf = Vec::new();
         render_snapshot(&snapshot, &mut buf).unwrap();

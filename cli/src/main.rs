@@ -218,7 +218,8 @@ enum Commands {
     },
 
     /// Show live processes and runtime state of an active loop's pod
-    #[command(long_about = "Show live processes and runtime state of an active loop's pod.\n\n\
+    #[command(
+        long_about = "Show live processes and runtime state of an active loop's pod.\n\n\
         Displays a snapshot of the active pod's CPU/memory usage, running processes,\n\
         worktree state, and container stats. Use --watch for live updating display.\n\n\
         Example:\n  \
@@ -228,7 +229,8 @@ enum Commands {
           ...\n\n  \
           $ nemo ps 8cb88352-... --watch\n  \
           # Live updating view (press q to quit)\n\n\
-        See also: nemo logs (log output), nemo inspect (round history).")]
+        See also: nemo logs (log output), nemo inspect (round history)."
+    )]
     Ps {
         /// Loop ID
         loop_id: String,
@@ -279,7 +281,8 @@ enum Commands {
     },
 
     /// Show detailed loop state, round history, and verdicts
-    #[command(long_about = "Show detailed loop state, round history, and verdicts.\n\n\
+    #[command(
+        long_about = "Show detailed loop state, round history, and verdicts.\n\n\
         Fetches the full inspection payload for a loop identified by its branch path.\n\
         Output is always JSON. Includes round-by-round stage results, durations, and\n\
         judge decisions. The \"agent/\" prefix is auto-prepended if not present.\n\n\
@@ -291,7 +294,8 @@ enum Commands {
             \"rounds\": [...],\n  \
             \"judge_decisions\": [...]\n  \
           }\n\n\
-        See also: nemo status (list loops), nemo logs (stream logs).")]
+        See also: nemo status (list loops), nemo logs (stream logs)."
+    )]
     Inspect {
         /// Branch path (e.g., "alice/invoice-cancel-a1b2c3d4" or "agent/alice/invoice-cancel-a1b2c3d4")
         path: String,
@@ -302,7 +306,8 @@ enum Commands {
     },
 
     /// Resume a PAUSED, AWAITING_REAUTH, or transient-FAILED loop
-    #[command(long_about = "Resume a PAUSED, AWAITING_REAUTH, or transient-FAILED loop.\n\n\
+    #[command(
+        long_about = "Resume a PAUSED, AWAITING_REAUTH, or transient-FAILED loop.\n\n\
         Resumes a loop that has been paused or is waiting for re-authentication.\n\
         For AWAITING_REAUTH, push fresh credentials with `nemo auth` first.\n\n\
         Example:\n  \
@@ -310,7 +315,8 @@ enum Commands {
           Resumed loop 8cb88352-5cf4-4dda-9cd0-6a0d6851ba92\n  \
             State: PAUSED\n  \
             Loop will resume on next reconciliation tick.\n\n\
-        See also: nemo auth (re-push credentials), nemo extend (for FAILED loops).")]
+        See also: nemo auth (re-push credentials), nemo extend (for FAILED loops)."
+    )]
     Resume {
         /// Loop ID
         loop_id: String,
@@ -321,7 +327,8 @@ enum Commands {
     },
 
     /// Extend a FAILED loop's max_rounds and resume it from the last stage
-    #[command(long_about = "Extend a FAILED loop's max_rounds and resume it from the last stage.\n\n\
+    #[command(
+        long_about = "Extend a FAILED loop's max_rounds and resume it from the last stage.\n\n\
         Adds rounds to a FAILED loop and resumes it from the stage it was in when it\n\
         failed (failed_from_state). Use this to recover from max-rounds exhaustion\n\
         without starting over.\n\n\
@@ -331,7 +338,8 @@ enum Commands {
             max_rounds: 10 -> 20 (+10)\n  \
             Resuming at: IMPLEMENTING\n  \
             Loop will continue on next reconciliation tick.\n\n\
-        See also: nemo inspect (check what went wrong), nemo logs (review failures).")]
+        See also: nemo inspect (check what went wrong), nemo logs (review failures)."
+    )]
     Extend {
         /// Loop ID
         loop_id: String,
@@ -533,14 +541,17 @@ enum Commands {
 #[derive(Debug, Subcommand)]
 enum ProfileAction {
     /// List all profiles
-    #[command(alias = "list", long_about = "List all profiles.\n\n\
+    #[command(
+        alias = "list",
+        long_about = "List all profiles.\n\n\
         Shows all configured profiles with their server URL and engineer name.\n\
         The active profile is marked with *.\n\n\
         Example:\n  \
           $ nemo profile ls\n  \
             default   http://localhost:18080           dev\n  \
           * work      https://nautiloop.work.internal  ggylfason\n  \
-            personal  http://100.64.1.10:8080          gunnar")]
+            personal  http://100.64.1.10:8080          gunnar"
+    )]
     Ls,
 
     /// Show profile details
@@ -666,10 +677,7 @@ fn build_help_all_json(root: &clap::Command) -> serde_json::Value {
         if arg.get_id() == "help" || arg.get_id() == "version" {
             continue;
         }
-        let long = arg
-            .get_long()
-            .map(|l| format!("--{l}"))
-            .unwrap_or_default();
+        let long = arg.get_long().map(|l| format!("--{l}")).unwrap_or_default();
         if long.is_empty() {
             continue;
         }
@@ -690,10 +698,7 @@ fn build_help_all_json(root: &clap::Command) -> serde_json::Value {
     let mut commands_map = serde_json::Map::new();
     for sub in root.get_subcommands() {
         let name = sub.get_name().to_string();
-        let short = sub
-            .get_about()
-            .map(|a| a.to_string())
-            .unwrap_or_default();
+        let short = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
         let long = sub
             .get_long_about()
             .map(|a| a.to_string())
@@ -719,10 +724,7 @@ fn build_help_all_json(root: &clap::Command) -> serde_json::Value {
                     "description": arg.get_help().map(|h| h.to_string()).unwrap_or_default(),
                 }));
             } else {
-                let long_name = arg
-                    .get_long()
-                    .map(|l| format!("--{l}"))
-                    .unwrap_or_default();
+                let long_name = arg.get_long().map(|l| format!("--{l}")).unwrap_or_default();
                 let short_name = arg.get_short().map(|s| format!("-{s}"));
                 options.push(serde_json::json!({
                     "name": long_name,
@@ -765,10 +767,7 @@ fn build_help_all_json(root: &clap::Command) -> serde_json::Value {
                         "description": arg.get_help().map(|h| h.to_string()).unwrap_or_default(),
                     }));
                 } else {
-                    let long_name = arg
-                        .get_long()
-                        .map(|l| format!("--{l}"))
-                        .unwrap_or_default();
+                    let long_name = arg.get_long().map(|l| format!("--{l}")).unwrap_or_default();
                     let short_name = arg.get_short().map(|s| format!("-{s}"));
                     nested_options.push(serde_json::json!({
                         "name": long_name,
@@ -845,7 +844,14 @@ fn handle_help(topic: &[String], all: bool, format: Option<&str>) -> anyhow::Res
     // Error: --all and a topic are mutually exclusive
     if all && !topic.is_empty() {
         let topic_str = topic.join(" ");
-        anyhow::bail!("--all and a specific {} are mutually exclusive", if topic_str == "ai" || topic_str == "llm" { "topic" } else { "command" });
+        anyhow::bail!(
+            "--all and a specific {} are mutually exclusive",
+            if topic_str == "ai" || topic_str == "llm" {
+                "topic"
+            } else {
+                "command"
+            }
+        );
     }
 
     // Error: --format without --all or ai topic
@@ -856,7 +862,10 @@ fn handle_help(topic: &[String], all: bool, format: Option<&str>) -> anyhow::Res
     // nemo help ai / nemo help llm
     if !topic.is_empty() && (topic[0] == "ai" || topic[0] == "llm") {
         if topic.len() > 1 {
-            anyhow::bail!("'nemo help {}' does not accept additional arguments", topic[0]);
+            anyhow::bail!(
+                "'nemo help {}' does not accept additional arguments",
+                topic[0]
+            );
         }
         if is_json {
             return commands::help_ai::render_json();
@@ -912,10 +921,12 @@ fn handle_help(topic: &[String], all: bool, format: Option<&str>) -> anyhow::Res
 /// The inner run function that dispatches commands. Returns errors that main()
 /// will handle (including ApiError for hint enrichment).
 async fn run(cli: Cli) -> anyhow::Result<()> {
-
     // Fail fast on contradictory flags before any side effects (config loading,
     // credential checks, HTTP client construction).
-    if let Commands::Start { harden, no_harden, .. } = cli.command {
+    if let Commands::Start {
+        harden, no_harden, ..
+    } = cli.command
+    {
         commands::start::validate_harden_flags(harden, no_harden)?;
     }
 
@@ -939,7 +950,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
     // Handle config command before loading config — a broken config file
     // must not prevent `nemo config --set` from working. (FR-6e)
-    if let Commands::Config { ref set, ref get, unmask } = cli.command {
+    if let Commands::Config {
+        ref set,
+        ref get,
+        unmask,
+    } = cli.command
+    {
         return commands::config::run(set.clone(), get.clone(), cli.profile.as_deref(), unmask);
     }
 
@@ -1051,13 +1067,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &nemo_config.models)?;
-            claude_creds::ensure_fresh(
-                &http_client,
-                engineer,
-                eng_name,
-                eng_email,
-            )
-            .await?;
+            claude_creds::ensure_fresh(&http_client, engineer, eng_name, eng_email).await?;
             commands::start::run(
                 &http_client,
                 commands::start::StartArgs {
@@ -1086,13 +1096,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &nemo_config.models)?;
-            claude_creds::ensure_fresh(
-                &http_client,
-                engineer,
-                eng_name,
-                eng_email,
-            )
-            .await?;
+            claude_creds::ensure_fresh(&http_client, engineer, eng_name, eng_email).await?;
             commands::start::run(
                 &http_client,
                 commands::start::StartArgs {
@@ -1116,13 +1120,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &nemo_config.models)?;
-            claude_creds::ensure_fresh(
-                &http_client,
-                engineer,
-                eng_name,
-                eng_email,
-            )
-            .await?;
+            claude_creds::ensure_fresh(&http_client, engineer, eng_name, eng_email).await?;
             commands::start::run(
                 &http_client,
                 commands::start::StartArgs {
@@ -1144,7 +1142,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             commands::status::run(&http_client, engineer, team, json).await?;
         }
         Commands::Helm { team } => {
-            commands::helm::run(&http_client, engineer, team, &nemo_config.helm, profile_name).await?;
+            commands::helm::run(
+                &http_client,
+                engineer,
+                team,
+                &nemo_config.helm,
+                profile_name,
+            )
+            .await?;
         }
         Commands::Logs {
             loop_id,

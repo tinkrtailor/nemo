@@ -65,12 +65,7 @@ async fn get_pvc_capacity(client: &kube::Client, namespace: &str) -> Option<u64>
     };
 
     // Read from status.capacity.storage (the actual provisioned size).
-    let storage = pvc
-        .status?
-        .capacity?
-        .get("storage")?
-        .0
-        .clone();
+    let storage = pvc.status?.capacity?.get("storage")?.0.clone();
 
     // Parse quantity string like "50Gi" or "20Gi" → u64 GiB.
     parse_gi_quantity(&storage)
@@ -96,18 +91,14 @@ fn parse_gi_quantity(s: &str) -> Option<u64> {
 /// Since agent pods typically complete quickly, the window for a running pod is
 /// small — disk usage will frequently be `unavailable`. No ephemeral pod or
 /// debug container is spawned to inspect the PVC.
-async fn get_cache_disk_usage(
-    client: &kube::Client,
-    namespace: &str,
-) -> Option<CacheDiskUsage> {
+async fn get_cache_disk_usage(client: &kube::Client, namespace: &str) -> Option<CacheDiskUsage> {
     use k8s_openapi::api::core::v1::Pod;
     use kube::api::{Api, ListParams};
 
     let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
 
     // Find running implement/revise pods, sorted by creation time desc.
-    let lp = ListParams::default()
-        .labels("nautiloop.dev/stage in (implement, revise)");
+    let lp = ListParams::default().labels("nautiloop.dev/stage in (implement, revise)");
 
     let pod_list = match pods.list(&lp).await {
         Ok(list) => list,
@@ -121,12 +112,7 @@ async fn get_cache_disk_usage(
     let mut running_pods: Vec<_> = pod_list
         .items
         .into_iter()
-        .filter(|p| {
-            p.status
-                .as_ref()
-                .and_then(|s| s.phase.as_deref())
-                == Some("Running")
-        })
+        .filter(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
         .collect();
 
     running_pods.sort_by(|a, b| {
@@ -154,19 +140,23 @@ async fn get_cache_disk_usage(
         .unwrap_or_else(|| "0".to_string());
 
     // Get per-subdirectory sizes: `du -sh /cache/*` (needs shell for glob expansion)
-    let subdirectories = exec_in_pod(&pods, pod_name, &["sh", "-c", "du -sh /cache/* 2>/dev/null"])
-        .await
-        .map(|output| {
-            let mut dirs = std::collections::HashMap::new();
-            for line in output.lines() {
-                let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() == 2 {
-                    dirs.insert(parts[1].to_string(), parts[0].to_string());
-                }
+    let subdirectories = exec_in_pod(
+        &pods,
+        pod_name,
+        &["sh", "-c", "du -sh /cache/* 2>/dev/null"],
+    )
+    .await
+    .map(|output| {
+        let mut dirs = std::collections::HashMap::new();
+        for line in output.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() == 2 {
+                dirs.insert(parts[1].to_string(), parts[0].to_string());
             }
-            dirs
-        })
-        .unwrap_or_default();
+        }
+        dirs
+    })
+    .unwrap_or_default();
 
     Some(CacheDiskUsage {
         subdirectories,
@@ -188,10 +178,7 @@ async fn exec_in_pod(
         .stdout(true)
         .stderr(false);
 
-    let mut exec = match pods
-        .exec(pod_name, command.to_vec(), &ap)
-        .await
-    {
+    let mut exec = match pods.exec(pod_name, command.to_vec(), &ap).await {
         Ok(e) => e,
         Err(e) => {
             tracing::debug!("Failed to exec into pod {pod_name}: {e}");
@@ -202,13 +189,10 @@ async fn exec_in_pod(
     // Read all stdout using the kube-rs async reader.
     let stdout = exec.stdout()?;
     let mut output = String::new();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        async {
-            let mut reader = stdout;
-            reader.read_to_string(&mut output).await
-        },
-    )
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut reader = stdout;
+        reader.read_to_string(&mut output).await
+    })
     .await;
 
     match result {
@@ -216,7 +200,11 @@ async fn exec_in_pod(
         _ => {
             tracing::debug!("Timeout or error reading exec output from pod {pod_name}");
             // Return whatever we got so far, if anything.
-            if output.is_empty() { None } else { Some(output) }
+            if output.is_empty() {
+                None
+            } else {
+                Some(output)
+            }
         }
     }
 }

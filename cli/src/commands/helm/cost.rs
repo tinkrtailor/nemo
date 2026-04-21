@@ -19,12 +19,48 @@ impl Default for PricingConfig {
     fn default() -> Self {
         let mut models = HashMap::new();
         // FR-7c: sane defaults for common models
-        models.insert("claude-opus-4-6".to_string(), ModelPricing { input_per_1m: 15.0, output_per_1m: 75.0 });
-        models.insert("claude-sonnet-4-6".to_string(), ModelPricing { input_per_1m: 3.0, output_per_1m: 15.0 });
-        models.insert("claude-haiku-4-5".to_string(), ModelPricing { input_per_1m: 1.0, output_per_1m: 5.0 });
-        models.insert("gpt-4o".to_string(), ModelPricing { input_per_1m: 2.50, output_per_1m: 10.0 });
-        models.insert("gpt-4o-mini".to_string(), ModelPricing { input_per_1m: 0.15, output_per_1m: 0.60 });
-        models.insert("o3-mini".to_string(), ModelPricing { input_per_1m: 1.10, output_per_1m: 4.40 });
+        models.insert(
+            "claude-opus-4-6".to_string(),
+            ModelPricing {
+                input_per_1m: 15.0,
+                output_per_1m: 75.0,
+            },
+        );
+        models.insert(
+            "claude-sonnet-4-6".to_string(),
+            ModelPricing {
+                input_per_1m: 3.0,
+                output_per_1m: 15.0,
+            },
+        );
+        models.insert(
+            "claude-haiku-4-5".to_string(),
+            ModelPricing {
+                input_per_1m: 1.0,
+                output_per_1m: 5.0,
+            },
+        );
+        models.insert(
+            "gpt-4o".to_string(),
+            ModelPricing {
+                input_per_1m: 2.50,
+                output_per_1m: 10.0,
+            },
+        );
+        models.insert(
+            "gpt-4o-mini".to_string(),
+            ModelPricing {
+                input_per_1m: 0.15,
+                output_per_1m: 0.60,
+            },
+        );
+        models.insert(
+            "o3-mini".to_string(),
+            ModelPricing {
+                input_per_1m: 1.10,
+                output_per_1m: 4.40,
+            },
+        );
         Self { models }
     }
 }
@@ -32,7 +68,12 @@ impl Default for PricingConfig {
 impl PricingConfig {
     /// Calculate cost for given token usage with a specific model.
     /// Returns None if the model has no pricing entry (FR-7b).
-    pub fn calculate_cost(&self, model: Option<&str>, input_tokens: u64, output_tokens: u64) -> Option<f64> {
+    pub fn calculate_cost(
+        &self,
+        model: Option<&str>,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> Option<f64> {
         let model = model?;
         let pricing = self.models.get(model)?;
         let input_cost = (input_tokens as f64 / 1_000_000.0) * pricing.input_per_1m;
@@ -50,10 +91,20 @@ impl PricingConfig {
         if let Some(pricing) = table.get("pricing").and_then(|v| v.as_table()) {
             for (model, value) in pricing {
                 if let (Some(input), Some(output)) = (
-                    value.get("input_per_1m").and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))),
-                    value.get("output_per_1m").and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))),
+                    value
+                        .get("input_per_1m")
+                        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))),
+                    value
+                        .get("output_per_1m")
+                        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))),
                 ) {
-                    config.models.insert(model.clone(), ModelPricing { input_per_1m: input, output_per_1m: output });
+                    config.models.insert(
+                        model.clone(),
+                        ModelPricing {
+                            input_per_1m: input,
+                            output_per_1m: output,
+                        },
+                    );
                 }
             }
         }
@@ -77,7 +128,10 @@ pub fn calculate_loop_round_cost(
     let mut any_priced = false;
 
     // Implementor stages: implement, test, revise
-    for data in [&round.implement, &round.test, &round.revise].into_iter().flatten() {
+    for data in [&round.implement, &round.test, &round.revise]
+        .into_iter()
+        .flatten()
+    {
         let (inp, out) = extract_token_usage(data);
         if inp > 0 || out > 0 {
             let model = model_implementor.or(model_reviewer);
@@ -108,7 +162,16 @@ pub fn round_total_tokens(round: &RoundSummary) -> (u64, u64) {
     let mut total_input = 0u64;
     let mut total_output = 0u64;
 
-    for data in [&round.implement, &round.test, &round.review, &round.audit, &round.revise].into_iter().flatten() {
+    for data in [
+        &round.implement,
+        &round.test,
+        &round.review,
+        &round.audit,
+        &round.revise,
+    ]
+    .into_iter()
+    .flatten()
+    {
         let (inp, out) = extract_token_usage(data);
         total_input += inp;
         total_output += out;
@@ -223,7 +286,11 @@ mod tests {
     #[test]
     fn calculate_cost_unknown_model() {
         let config = PricingConfig::default();
-        assert!(config.calculate_cost(Some("unknown-model"), 100_000, 10_000).is_none());
+        assert!(
+            config
+                .calculate_cost(Some("unknown-model"), 100_000, 10_000)
+                .is_none()
+        );
     }
 
     #[test]
@@ -250,7 +317,9 @@ mod tests {
             round: 1,
             implement: Some(serde_json::json!({"token_usage": {"input": 10000, "output": 2000}})),
             test: Some(serde_json::json!({"token_usage": {"input": 0, "output": 0}})),
-            review: Some(serde_json::json!({"verdict": {"clean": true, "token_usage": {"input": 5000, "output": 1000}}})),
+            review: Some(
+                serde_json::json!({"verdict": {"clean": true, "token_usage": {"input": 5000, "output": 1000}}}),
+            ),
             audit: None,
             revise: None,
             implement_duration_secs: Some(120),
@@ -282,7 +351,9 @@ mod tests {
             round: 1,
             implement: Some(serde_json::json!({"token_usage": {"input": 80000, "output": 8000}})),
             test: Some(serde_json::json!({"token_usage": {"input": 0, "output": 0}})),
-            review: Some(serde_json::json!({"verdict": {"clean": true, "token_usage": {"input": 20000, "output": 2000}}})),
+            review: Some(
+                serde_json::json!({"verdict": {"clean": true, "token_usage": {"input": 20000, "output": 2000}}}),
+            ),
             audit: None,
             revise: None,
             implement_duration_secs: Some(120),
@@ -321,12 +392,7 @@ mod tests {
             audit_duration_secs: None,
             revise_duration_secs: None,
         };
-        let cost = calculate_loop_round_cost(
-            &config,
-            None,
-            Some("claude-haiku-4-5"),
-            &round,
-        );
+        let cost = calculate_loop_round_cost(&config, None, Some("claude-haiku-4-5"), &round);
         assert!(cost.is_some());
         let c = cost.unwrap();
         // impl falls back to reviewer: input 100K * 1.0/1M = 0.10, output 10K * 5.0/1M = 0.05

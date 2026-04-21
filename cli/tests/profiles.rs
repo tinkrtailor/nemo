@@ -81,12 +81,21 @@ desktop_notifications = false
         stderr.contains("Migrated config to profile 'default'"),
         "Expected migration message, got stderr: {stderr}"
     );
-    assert!(stdout.contains("default"), "Expected default profile in list, got: {stdout}");
-    assert!(stdout.contains("http://localhost:18080"), "Expected server url, got: {stdout}");
+    assert!(
+        stdout.contains("default"),
+        "Expected default profile in list, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("http://localhost:18080"),
+        "Expected server url, got: {stdout}"
+    );
 
     // Verify the file was rewritten with profile shape
     let config = read_config(home.path());
-    assert!(config.contains("[profiles.default]"), "Config should have profiles section: {config}");
+    assert!(
+        config.contains("[profiles.default]"),
+        "Config should have profiles section: {config}"
+    );
     assert!(
         config.contains("current_profile"),
         "Config should have current_profile: {config}"
@@ -126,10 +135,15 @@ fn profile_add_and_list() {
     let (_, stderr, code) = run_nemo(
         home.path(),
         &[
-            "profile", "add", "work",
-            "--server", "https://work.example.com",
-            "--api-key", "work-key-1234567890",
-            "--engineer", "alice",
+            "profile",
+            "add",
+            "work",
+            "--server",
+            "https://work.example.com",
+            "--api-key",
+            "work-key-1234567890",
+            "--engineer",
+            "alice",
         ],
     );
     assert_eq!(code, 0, "profile add failed: {stderr}");
@@ -141,10 +155,15 @@ fn profile_add_and_list() {
     let (_, stderr, code) = run_nemo(
         home.path(),
         &[
-            "profile", "add", "dev",
-            "--server", "http://localhost:18080",
-            "--api-key", "dev-key-1234567890",
-            "--engineer", "dev",
+            "profile",
+            "add",
+            "dev",
+            "--server",
+            "http://localhost:18080",
+            "--api-key",
+            "dev-key-1234567890",
+            "--engineer",
+            "dev",
         ],
     );
     assert_eq!(code, 0, "profile add dev failed: {stderr}");
@@ -155,7 +174,10 @@ fn profile_add_and_list() {
     assert!(stdout.contains("work"), "stdout: {stdout}");
     assert!(stdout.contains("dev"), "stdout: {stdout}");
     // work should be active (marked with *)
-    assert!(stdout.contains("*"), "Expected active marker, stdout: {stdout}");
+    assert!(
+        stdout.contains("*"),
+        "Expected active marker, stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -165,20 +187,30 @@ fn profile_add_duplicate_errors() {
     run_nemo(
         home.path(),
         &[
-            "profile", "add", "work",
-            "--server", "https://work.example.com",
-            "--api-key", "key-1234567890123",
-            "--engineer", "alice",
+            "profile",
+            "add",
+            "work",
+            "--server",
+            "https://work.example.com",
+            "--api-key",
+            "key-1234567890123",
+            "--engineer",
+            "alice",
         ],
     );
 
     let (_, stderr, code) = run_nemo(
         home.path(),
         &[
-            "profile", "add", "work",
-            "--server", "https://other.example.com",
-            "--api-key", "key-1234567890123",
-            "--engineer", "bob",
+            "profile",
+            "add",
+            "work",
+            "--server",
+            "https://other.example.com",
+            "--api-key",
+            "key-1234567890123",
+            "--engineer",
+            "bob",
         ],
     );
     assert_ne!(code, 0, "Should error on duplicate");
@@ -190,23 +222,42 @@ fn profile_remove() {
     let home = setup_empty_home();
 
     // Add two profiles
-    run_nemo(home.path(), &[
-        "profile", "add", "work",
-        "--server", "https://work.example.com",
-        "--api-key", "key-1234567890123",
-        "--engineer", "alice",
-    ]);
-    run_nemo(home.path(), &[
-        "profile", "add", "dev",
-        "--server", "http://localhost:18080",
-        "--api-key", "key-1234567890123",
-        "--engineer", "dev",
-    ]);
+    run_nemo(
+        home.path(),
+        &[
+            "profile",
+            "add",
+            "work",
+            "--server",
+            "https://work.example.com",
+            "--api-key",
+            "key-1234567890123",
+            "--engineer",
+            "alice",
+        ],
+    );
+    run_nemo(
+        home.path(),
+        &[
+            "profile",
+            "add",
+            "dev",
+            "--server",
+            "http://localhost:18080",
+            "--api-key",
+            "key-1234567890123",
+            "--engineer",
+            "dev",
+        ],
+    );
 
     // Cannot remove active profile
     let (_, stderr, code) = run_nemo(home.path(), &["profile", "rm", "work"]);
     assert_ne!(code, 0);
-    assert!(stderr.contains("Cannot remove the active profile"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("Cannot remove the active profile"),
+        "stderr: {stderr}"
+    );
 
     // Can remove non-active profile
     let (_, stderr, code) = run_nemo(home.path(), &["profile", "rm", "dev"]);
@@ -218,22 +269,38 @@ fn profile_remove() {
 fn profile_cannot_remove_last() {
     let home = setup_empty_home();
 
-    run_nemo(home.path(), &[
-        "profile", "add", "only",
-        "--server", "https://example.com",
-        "--api-key", "key-1234567890123",
-        "--engineer", "alice",
-    ]);
+    run_nemo(
+        home.path(),
+        &[
+            "profile",
+            "add",
+            "only",
+            "--server",
+            "https://example.com",
+            "--api-key",
+            "key-1234567890123",
+            "--engineer",
+            "alice",
+        ],
+    );
 
     // Switch to make a new profile active, then try to remove the last one
     // Actually with only one profile, it's the active one, so "cannot remove active" fires first.
     // Let's add a second, switch to it, remove the first, then try to remove the last.
-    run_nemo(home.path(), &[
-        "profile", "add", "second",
-        "--server", "https://other.com",
-        "--api-key", "key-1234567890123",
-        "--engineer", "bob",
-    ]);
+    run_nemo(
+        home.path(),
+        &[
+            "profile",
+            "add",
+            "second",
+            "--server",
+            "https://other.com",
+            "--api-key",
+            "key-1234567890123",
+            "--engineer",
+            "bob",
+        ],
+    );
     run_nemo(home.path(), &["use-profile", "second"]);
     run_nemo(home.path(), &["profile", "rm", "only"]);
 
@@ -241,7 +308,8 @@ fn profile_cannot_remove_last() {
     let (_, stderr, code) = run_nemo(home.path(), &["profile", "rm", "second"]);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("Cannot remove the active profile") || stderr.contains("Cannot remove the last profile"),
+        stderr.contains("Cannot remove the active profile")
+            || stderr.contains("Cannot remove the last profile"),
         "stderr: {stderr}"
     );
 }
@@ -250,18 +318,34 @@ fn profile_cannot_remove_last() {
 fn use_profile_switches_active() {
     let home = setup_empty_home();
 
-    run_nemo(home.path(), &[
-        "profile", "add", "work",
-        "--server", "https://work.example.com",
-        "--api-key", "key-1234567890123",
-        "--engineer", "alice",
-    ]);
-    run_nemo(home.path(), &[
-        "profile", "add", "dev",
-        "--server", "http://localhost:18080",
-        "--api-key", "key-1234567890123",
-        "--engineer", "dev",
-    ]);
+    run_nemo(
+        home.path(),
+        &[
+            "profile",
+            "add",
+            "work",
+            "--server",
+            "https://work.example.com",
+            "--api-key",
+            "key-1234567890123",
+            "--engineer",
+            "alice",
+        ],
+    );
+    run_nemo(
+        home.path(),
+        &[
+            "profile",
+            "add",
+            "dev",
+            "--server",
+            "http://localhost:18080",
+            "--api-key",
+            "key-1234567890123",
+            "--engineer",
+            "dev",
+        ],
+    );
 
     // Switch to dev
     let (_, stderr, code) = run_nemo(home.path(), &["use-profile", "dev"]);
@@ -278,12 +362,20 @@ fn use_profile_switches_active() {
 fn profile_rename() {
     let home = setup_empty_home();
 
-    run_nemo(home.path(), &[
-        "profile", "add", "old-name",
-        "--server", "https://example.com",
-        "--api-key", "key-1234567890123",
-        "--engineer", "alice",
-    ]);
+    run_nemo(
+        home.path(),
+        &[
+            "profile",
+            "add",
+            "old-name",
+            "--server",
+            "https://example.com",
+            "--api-key",
+            "key-1234567890123",
+            "--engineer",
+            "alice",
+        ],
+    );
 
     let (_, stderr, code) = run_nemo(home.path(), &["profile", "rename", "old-name", "new-name"]);
     assert_eq!(code, 0, "rename failed: {stderr}");
@@ -322,7 +414,10 @@ email = "alice@example.com"
     let (stdout, _, code) = run_nemo(home.path(), &["config", "--get", "api_key"]);
     assert_eq!(code, 0);
     assert!(stdout.contains("..."), "Should be redacted: {stdout}");
-    assert!(!stdout.contains("1234567890123456"), "Should not show full key: {stdout}");
+    assert!(
+        !stdout.contains("1234567890123456"),
+        "Should not show full key: {stdout}"
+    );
 
     // api_key with --unmask
     let (stdout, _, code) = run_nemo(home.path(), &["config", "--get", "api_key", "--unmask"]);
@@ -365,10 +460,16 @@ desktop_notifications = false
 "#;
     let home = setup_home(config);
 
-    let (_, _, code) = run_nemo(home.path(), &["config", "--set", "helm.desktop_notifications=true"]);
+    let (_, _, code) = run_nemo(
+        home.path(),
+        &["config", "--set", "helm.desktop_notifications=true"],
+    );
     assert_eq!(code, 0);
 
-    let (stdout, _, code) = run_nemo(home.path(), &["config", "--get", "helm.desktop_notifications"]);
+    let (stdout, _, code) = run_nemo(
+        home.path(),
+        &["config", "--get", "helm.desktop_notifications"],
+    );
     assert_eq!(code, 0);
     assert_eq!(stdout.trim(), "true");
 }
@@ -432,7 +533,10 @@ engineer = "dev"
     assert_eq!(stdout.trim(), "https://work.example.com");
 
     // With --profile dev: returns dev's server
-    let (stdout, _, code) = run_nemo(home.path(), &["--profile", "dev", "config", "--get", "server_url"]);
+    let (stdout, _, code) = run_nemo(
+        home.path(),
+        &["--profile", "dev", "config", "--get", "server_url"],
+    );
     assert_eq!(code, 0);
     assert_eq!(stdout.trim(), "http://localhost:18080");
 }
@@ -527,12 +631,18 @@ email = "alice@example.com"
     assert_eq!(code, 0);
     assert!(stdout.contains("work"), "stdout: {stdout}");
     assert!(stdout.contains("..."), "Key should be redacted: {stdout}");
-    assert!(!stdout.contains("1234567890123456"), "Full key should not appear: {stdout}");
+    assert!(
+        !stdout.contains("1234567890123456"),
+        "Full key should not appear: {stdout}"
+    );
 
     // With --unmask
     let (stdout, _, code) = run_nemo(home.path(), &["profile", "show", "--unmask"]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("key-1234567890123456"), "Full key should appear with --unmask: {stdout}");
+    assert!(
+        stdout.contains("key-1234567890123456"),
+        "Full key should appear with --unmask: {stdout}"
+    );
 }
 
 // ─── Config Display Test ──────────────────────────────────────────────
@@ -560,9 +670,15 @@ desktop_notifications = true
     let (stdout, _, code) = run_nemo(home.path(), &["config"]);
     assert_eq!(code, 0);
     assert!(stdout.contains("Active profile: work"), "stdout: {stdout}");
-    assert!(stdout.contains("work*"), "Active should be marked with *: {stdout}");
+    assert!(
+        stdout.contains("work*"),
+        "Active should be marked with *: {stdout}"
+    );
     assert!(stdout.contains("dev"), "Should list all profiles: {stdout}");
-    assert!(stdout.contains("[helm]"), "Should show helm section: {stdout}");
+    assert!(
+        stdout.contains("[helm]"),
+        "Should show helm section: {stdout}"
+    );
 }
 
 // ─── Profile Use via subcommand alias ─────────────────────────────────
@@ -571,18 +687,34 @@ desktop_notifications = true
 fn profile_use_subcommand_works() {
     let home = setup_empty_home();
 
-    run_nemo(home.path(), &[
-        "profile", "add", "work",
-        "--server", "https://work.example.com",
-        "--api-key", "key-1234567890123",
-        "--engineer", "alice",
-    ]);
-    run_nemo(home.path(), &[
-        "profile", "add", "dev",
-        "--server", "http://localhost:18080",
-        "--api-key", "key-1234567890123",
-        "--engineer", "dev",
-    ]);
+    run_nemo(
+        home.path(),
+        &[
+            "profile",
+            "add",
+            "work",
+            "--server",
+            "https://work.example.com",
+            "--api-key",
+            "key-1234567890123",
+            "--engineer",
+            "alice",
+        ],
+    );
+    run_nemo(
+        home.path(),
+        &[
+            "profile",
+            "add",
+            "dev",
+            "--server",
+            "http://localhost:18080",
+            "--api-key",
+            "key-1234567890123",
+            "--engineer",
+            "dev",
+        ],
+    );
 
     // Use the `profile use` subcommand variant
     let (_, stderr, code) = run_nemo(home.path(), &["profile", "use", "dev"]);

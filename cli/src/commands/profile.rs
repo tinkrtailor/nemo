@@ -7,7 +7,9 @@ use crate::config::{
 /// `nemo profile ls` / `nemo profile list`
 pub fn run_list(config: &NemoConfig) -> Result<()> {
     if config.profiles.is_empty() {
-        println!("No profiles configured. Run 'nemo profile add <name> --server <url> --api-key <key> --engineer <id>' to get started.");
+        println!(
+            "No profiles configured. Run 'nemo profile add <name> --server <url> --api-key <key> --engineer <id>' to get started."
+        );
         return Ok(());
     }
 
@@ -102,7 +104,9 @@ pub fn run_add(
     validate_profile_name(name)?;
 
     if config.profiles.contains_key(name) {
-        anyhow::bail!("Profile '{name}' already exists. Use 'nemo profile rename' or 'nemo profile rm' first.");
+        anyhow::bail!(
+            "Profile '{name}' already exists. Use 'nemo profile rename' or 'nemo profile rm' first."
+        );
     }
 
     if api_key.is_empty() {
@@ -168,9 +172,7 @@ pub fn run_remove(config: &mut NemoConfig, name: &str) -> Result<()> {
     }
 
     if config.profiles.len() == 1 {
-        anyhow::bail!(
-            "Cannot remove the last profile '{name}'. At least one profile must exist."
-        );
+        anyhow::bail!("Cannot remove the last profile '{name}'. At least one profile must exist.");
     }
 
     config.profiles.remove(name);

@@ -55,10 +55,8 @@ struct ModelsJsonProvider {
 }
 
 fn build_models_json(cp_providers: &[ProviderInfo]) -> ModelsJsonOutput {
-    let provider_configs: &[(&str, &[&str])] = &[
-        ("claude", CLAUDE_MODELS),
-        ("openai", OPENAI_MODELS),
-    ];
+    let provider_configs: &[(&str, &[&str])] =
+        &[("claude", CLAUDE_MODELS), ("openai", OPENAI_MODELS)];
 
     let mut providers = Vec::new();
     for (name, models) in provider_configs {

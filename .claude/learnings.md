@@ -9,6 +9,7 @@ Discoveries and patterns found during Nemo development. Persists across all work
 - `kube::Client` does not implement `Debug`. Structs containing it cannot use `#[derive(Debug)]`.
 - axum `Router` type inference in tests is fragile. Use an explicit `async fn send_request(app: Router, req: Request<Body>) -> Response<Body>` helper rather than inline `.oneshot()`.
 - Rust edition 2024 supports `option.is_none_or()` and `option.is_some_and()` natively.
+- The GitHub `ci` workflow is stricter than the repo's default local gate: it runs `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --features nautiloop-sidecar/__test_utils -- -D warnings`. If local `cargo clippy --workspace -- -D warnings` passes but CI is still red, run the exact CI commands locally before assuming the failure is remote-only.
 
 ## k8s / kube-rs
 

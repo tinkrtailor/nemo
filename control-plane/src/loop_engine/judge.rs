@@ -249,7 +249,6 @@ impl JudgeModelClient for SidecarJudgeClient {
     }
 }
 
-
 /// The orchestrator judge. Holds config, model client, and state store references.
 pub struct OrchestratorJudge {
     config: OrchestratorConfig,
@@ -551,15 +550,13 @@ Decisions:
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let hint = parsed
-            .get("hint")
-            .and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    v.as_str().map(|s| s.to_string())
-                }
-            });
+        let hint = parsed.get("hint").and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s.to_string())
+            }
+        });
 
         Some(JudgeOutput {
             decision,
@@ -919,10 +916,7 @@ mod tests {
         );
 
         let ctx = test_context();
-        let output = judge
-            .invoke(&ctx, &JudgeTrigger::NotClean)
-            .await
-            .unwrap();
+        let output = judge.invoke(&ctx, &JudgeTrigger::NotClean).await.unwrap();
         assert_eq!(output.decision, JudgeDecision::Continue);
         assert_eq!(output.hint, Some("fix the bug".to_string()));
 
@@ -935,11 +929,7 @@ mod tests {
     #[tokio::test]
     async fn test_invoke_model_error_returns_none() {
         let store = Arc::new(MemoryStateStore::new());
-        let judge = OrchestratorJudge::new(
-            test_config(),
-            Arc::new(FailingJudgeClient),
-            store,
-        );
+        let judge = OrchestratorJudge::new(test_config(), Arc::new(FailingJudgeClient), store);
         let output = judge.invoke(&test_context(), &JudgeTrigger::NotClean).await;
         assert!(output.is_none());
     }
@@ -950,11 +940,7 @@ mod tests {
         tokio::time::pause();
 
         let store = Arc::new(MemoryStateStore::new());
-        let judge = OrchestratorJudge::new(
-            test_config(),
-            Arc::new(SlowJudgeClient),
-            store,
-        );
+        let judge = OrchestratorJudge::new(test_config(), Arc::new(SlowJudgeClient), store);
 
         let ctx = test_context();
         let output = judge.invoke(&ctx, &JudgeTrigger::NotClean).await;
@@ -981,7 +967,8 @@ mod tests {
             ..test_config()
         };
         let store = Arc::new(MemoryStateStore::new());
-        let response = r#"{"decision": "continue", "confidence": 0.8, "reasoning": "ok", "hint": null}"#;
+        let response =
+            r#"{"decision": "continue", "confidence": 0.8, "reasoning": "ok", "hint": null}"#;
         let judge = OrchestratorJudge::new(
             config,
             Arc::new(MockJudgeClient::new(response)),
@@ -1002,7 +989,12 @@ mod tests {
 
     #[test]
     fn test_detect_no_recurring_findings() {
-        let issues = vec![make_issue(Severity::High, Some("correctness"), Some("a.rs"), Some(10))];
+        let issues = vec![make_issue(
+            Severity::High,
+            Some("correctness"),
+            Some("a.rs"),
+            Some(10),
+        )];
         let rounds = vec![];
         let result = detect_recurring_findings(&rounds, &issues, 1);
         assert!(result.is_empty());
@@ -1100,10 +1092,30 @@ mod tests {
 
     #[test]
     fn test_has_blocking_issues() {
-        assert!(has_blocking_issues(&[make_issue(Severity::Critical, None, None, None)]));
-        assert!(has_blocking_issues(&[make_issue(Severity::High, None, None, None)]));
-        assert!(!has_blocking_issues(&[make_issue(Severity::Medium, None, None, None)]));
-        assert!(!has_blocking_issues(&[make_issue(Severity::Low, None, None, None)]));
+        assert!(has_blocking_issues(&[make_issue(
+            Severity::Critical,
+            None,
+            None,
+            None
+        )]));
+        assert!(has_blocking_issues(&[make_issue(
+            Severity::High,
+            None,
+            None,
+            None
+        )]));
+        assert!(!has_blocking_issues(&[make_issue(
+            Severity::Medium,
+            None,
+            None,
+            None
+        )]));
+        assert!(!has_blocking_issues(&[make_issue(
+            Severity::Low,
+            None,
+            None,
+            None
+        )]));
         assert!(!has_blocking_issues(&[]));
     }
 
@@ -1205,9 +1217,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/anthropic/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(401).set_body_string("invalid x-api-key"),
-            )
+            .respond_with(ResponseTemplate::new(401).set_body_string("invalid x-api-key"))
             .expect(1)
             .mount(&mock_server)
             .await;
@@ -1226,14 +1236,13 @@ mod tests {
     async fn test_failing_judge_falls_through_to_heuristic() {
         // Verify that a failing JudgeModelClient returns None (heuristic fallback)
         let store = Arc::new(MemoryStateStore::new());
-        let judge = OrchestratorJudge::new(
-            test_config(),
-            Arc::new(FailingJudgeClient),
-            store,
-        );
+        let judge = OrchestratorJudge::new(test_config(), Arc::new(FailingJudgeClient), store);
         let ctx = test_context();
         let output = judge.invoke(&ctx, &JudgeTrigger::NotClean).await;
-        assert!(output.is_none(), "Failed judge must return None for heuristic fallback");
+        assert!(
+            output.is_none(),
+            "Failed judge must return None for heuristic fallback"
+        );
     }
 
     // --- NFR-3: Cost ceiling log test ---
@@ -1245,12 +1254,9 @@ mod tests {
             ..test_config()
         };
         let store = Arc::new(MemoryStateStore::new());
-        let response = r#"{"decision": "continue", "confidence": 0.8, "reasoning": "ok", "hint": null}"#;
-        let judge = OrchestratorJudge::new(
-            config,
-            Arc::new(MockJudgeClient::new(response)),
-            store,
-        );
+        let response =
+            r#"{"decision": "continue", "confidence": 0.8, "reasoning": "ok", "hint": null}"#;
+        let judge = OrchestratorJudge::new(config, Arc::new(MockJudgeClient::new(response)), store);
 
         let ctx = test_context();
         // First call succeeds
@@ -1275,7 +1281,10 @@ mod tests {
         );
 
         let ctx = test_context();
-        let output = judge.invoke(&ctx, &JudgeTrigger::RecurringFindings).await.unwrap();
+        let output = judge
+            .invoke(&ctx, &JudgeTrigger::RecurringFindings)
+            .await
+            .unwrap();
         assert_eq!(output.decision, JudgeDecision::ExitClean);
 
         // Verify decision row was written
@@ -1285,7 +1294,6 @@ mod tests {
         assert_eq!(decisions[0].trigger, "recurring_findings");
         assert_eq!(decisions[0].phase, "review");
         assert!(decisions[0].confidence.is_some());
-        assert!(decisions[0].duration_ms > 0 || decisions[0].duration_ms == 0);
     }
 
     // --- Full integration: SidecarJudgeClient → OrchestratorJudge → store write ---
@@ -1323,11 +1331,7 @@ mod tests {
         // Wire: SidecarJudgeClient → OrchestratorJudge → MemoryStateStore
         let client = SidecarJudgeClient::new(&mock_server.uri());
         let store = Arc::new(MemoryStateStore::new());
-        let judge = OrchestratorJudge::new(
-            test_config(),
-            Arc::new(client),
-            store.clone(),
-        );
+        let judge = OrchestratorJudge::new(test_config(), Arc::new(client), store.clone());
 
         let ctx = test_context();
         let output = judge
@@ -1338,7 +1342,10 @@ mod tests {
         // Verify decision output
         assert_eq!(output.decision, JudgeDecision::ExitClean);
         assert_eq!(output.confidence, Some(0.92));
-        assert_eq!(output.reasoning, Some("All issues resolved in latest round.".to_string()));
+        assert_eq!(
+            output.reasoning,
+            Some("All issues resolved in latest round.".to_string())
+        );
 
         // Verify decision was persisted to the store
         let decisions = store.get_judge_decisions(ctx.loop_id).await.unwrap();
@@ -1347,6 +1354,9 @@ mod tests {
         assert_eq!(decisions[0].trigger, "not_clean");
         assert_eq!(decisions[0].phase, "review");
         assert_eq!(decisions[0].confidence, Some(0.92));
-        assert_eq!(decisions[0].reasoning, Some("All issues resolved in latest round.".to_string()));
+        assert_eq!(
+            decisions[0].reasoning,
+            Some("All issues resolved in latest round.".to_string())
+        );
     }
 }

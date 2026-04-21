@@ -33,13 +33,8 @@ async fn test_build_driver_uses_sidecar_endpoint() {
     // Use a mock server as the sidecar
     let mock_sidecar = MockServer::start().await;
 
-    let (_, resolution) = loop_engine::build_loop_driver_with(
-        &config,
-        store,
-        dispatcher,
-        git,
-        &mock_sidecar.uri(),
-    );
+    let (_, resolution) =
+        loop_engine::build_loop_driver_with(&config, store, dispatcher, git, &mock_sidecar.uri());
 
     assert_eq!(
         resolution,

@@ -291,7 +291,10 @@ mod tests {
             model_review: None,
         };
         let body = build_start_body(&args, "# Spec");
-        assert_eq!(body["harden"], true, "default invocation must send harden: true");
+        assert_eq!(
+            body["harden"], true,
+            "default invocation must send harden: true"
+        );
     }
 
     /// NFR-3: --no-harden sends harden: false
@@ -336,9 +339,16 @@ mod tests {
 
         // Both flags parse successfully (conflict check is in validate_harden_flags, not clap)
         let cli = crate::Cli::try_parse_from([
-            "nemo", "start", "specs/foo.md", "--harden", "--no-harden",
+            "nemo",
+            "start",
+            "specs/foo.md",
+            "--harden",
+            "--no-harden",
         ]);
-        assert!(cli.is_ok(), "clap should parse both flags; conflict is checked manually");
+        assert!(
+            cli.is_ok(),
+            "clap should parse both flags; conflict is checked manually"
+        );
     }
 
     /// NFR-3: validate_harden_flags returns the spec-prescribed error message
@@ -357,9 +367,18 @@ mod tests {
     /// NFR-3: validate_harden_flags accepts valid flag combinations.
     #[test]
     fn test_validate_harden_flags_valid_combinations() {
-        assert!(validate_harden_flags(false, false).is_ok(), "neither flag is valid");
-        assert!(validate_harden_flags(true, false).is_ok(), "--harden only is valid");
-        assert!(validate_harden_flags(false, true).is_ok(), "--no-harden only is valid");
+        assert!(
+            validate_harden_flags(false, false).is_ok(),
+            "neither flag is valid"
+        );
+        assert!(
+            validate_harden_flags(true, false).is_ok(),
+            "--harden only is valid"
+        );
+        assert!(
+            validate_harden_flags(false, true).is_ok(),
+            "--no-harden only is valid"
+        );
     }
 
     /// FR-4a: default output shows HARDEN → AWAITING_APPROVAL → IMPLEMENT phase plan
@@ -410,10 +429,7 @@ mod tests {
             model_impl: None,
             model_review: None,
         };
-        assert_eq!(
-            phase_plan_label(&args),
-            "HARDEN \u{2192} IMPLEMENT"
-        );
+        assert_eq!(phase_plan_label(&args), "HARDEN \u{2192} IMPLEMENT");
     }
 
     /// Phase plan for ship mode with harden

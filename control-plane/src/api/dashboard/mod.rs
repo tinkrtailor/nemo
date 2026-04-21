@@ -31,7 +31,10 @@ pub fn build_dashboard_router_with_key(api_key: Option<String>) -> Router<AppSta
         .route("/dashboard/api/cancel/{id}", delete(handlers::proxy_cancel))
         .route("/dashboard/api/resume/{id}", post(handlers::proxy_resume))
         .route("/dashboard/api/extend/{id}", post(handlers::proxy_extend))
-        .route("/dashboard/api/pod-introspect/{id}", get(handlers::proxy_pod_introspect))
+        .route(
+            "/dashboard/api/pod-introspect/{id}",
+            get(handlers::proxy_pod_introspect),
+        )
         .layer(middleware::from_fn(auth::dashboard_auth_middleware));
 
     if let Some(key) = api_key {
@@ -40,7 +43,10 @@ pub fn build_dashboard_router_with_key(api_key: Option<String>) -> Router<AppSta
 
     // Public routes (no auth required)
     let public = Router::new()
-        .route("/dashboard/login", get(handlers::login_page).post(handlers::login_submit))
+        .route(
+            "/dashboard/login",
+            get(handlers::login_page).post(handlers::login_submit),
+        )
         .route("/dashboard/static/dashboard.css", get(handlers::static_css))
         .route("/dashboard/static/dashboard.js", get(handlers::static_js));
 
