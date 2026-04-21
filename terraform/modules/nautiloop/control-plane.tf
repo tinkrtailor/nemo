@@ -127,6 +127,13 @@ spec:
           restartPolicy: Always
           ports:
             - containerPort: 9090
+          env:
+            # FR-24: sidecar main.rs parses GIT_REPO_URL at startup and
+            # fatals if missing. The control-plane doesn't use the sidecar's
+            # git SSH proxy (judge only uses the model proxy), but the binary
+            # binds all four listeners unconditionally.
+            - name: GIT_REPO_URL
+              value: "${var.git_repo_url}"
           volumeMounts:
             - name: judge-creds
               mountPath: /secrets/model-credentials
@@ -274,6 +281,13 @@ spec:
           restartPolicy: Always
           ports:
             - containerPort: 9090
+          env:
+            # FR-24: sidecar main.rs parses GIT_REPO_URL at startup and
+            # fatals if missing. The control-plane doesn't use the sidecar's
+            # git SSH proxy (judge only uses the model proxy), but the binary
+            # binds all four listeners unconditionally.
+            - name: GIT_REPO_URL
+              value: "${var.git_repo_url}"
           volumeMounts:
             - name: judge-creds
               mountPath: /secrets/model-credentials
