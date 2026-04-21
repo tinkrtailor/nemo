@@ -1,0 +1,55 @@
+{
+  "round": 3,
+  "source": "audit",
+  "issues": [
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/nemo-profiles.md",
+      "description": "FR-6 covers `--set` behavior with profiles extensively but never specifies how `--get` behaves. Does `nemo config --get server_url` read from the active profile? Does it accept `--profile` to read from a specific profile? The current implementation (cli/src/commands/config.rs:25-49) reads flat fields — the profile-aware equivalent is unspecified.",
+      "suggestion": "Add FR-6g: `nemo config --get <key>` reads from the active profile for profile-scoped keys and from root for root-scoped keys. `--profile` flag applies the same precedence override as `--set`. The allow-list from FR-6c applies to `--get` as well."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/nemo-profiles.md",
+      "description": "The spec defines migration (FR-2a) for existing flat configs but does not address the cold-start case: no `~/.nemo/config.toml` exists at all. Currently `load_config()` returns `EngineerConfig::default()`. With the new `NemoConfig` struct requiring `current_profile` and a `profiles` HashMap, the default needs to be defined. What does `NemoConfig::default()` look like? An empty profiles map with no current_profile would immediately fail FR-1c validation.",
+      "suggestion": "Add a note to FR-1c or FR-2: when no config file exists, `NemoConfig::default()` returns an empty profiles map and empty `current_profile`. Commands that require a server URL error with a message like 'No profiles configured. Run nemo profile add <name> --server ... to get started.' This matches the current behavior where an unconfigured CLI errors when hitting the server."
+    },
+    {
+      "severity": "medium",
+      "category": "completeness",
+      "file": "specs/nemo-profiles.md",
+      "description": "FR-6c root-scoped key allow-list includes `helm.desktop_notifications` but omits `helm.theme`, which exists in `HelmConfig` (config.rs:10-12) and is a valid engineer-global preference. Users who want to set their theme via `nemo config --set helm.theme=light` would get an 'Unknown config key' error.",
+      "suggestion": "Add `helm.theme` (string, one of 'dark', 'light', 'high-contrast') to the root-scoped key allow-list in FR-6c, or explicitly note it is intentionally excluded with rationale."
+    },
+    {
+      "severity": "medium",
+      "category": "clarity",
+      "file": "specs/nemo-profiles.md",
+      "description": "FR-5c says `nemo config` (no args) 'now prints the active profile + all profile names, not just flat fields' but does not specify the output format. The current implementation has a specific display format (config.rs:86-112). Implementers need to know what the new display looks like — does it show all fields of the active profile? Just profile names? Both?",
+      "suggestion": "Add an example output block for `nemo config` (no args) in profile mode, e.g.:\n```\nActive profile: work\nProfiles: default, personal, work*\n\n  server_url: https://nautiloop.work.internal\n  engineer:   ggylfason\n  ...\n\n[helm]\n  desktop_notifications: false\n```"
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/nemo-profiles.md",
+      "description": "FR-1b profile name regex `^[a-zA-Z0-9][a-zA-Z0-9-]*$` requires at least 2 characters (one start char + one or more continuation chars). Single-character names like 'd' or '1' would be rejected. This may be intentional but isn't called out.",
+      "suggestion": "Change regex to `^[a-zA-Z0-9][a-zA-Z0-9-]*$` → `^[a-zA-Z0-9]([a-zA-Z0-9-]*)?$` (or `^[a-zA-Z0-9][a-zA-Z0-9-]{0,}$`) to allow single-char names, or document that minimum length is 2."
+    },
+    {
+      "severity": "low",
+      "category": "clarity",
+      "file": "specs/nemo-profiles.md",
+      "description": "FR-5b example shows 'NAUTILOOP · work' (uppercase) but the actual helm header in summary.rs uses lowercase 'nautiloop'. Minor inconsistency in the spec's example output.",
+      "suggestion": "Align the example with actual casing: 'nautiloop · work'."
+    },
+    {
+      "severity": "low",
+      "category": "completeness",
+      "file": "specs/nemo-profiles.md",
+      "description": "Profile name case sensitivity is not specified. FR-1b gives the regex allowing mixed case, but it's unclear whether 'Work' and 'work' are distinct profiles. HashMap keys are case-sensitive by default in Rust, so they would be distinct — but this could confuse users.",
+      "suggestion": "Add a note: profile names are case-sensitive ('Work' and 'work' are distinct profiles), or specify that lookup is case-insensitive and names are normalized to lowercase on creation."
+    }
+  ]
+}
