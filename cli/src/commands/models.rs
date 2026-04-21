@@ -2,7 +2,6 @@ use anyhow::Result;
 
 use crate::api_types::{CredentialsResponse, ProviderInfo};
 use crate::client::NemoClient;
-use crate::config::EngineerConfig;
 
 /// Model catalog - known models per provider.
 const CLAUDE_MODELS: &[&str] = &["claude-opus-4", "claude-sonnet-4", "claude-haiku-4"];
@@ -75,9 +74,8 @@ fn build_models_json(cp_providers: &[ProviderInfo]) -> ModelsJsonOutput {
     ModelsJsonOutput { providers }
 }
 
-/// Run the models command - show authenticated providers and available models.
-pub async fn run(client: &NemoClient, eng_config: &EngineerConfig, json: bool) -> Result<()> {
-    let engineer = &eng_config.engineer;
+/// Run the models command (profile-aware entry point).
+pub async fn run_with_models(client: &NemoClient, engineer: &str, json: bool) -> Result<()> {
     if engineer.is_empty() {
         anyhow::bail!("Engineer name not configured. Run: nemo config --set engineer=<your-name>");
     }

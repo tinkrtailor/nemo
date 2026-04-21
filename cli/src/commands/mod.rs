@@ -12,6 +12,7 @@ pub mod init;
 pub mod inspect;
 pub mod logs;
 pub mod models;
+pub mod profile;
 pub mod ps;
 pub mod resume;
 pub mod start;

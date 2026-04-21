@@ -22,6 +22,10 @@ struct Cli {
     #[arg(long, short = 's', global = true)]
     server: Option<String>,
 
+    /// Select a named profile for this invocation (overrides NAUTILOOP_PROFILE and current_profile)
+    #[arg(long, global = true)]
+    profile: Option<String>,
+
     /// Disable TLS certificate verification (dev/self-signed certs only)
     #[arg(long, global = true)]
     insecure: bool,
@@ -424,13 +428,13 @@ enum Commands {
         read a specific key, --set to write one.\n\n\
         Example:\n  \
           $ nemo config\n  \
+          Active profile: work\n  \
           server_url: https://nemo.example.com:8080\n  \
-          engineer: alice\n  \
-          api_key: ****\n\n  \
+          api_key: abc1...789z\n\n  \
           $ nemo config --get engineer\n  \
           alice\n\n  \
           $ nemo config --set engineer=bob\n  \
-          Updated engineer = bob\n\n\
+          Set engineer = bob\n\n\
         See also: nemo init (generate nemo.toml), nemo auth (push credentials).")]
     Config {
         /// Set a config value
@@ -440,6 +444,48 @@ enum Commands {
         /// Get a config value
         #[arg(long)]
         get: Option<String>,
+
+        /// Show full API key (disable redaction)
+        #[arg(long)]
+        unmask: bool,
+    },
+
+    /// Manage named profiles for multiple clusters
+    #[command(long_about = "Manage named profiles for multiple clusters.\n\n\
+        Profiles allow switching between nautiloop clusters without editing config files.\n\
+        Each profile stores a server URL, API key, and engineer identity.\n\n\
+        Example:\n  \
+          $ nemo profile ls\n  \
+          * work      https://nautiloop.work.internal  ggylfason\n  \
+            personal  http://100.64.1.10:8080          gunnar\n\n  \
+          $ nemo profile add staging --server https://staging.example.com --api-key xyz --engineer alice\n  \
+          Added profile 'staging'.\n\n  \
+          $ nemo profile show work\n  \
+          Profile: work (active)\n  \
+            server_url: https://nautiloop.work.internal\n  \
+            api_key: abc1...789z\n\n\
+        See also: nemo use-profile (switch active profile), nemo config (view/edit config).")]
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
+
+    /// Switch the active profile
+    #[command(
+        name = "use-profile",
+        long_about = "Switch the active profile.\n\n\
+            Sets the active profile in ~/.nemo/config.toml. All subsequent commands\n\
+            will use this profile's server URL, API key, and engineer identity.\n\n\
+            Example:\n  \
+              $ nemo use-profile work\n  \
+              Active profile: work (https://nautiloop.work.internal).\n\n  \
+              $ nemo use-profile dev\n  \
+              Active profile: dev (http://localhost:18080).\n\n\
+            See also: nemo profile ls (list profiles), nemo profile add (create profile)."
+    )]
+    UseProfile {
+        /// Profile name to activate
+        name: String,
     },
 
     /// Show CLI version and supported features
@@ -481,6 +527,114 @@ enum Commands {
         /// Output format (json)
         #[arg(long)]
         format: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProfileAction {
+    /// List all profiles
+    #[command(alias = "list", long_about = "List all profiles.\n\n\
+        Shows all configured profiles with their server URL and engineer name.\n\
+        The active profile is marked with *.\n\n\
+        Example:\n  \
+          $ nemo profile ls\n  \
+            default   http://localhost:18080           dev\n  \
+          * work      https://nautiloop.work.internal  ggylfason\n  \
+            personal  http://100.64.1.10:8080          gunnar")]
+    Ls,
+
+    /// Show profile details
+    #[command(long_about = "Show profile details.\n\n\
+        Prints the full configuration for a profile. Omit the name to show the\n\
+        active profile. API key is redacted by default; use --unmask to reveal.\n\n\
+        Example:\n  \
+          $ nemo profile show work\n  \
+          Profile: work (active)\n  \
+            server_url: https://nautiloop.work.internal\n  \
+            api_key: abc1...789z\n  \
+            engineer: ggylfason")]
+    Show {
+        /// Profile name (default: active profile)
+        name: Option<String>,
+
+        /// Show full API key (disable redaction)
+        #[arg(long)]
+        unmask: bool,
+    },
+
+    /// Add a new profile
+    #[command(long_about = "Add a new profile.\n\n\
+        Creates a new named profile with connection details. --server, --api-key,\n\
+        and --engineer are required. --name and --email default to the current\n\
+        profile's values. Use --switch to activate the new profile immediately.\n\n\
+        Example:\n  \
+          $ nemo profile add work --server https://nautiloop.work.internal \\\n  \
+              --api-key xyz789 --engineer ggylfason\n  \
+          Added profile 'work'.")]
+    Add {
+        /// Profile name
+        name: String,
+
+        /// Server URL (required)
+        #[arg(long)]
+        server: String,
+
+        /// API key (required)
+        #[arg(long)]
+        api_key: String,
+
+        /// Engineer identifier (required)
+        #[arg(long)]
+        engineer: String,
+
+        /// Display name (defaults to current profile's name)
+        #[arg(long = "name")]
+        name_field: Option<String>,
+
+        /// Email (defaults to current profile's email)
+        #[arg(long)]
+        email: Option<String>,
+
+        /// Switch to this profile after creating it
+        #[arg(long)]
+        switch: bool,
+    },
+
+    /// Remove a profile
+    #[command(long_about = "Remove a profile.\n\n\
+        Removes a named profile from the config. Cannot remove the active profile\n\
+        or the last remaining profile.\n\n\
+        Example:\n  \
+          $ nemo profile rm staging\n  \
+          Removed profile 'staging'.")]
+    Rm {
+        /// Profile name to remove
+        name: String,
+    },
+
+    /// Rename a profile
+    #[command(long_about = "Rename a profile.\n\n\
+        Renames an existing profile. If the renamed profile is active, the active\n\
+        profile reference is updated automatically.\n\n\
+        Example:\n  \
+          $ nemo profile rename work production\n  \
+          Renamed profile 'work' to 'production'.")]
+    Rename {
+        /// Current profile name
+        old: String,
+        /// New profile name
+        new: String,
+    },
+
+    /// Switch to a profile (alias for `nemo use-profile`)
+    #[command(long_about = "Switch to a profile.\n\n\
+        Sets the active profile. Equivalent to `nemo use-profile <name>`.\n\n\
+        Example:\n  \
+          $ nemo profile use work\n  \
+          Active profile: work (https://nautiloop.work.internal).")]
+    Use {
+        /// Profile name to activate
+        name: String,
     },
 }
 
@@ -580,7 +734,7 @@ fn build_help_all_json(root: &clap::Command) -> serde_json::Value {
             }
         }
 
-        // Handle nested subcommands (e.g., cache show)
+        // Handle nested subcommands (e.g., cache show, profile ls)
         for nested_sub in sub.get_subcommands() {
             let nested_name = format!("{} {}", name, nested_sub.get_name());
             let nested_short = nested_sub
@@ -784,9 +938,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     }
 
     // Handle config command before loading config — a broken config file
-    // must not prevent `nemo config --set` from working.
-    if let Commands::Config { ref set, ref get } = cli.command {
-        return commands::config::run(set.clone(), get.clone());
+    // must not prevent `nemo config --set` from working. (FR-6e)
+    if let Commands::Config { ref set, ref get, unmask } = cli.command {
+        return commands::config::run(set.clone(), get.clone(), cli.profile.as_deref(), unmask);
     }
 
     // Init is local-only — don't require config
@@ -794,25 +948,88 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         return commands::init::run(force);
     }
 
-    let eng_config = config::load_config()?;
+    // --- Profile management commands: load config directly, no API client needed ---
 
-    let server_url = cli.server.unwrap_or(eng_config.server_url.clone());
-
-    let insecure =
-        cli.insecure || matches!(std::env::var("NEMO_INSECURE").as_deref(), Ok("true" | "1"));
-    // Warn early if api_key is missing — commands that hit the server will fail
-    if eng_config.api_key.is_none() {
-        // Init and Config don't need an API key
-        if !matches!(cli.command, Commands::Init { .. }) {
-            anyhow::bail!("API key not configured. Run: nemo config --set api_key=<your-key>");
+    // Profile subcommands
+    if let Commands::Profile { ref action } = cli.command {
+        let mut nemo_config = config::load_config()?;
+        match action {
+            ProfileAction::Ls => {
+                return commands::profile::run_list(&nemo_config);
+            }
+            ProfileAction::Show { name, unmask } => {
+                return commands::profile::run_show(
+                    &nemo_config,
+                    name.as_deref(),
+                    cli.profile.as_deref(),
+                    *unmask,
+                );
+            }
+            ProfileAction::Add {
+                name,
+                server,
+                api_key,
+                engineer,
+                name_field,
+                email,
+                switch,
+            } => {
+                return commands::profile::run_add(
+                    &mut nemo_config,
+                    name,
+                    server,
+                    api_key,
+                    engineer,
+                    name_field.clone(),
+                    email.clone(),
+                    *switch,
+                );
+            }
+            ProfileAction::Rm { name } => {
+                return commands::profile::run_remove(&mut nemo_config, name);
+            }
+            ProfileAction::Rename { old, new } => {
+                return commands::profile::run_rename(&mut nemo_config, old, new);
+            }
+            ProfileAction::Use { name } => {
+                return commands::profile::run_use_profile(&mut nemo_config, name);
+            }
         }
     }
 
+    // use-profile top-level (FR-6f)
+    if let Commands::UseProfile { ref name } = cli.command {
+        let mut nemo_config = config::load_config()?;
+        return commands::profile::run_use_profile(&mut nemo_config, name);
+    }
+
+    // --- Normal commands: load config + resolve profile ---
+
+    let nemo_config = config::load_config()?;
+    let profile_flag = cli.profile.as_deref();
+    let (profile_name, active_profile) = nemo_config.active_profile(profile_flag)?;
+
+    let server_url = cli
+        .server
+        .clone()
+        .unwrap_or_else(|| active_profile.server_url.clone());
+
+    let insecure =
+        cli.insecure || matches!(std::env::var("NEMO_INSECURE").as_deref(), Ok("true" | "1"));
+
+    // Warn early if api_key is missing
+    if active_profile.api_key.is_none() {
+        anyhow::bail!("API key not configured. Run: nemo config --set api_key=<your-key>");
+    }
+
     let http_client =
-        client::NemoClient::new(&server_url, eng_config.api_key.as_deref(), insecure)?;
+        client::NemoClient::new(&server_url, active_profile.api_key.as_deref(), insecure)?;
+
+    let engineer = &active_profile.engineer;
+    let eng_name = active_profile.name.as_deref().unwrap_or("");
+    let eng_email = active_profile.email.as_deref().unwrap_or("");
 
     // Validate engineer is configured for commands that need it
-    // Status --team doesn't need engineer
     let needs_engineer = match &cli.command {
         Commands::Harden { .. }
         | Commands::Start { .. }
@@ -822,7 +1039,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Status { team, .. } => !team,
         _ => false,
     };
-    if needs_engineer && eng_config.engineer.is_empty() {
+    if needs_engineer && engineer.is_empty() {
         anyhow::bail!("Engineer name not configured. Run: nemo config --set engineer=<your-name>");
     }
 
@@ -833,19 +1050,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             model_review,
         } => {
             let (model_impl, model_review) =
-                project_config::resolve_models(model_impl, model_review, &eng_config.models)?;
+                project_config::resolve_models(model_impl, model_review, &nemo_config.models)?;
             claude_creds::ensure_fresh(
                 &http_client,
-                &eng_config.engineer,
-                &eng_config.name,
-                &eng_config.email,
+                engineer,
+                eng_name,
+                eng_email,
             )
             .await?;
-            // nemo harden: harden=true, harden_only=true, ship_mode=false
             commands::start::run(
                 &http_client,
                 commands::start::StartArgs {
-                    engineer: &eng_config.engineer,
+                    engineer,
                     spec_path: &spec_path,
                     harden: true,
                     harden_only: true,
@@ -865,24 +1081,22 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             model_impl,
             model_review,
         } => {
-            // Conflict check already done above (before config loading).
             if let Some(warning) = commands::start::deprecation_warning(harden) {
                 eprintln!("{warning}");
             }
             let (model_impl, model_review) =
-                project_config::resolve_models(model_impl, model_review, &eng_config.models)?;
+                project_config::resolve_models(model_impl, model_review, &nemo_config.models)?;
             claude_creds::ensure_fresh(
                 &http_client,
-                &eng_config.engineer,
-                &eng_config.name,
-                &eng_config.email,
+                engineer,
+                eng_name,
+                eng_email,
             )
             .await?;
-            // nemo start: harden by default, --no-harden to skip
             commands::start::run(
                 &http_client,
                 commands::start::StartArgs {
-                    engineer: &eng_config.engineer,
+                    engineer,
                     spec_path: &spec_path,
                     harden: !no_harden,
                     harden_only: false,
@@ -901,19 +1115,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             model_review,
         } => {
             let (model_impl, model_review) =
-                project_config::resolve_models(model_impl, model_review, &eng_config.models)?;
+                project_config::resolve_models(model_impl, model_review, &nemo_config.models)?;
             claude_creds::ensure_fresh(
                 &http_client,
-                &eng_config.engineer,
-                &eng_config.name,
-                &eng_config.email,
+                engineer,
+                eng_name,
+                eng_email,
             )
             .await?;
-            // nemo ship: ship_mode=true, auto_approve implied
             commands::start::run(
                 &http_client,
                 commands::start::StartArgs {
-                    engineer: &eng_config.engineer,
+                    engineer,
                     spec_path: &spec_path,
                     harden,
                     harden_only: false,
@@ -926,10 +1139,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             .await?;
         }
         Commands::Status { team, json } => {
-            commands::status::run(&http_client, &eng_config.engineer, team, json).await?;
+            // FR-5a: profile header on stderr
+            eprintln!("# Profile: {} \u{00b7} {}", profile_name, server_url);
+            commands::status::run(&http_client, engineer, team, json).await?;
         }
         Commands::Helm { team } => {
-            commands::helm::run(&http_client, &eng_config.engineer, team, &eng_config.helm).await?;
+            commands::helm::run(&http_client, engineer, team, &nemo_config.helm, profile_name).await?;
         }
         Commands::Logs {
             loop_id,
@@ -940,26 +1155,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             container,
         } => {
             if tail {
-                // --tail reads raw pod container stdout, which has
-                // no round/stage structure to filter on. Fail loud
-                // instead of silently ignoring the flags.
                 if round.is_some() || stage.is_some() {
                     anyhow::bail!(
                         "--round / --stage are not supported with --tail (pod stdout is unstructured); \
                          run without --tail for filtered historical logs"
                     );
                 }
-                // If --tail fails because the loop is terminal or has
-                // no active pod, fall back to historical logs. Other
-                // errors (bad container name, control plane down, etc.)
-                // should surface directly to the operator.
                 match commands::logs::run_tail(&http_client, &loop_id, tail_lines, &container).await
                 {
                     Ok(commands::logs::TailResult::Ok) => {}
                     Ok(commands::logs::TailResult::NoPod) => {
-                        // Don't fall back to the SSE stream here — that
-                        // would block forever if the loop is paused or
-                        // awaiting approval/auth. Just inform and exit.
                         eprintln!(
                             "No active pod. The loop may be between stages, paused, or awaiting auth. Try again shortly or use `nemo logs {loop_id}` (without --tail) for historical logs."
                         );
@@ -1002,7 +1207,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             commands::extend::run(&http_client, &loop_id, add, json).await?;
         }
         Commands::Init { .. } => {
-            // Handled above before config loading
             unreachable!("Init is dispatched before config loading");
         }
         Commands::Auth {
@@ -1013,9 +1217,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             commands::auth::run(
                 &http_client,
-                &eng_config.engineer,
-                &eng_config.name,
-                &eng_config.email,
+                engineer,
+                eng_name,
+                eng_email,
                 claude,
                 openai,
                 ssh,
@@ -1029,17 +1233,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         },
         Commands::Models { json } => {
-            commands::models::run(&http_client, &eng_config, json).await?;
+            commands::models::run_with_models(&http_client, engineer, json).await?;
         }
-        Commands::Config { set, get } => {
-            commands::config::run(set, get)?;
+        Commands::Config { .. } => {
+            unreachable!("Config is dispatched before config loading");
+        }
+        Commands::Profile { .. } => {
+            unreachable!("Profile is dispatched before config loading");
+        }
+        Commands::UseProfile { .. } => {
+            unreachable!("UseProfile is dispatched before config loading");
         }
         Commands::Help { .. } => {
-            // Handled above before config loading
             unreachable!("Help is dispatched before config loading");
         }
         Commands::Capabilities => {
-            // Handled above before config loading
             unreachable!("Capabilities is dispatched before config loading");
         }
     }
@@ -1085,8 +1293,8 @@ mod tests {
         for sub in cmd.get_subcommands() {
             let name = sub.get_name();
             // help doesn't need examples in long_about (it IS the help system)
-            // cache parent doesn't need examples (cache show does)
-            if name == "help" || name == "cache" {
+            // cache and profile parents don't need examples (their subcommands do)
+            if name == "help" || name == "cache" || name == "profile" {
                 continue;
             }
             let long = sub
@@ -1100,21 +1308,25 @@ mod tests {
         }
     }
 
-    /// Verify that nested subcommands (cache show) have examples too.
+    /// Verify that nested subcommands (cache show, profile ls) have examples too.
     #[test]
     fn nested_commands_have_examples() {
         let cmd = Cli::command();
-        let cache = cmd.find_subcommand("cache").expect("cache subcommand");
-        for nested in cache.get_subcommands() {
-            let name = nested.get_name();
-            let long = nested
-                .get_long_about()
-                .map(|a| a.to_string())
-                .unwrap_or_default();
-            assert!(
-                long.contains("Example:"),
-                "Nested command 'cache {name}' is missing 'Example:' in long_about"
-            );
+        for parent_name in &["cache", "profile"] {
+            let parent = cmd.find_subcommand(parent_name).unwrap_or_else(|| {
+                panic!("{parent_name} subcommand not found");
+            });
+            for nested in parent.get_subcommands() {
+                let name = nested.get_name();
+                let long = nested
+                    .get_long_about()
+                    .map(|a| a.to_string())
+                    .unwrap_or_default();
+                assert!(
+                    long.contains("Example:") || long.contains("Example\n"),
+                    "Nested command '{parent_name} {name}' is missing 'Example:' in long_about"
+                );
+            }
         }
     }
 
@@ -1132,6 +1344,8 @@ mod tests {
         assert!(commands.contains_key("status"));
         assert!(commands.contains_key("capabilities"));
         assert!(commands.contains_key("help"));
+        assert!(commands.contains_key("profile"));
+        assert!(commands.contains_key("use-profile"));
 
         // Check structure of one command
         let approve = &commands["approve"];
@@ -1149,8 +1363,9 @@ mod tests {
             .get_subcommands()
             .map(|c| c.get_name().to_string())
             .collect();
-        // Should include capabilities and help
         assert!(subcommand_names.contains(&"capabilities".to_string()));
         assert!(subcommand_names.contains(&"help".to_string()));
+        assert!(subcommand_names.contains(&"profile".to_string()));
+        assert!(subcommand_names.contains(&"use-profile".to_string()));
     }
 }

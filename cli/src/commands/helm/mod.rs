@@ -183,10 +183,12 @@ struct App {
     // Desktop notifications (FR-4b) - read behind `desktop-notifications` feature
     #[allow(dead_code)]
     desktop_notifications: bool,
+    // Active profile name for header display (FR-5b)
+    profile_name: String,
 }
 
 impl App {
-    fn new(team_view: bool, helm_config: &HelmConfig) -> Self {
+    fn new(team_view: bool, helm_config: &HelmConfig, profile_name: String) -> Self {
         // Load theme from config (FR-8a)
         let theme_name = helm_config.theme.as_deref()
             .and_then(|s| s.parse::<ThemeName>().ok())
@@ -239,6 +241,7 @@ impl App {
             cancel_confirm_at: None,
             pending_bell: false,
             desktop_notifications: helm_config.desktop_notifications,
+            profile_name,
         }
     }
 
@@ -639,7 +642,7 @@ enum StreamOutcome {
     Disconnected,
 }
 
-pub async fn run(client: &NemoClient, engineer: &str, team: bool, helm_config: &HelmConfig) -> Result<()> {
+pub async fn run(client: &NemoClient, engineer: &str, team: bool, helm_config: &HelmConfig, profile_name: &str) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -647,7 +650,7 @@ pub async fn run(client: &NemoClient, engineer: &str, team: bool, helm_config: &
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run_app(&mut terminal, client.clone(), engineer.to_string(), team, helm_config).await;
+    let result = run_app(&mut terminal, client.clone(), engineer.to_string(), team, helm_config, profile_name.to_string()).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -662,6 +665,7 @@ async fn run_app(
     engineer: String,
     team: bool,
     helm_config: &HelmConfig,
+    profile_name: String,
 ) -> Result<()> {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let (selection_tx, selection_rx) = watch::channel(None::<LogSelection>);
@@ -679,7 +683,7 @@ async fn run_app(
     spawn_batch_inspect_task(client.clone(), loops_rx, event_tx.clone());
     spawn_background_log_task(client.clone(), loops_tx.subscribe(), selection_tx.subscribe(), event_tx.clone());
 
-    let mut app = App::new(team, helm_config);
+    let mut app = App::new(team, helm_config, profile_name);
 
     loop {
         terminal.draw(|frame| render(frame, &mut app))?;
@@ -1757,12 +1761,29 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         .split(frame.area());
 
     // FR-1: Header summary line
-    let header_text = summary::build_header(&app.loops, &app.all_inspect, &app.pricing, app.team_view);
-    let header = Paragraph::new(Line::from(Span::styled(
-        header_text,
-        Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-    )))
-    .style(Style::default().bg(theme.surface));
+    // FR-5b: profile name portion uses dim/secondary text color
+    let header_text = summary::build_header(&app.loops, &app.all_inspect, &app.pricing, app.team_view, &app.profile_name);
+    let bold_teal = Style::default().fg(theme.teal).add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().fg(theme.muted);
+    // Split: "nautiloop · <profile>" from the rest; profile name gets dim style
+    let header_line = if let Some(rest) = header_text.strip_prefix("nautiloop") {
+        // rest starts with " · <profile> · ..." or " · <profile> · team ..."
+        // Find the profile name portion: " · <profile_name>"
+        let profile_marker = format!(" · {}", app.profile_name);
+        if let Some(after_profile) = rest.strip_prefix(&profile_marker) {
+            Line::from(vec![
+                Span::styled("nautiloop", bold_teal),
+                Span::styled(format!(" · {}", app.profile_name), dim_style),
+                Span::styled(after_profile.to_string(), bold_teal),
+            ])
+        } else {
+            Line::from(Span::styled(header_text, bold_teal))
+        }
+    } else {
+        Line::from(Span::styled(header_text, bold_teal))
+    };
+    let header = Paragraph::new(header_line)
+        .style(Style::default().bg(theme.surface));
     frame.render_widget(header, root[0]);
 
     // Main content area
@@ -2524,7 +2545,7 @@ mod tests {
     fn set_loops_preserves_selected_loop_when_still_present() {
         let first_id = uuid::Uuid::new_v4();
         let second_id = uuid::Uuid::new_v4();
-        let mut app = App::new(false, &default_helm_config());
+        let mut app = App::new(false, &default_helm_config(), "default".to_string());
         app.set_loops(vec![
             loop_summary(first_id, "alice", "2026-04-10T10:00:00Z"),
             loop_summary(second_id, "bob", "2026-04-10T09:00:00Z"),
@@ -2542,7 +2563,7 @@ mod tests {
 
     #[test]
     fn action_hotkeys_map_to_loop_commands() {
-        let mut app = App::new(false, &default_helm_config());
+        let mut app = App::new(false, &default_helm_config(), "default".to_string());
 
         assert_eq!(
             app.handle_input(KeyEvent::from(KeyCode::Char('a'))),
@@ -2560,7 +2581,7 @@ mod tests {
 
     #[test]
     fn log_source_hotkey_cycles_sources() {
-        let mut app = App::new(false, &default_helm_config());
+        let mut app = App::new(false, &default_helm_config(), "default".to_string());
 
         assert_eq!(app.log_source, LogSource::Persisted);
         assert_eq!(
@@ -2583,7 +2604,7 @@ mod tests {
     #[test]
     fn persisted_log_selection_does_not_restart_on_job_name_changes() {
         let first_id = uuid::Uuid::new_v4();
-        let mut app = App::new(false, &default_helm_config());
+        let mut app = App::new(false, &default_helm_config(), "default".to_string());
         app.set_loops(vec![loop_summary(
             first_id,
             "alice",
@@ -2602,7 +2623,7 @@ mod tests {
     #[test]
     fn pod_log_selection_tracks_active_job_name() {
         let first_id = uuid::Uuid::new_v4();
-        let mut app = App::new(false, &default_helm_config());
+        let mut app = App::new(false, &default_helm_config(), "default".to_string());
         app.log_source = LogSource::AgentPod;
         app.set_loops(vec![loop_summary(
             first_id,
@@ -2630,7 +2651,7 @@ mod tests {
 
     #[test]
     fn theme_cycling_works() {
-        let mut app = App::new(false, &default_helm_config());
+        let mut app = App::new(false, &default_helm_config(), "default".to_string());
         assert_eq!(app.theme_name, ThemeName::Dark);
         assert_eq!(
             app.handle_input(KeyEvent::from(KeyCode::Char('T'))),
@@ -2642,7 +2663,7 @@ mod tests {
 
     #[test]
     fn view_switching_works() {
-        let mut app = App::new(false, &default_helm_config());
+        let mut app = App::new(false, &default_helm_config(), "default".to_string());
         assert_eq!(app.main_view, MainView::Logs);
         assert_eq!(
             app.handle_input(KeyEvent::from(KeyCode::Char('d'))),
@@ -2660,7 +2681,7 @@ mod tests {
 
     #[test]
     fn cancel_requires_confirmation() {
-        let mut app = App::new(false, &default_helm_config());
+        let mut app = App::new(false, &default_helm_config(), "default".to_string());
         let id = uuid::Uuid::new_v4();
         app.set_loops(vec![LoopSummary {
             state: "IMPLEMENTING".to_string(),
@@ -2680,7 +2701,7 @@ mod tests {
 
     #[test]
     fn cancel_confirmation_aborts_on_other_key() {
-        let mut app = App::new(false, &default_helm_config());
+        let mut app = App::new(false, &default_helm_config(), "default".to_string());
         let id = uuid::Uuid::new_v4();
         app.set_loops(vec![LoopSummary {
             state: "IMPLEMENTING".to_string(),
@@ -2698,7 +2719,7 @@ mod tests {
 
     #[test]
     fn cancel_confirmation_times_out_after_3s() {
-        let mut app = App::new(false, &default_helm_config());
+        let mut app = App::new(false, &default_helm_config(), "default".to_string());
         let id = uuid::Uuid::new_v4();
         app.set_loops(vec![LoopSummary {
             state: "IMPLEMENTING".to_string(),
@@ -2721,7 +2742,7 @@ mod tests {
     fn convergence_detection_sets_flash_and_row_flash() {
         let id = uuid::Uuid::new_v4();
         let helm_config = HelmConfig::default();
-        let mut app = App::new(false, &helm_config);
+        let mut app = App::new(false, &helm_config, "default".to_string());
 
         // Set up initial state
         app.previous_states.insert(id, "IMPLEMENTING".to_string());
