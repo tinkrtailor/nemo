@@ -981,11 +981,18 @@ const DEFAULT_INSTRUCTIONS: &str = "Follow the instructions provided in the inpu
 /// Patch a Responses API JSON body before forwarding.
 ///
 /// Always: inject `"instructions"` if absent.
-/// When `is_codex_oauth`: rename `"max_output_tokens"` → `"max_tokens"`.
-///   chatgpt.com/backend-api/codex/responses rejects `max_output_tokens`
-///   with "Unsupported parameter: max_output_tokens"; it expects the legacy
-///   `max_tokens` name instead. api.openai.com uses `max_output_tokens`, so
-///   the rename is only applied on the CodexOauth path.
+///
+/// Token-limit field name depends on the upstream:
+///   - `chatgpt.com/backend-api/codex/responses` expects the legacy
+///     `max_tokens` and rejects `max_output_tokens`.
+///   - `api.openai.com/v1/responses` expects `max_output_tokens` and
+///     rejects `max_tokens`.
+///
+/// Clients (opencode ≤1.3.17) can't tell which upstream the sidecar
+/// routes to and emit whichever name their internal routing picks.
+/// We rewrite symmetrically so the body always matches the upstream:
+///   - Codex OAuth path: `max_output_tokens` → `max_tokens`.
+///   - Api-key path: `max_tokens` → `max_output_tokens`.
 ///
 /// Returns the original bytes unchanged if the body is not valid JSON.
 fn patch_responses_body(bytes: Bytes, is_codex_oauth: bool) -> Bytes {
@@ -1000,10 +1007,13 @@ fn patch_responses_body(bytes: Bytes, is_codex_oauth: bool) -> Bytes {
         );
         modified = true;
     }
-    if is_codex_oauth
-        && let Some(v) = payload.remove("max_output_tokens")
-    {
-        payload.insert("max_tokens".to_string(), v);
+    if is_codex_oauth {
+        if let Some(v) = payload.remove("max_output_tokens") {
+            payload.insert("max_tokens".to_string(), v);
+            modified = true;
+        }
+    } else if let Some(v) = payload.remove("max_tokens") {
+        payload.insert("max_output_tokens".to_string(), v);
         modified = true;
     }
     if !modified {
@@ -1413,6 +1423,18 @@ mod tests {
     #[test]
     fn test_non_codex_oauth_preserves_max_output_tokens() {
         let input = br#"{"model":"gpt-5.4","input":"review","max_output_tokens":4096}"#;
+        let result = patch_responses_body(Bytes::from_static(input), false);
+        let out: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(out["max_output_tokens"], 4096);
+        assert!(out.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn test_non_codex_oauth_renames_max_tokens_to_max_output_tokens() {
+        // opencode v1.3.17's gpt-5.x routing emits the legacy `max_tokens`
+        // name. api.openai.com/v1/responses rejects that field — the sidecar
+        // rewrites it so api-key callers don't need a version-specific client.
+        let input = br#"{"model":"gpt-5.4","input":"review","max_tokens":4096}"#;
         let result = patch_responses_body(Bytes::from_static(input), false);
         let out: serde_json::Value = serde_json::from_slice(&result).unwrap();
         assert_eq!(out["max_output_tokens"], 4096);
