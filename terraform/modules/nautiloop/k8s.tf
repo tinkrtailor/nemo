@@ -166,13 +166,19 @@ data:
   id_ed25519: ${base64encode(local.deploy_private_key)}
 YAML
 
-  # Judge credentials (only rendered when judge_api_key provided).
-  # HCL evaluates the template body unconditionally even when the outer
-  # ternary short-circuits, so we cannot use `coalesce(var.judge_api_key, "")`
-  # here — coalesce rejects empty strings when nothing else is non-null.
-  # A plain `!= null` ternary works: when null, use an empty string which
-  # is valid input to jsonencode; the outer ternary below selects the
-  # empty-string template path anyway so this body is never actually applied.
+  # Judge credentials — prefers Claude OAuth bundle (Anthropic subscription),
+  # falls back to raw Anthropic API key. Secret shape matches nautiloop-creds-<engineer>
+  # so the auth-sidecar reads /secrets/model-credentials/{claude,anthropic} as-is.
+  # Precedence (higher wins):
+  #   1. judge_claude_credentials — JSON bundle from `nemo auth --claude` / ~/.claude/.credentials.json
+  #   2. judge_anthropic_key — raw Anthropic API key (legacy fallback)
+  _judge_has_claude    = var.judge_claude_credentials != null && var.judge_claude_credentials != ""
+  _judge_has_anthropic = var.judge_anthropic_key != null && var.judge_anthropic_key != ""
+  _judge_creds_data = (
+    local._judge_has_claude ? "  claude: ${base64encode(coalesce(var.judge_claude_credentials, ""))}" :
+    local._judge_has_anthropic ? "  anthropic: ${base64encode(coalesce(var.judge_anthropic_key, ""))}" :
+    ""
+  )
   _judge_creds_yaml_template = <<-YAML
 apiVersion: v1
 kind: Secret
@@ -180,9 +186,9 @@ metadata:
   name: nautiloop-judge-creds
   namespace: nautiloop-system
 data:
-  credentials.json: ${base64encode(jsonencode({ api_key = var.judge_api_key != null ? var.judge_api_key : "" }))}
+${local._judge_creds_data}
 YAML
-  judge_creds_yaml           = var.judge_api_key != null ? local._judge_creds_yaml_template : ""
+  judge_creds_yaml = (local._judge_has_claude || local._judge_has_anthropic) ? local._judge_creds_yaml_template : ""
 
   # Registry creds (only rendered when image_pull_secret provided)
   _dockerconfigjson_b64 = var.image_pull_secret_dockerconfigjson != null ? base64encode(var.image_pull_secret_dockerconfigjson) : ""
@@ -474,13 +480,13 @@ resource "null_resource" "k8s_secrets" {
   }
 }
 
-# Judge credentials (conditional — only when judge_api_key provided)
+# Judge credentials (conditional — only when judge_anthropic_key provided)
 resource "null_resource" "k8s_judge_creds" {
-  count      = var.judge_api_key != null ? 1 : 0
+  count      = var.judge_anthropic_key != null ? 1 : 0
   depends_on = [null_resource.k8s_foundation]
 
   triggers = {
-    key_hash  = sha256(var.judge_api_key)
+    key_hash  = sha256(var.judge_anthropic_key)
     server_ip = var.server_ip
   }
 

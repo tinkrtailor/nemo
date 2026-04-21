@@ -184,7 +184,31 @@ variable "image_pull_secret_dockerconfigjson" {
 }
 
 variable "judge_api_key" {
-  description = "Anthropic API key for the orchestrator judge. If set, creates a nautiloop-judge-creds secret and mounts it in the loop engine. If null, judge falls back to heuristic."
+  description = "REMOVED: use judge_anthropic_key instead. This variable exists only to produce a clear error."
+  type        = string
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.judge_api_key == null
+    error_message = "judge_api_key has been removed. Set judge_anthropic_key with a raw Anthropic API key instead."
+  }
+}
+
+variable "judge_anthropic_key" {
+  description = "Raw Anthropic API key for the orchestrator judge (fallback path). Prefer judge_claude_credentials for subscription-based auth. If null AND judge_claude_credentials is null, judge falls back to heuristic."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "judge_claude_credentials" {
+  description = <<-EOT
+    Claude OAuth bundle (contents of ~/.claude/.credentials.json) for the orchestrator judge.
+    This uses your Anthropic subscription via OAuth — the same auth path agent pods use.
+    Preferred over judge_anthropic_key. Creates nautiloop-judge-creds secret with data.claude.
+    If null AND judge_anthropic_key is null, judge falls back to heuristic.
+  EOT
   type        = string
   default     = null
   sensitive   = true

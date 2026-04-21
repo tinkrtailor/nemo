@@ -134,16 +134,28 @@ kubectl -n nautiloop-jobs create secret generic "nautiloop-creds-${SAFE_ENGINEER
     "${CREDS_ARGS[@]}" \
     --dry-run=client -o yaml | kubectl apply -f -
 
-# Judge credentials (optional — enables the orchestrator judge in the loop engine)
-NAUTILOOP_JUDGE_API_KEY="${NAUTILOOP_JUDGE_API_KEY:-}"
-if [ -n "$NAUTILOOP_JUDGE_API_KEY" ]; then
-    echo "    Creating judge credentials secret (NAUTILOOP_JUDGE_API_KEY set)..."
-    JUDGE_CREDS_JSON=$(jq -n --arg key "$NAUTILOOP_JUDGE_API_KEY" '{"api_key": $key}')
+# Judge credentials secret — cluster-scoped Claude OAuth bundle so the judge
+# calls Anthropic through the auth-sidecar the same way agent pods do.
+# Priority order:
+#   1. Local Claude Code OAuth bundle at ~/.claude/.credentials.json (preferred)
+#      Matches the "use my Anthropic subscription" story — no raw API keys.
+#   2. NAUTILOOP_ANTHROPIC_KEY env var (fallback for operators who prefer raw keys)
+#
+# Secret shape: data.claude = OAuth bundle JSON (matches nautiloop-creds-<engineer>).
+# The sidecar reads the same `claude` key for both engineer creds and judge creds.
+CLAUDE_CREDS_PATH="${NAUTILOOP_CLAUDE_CREDS_PATH:-${HOME}/.claude/.credentials.json}"
+if [ -f "$CLAUDE_CREDS_PATH" ]; then
+    echo "    Creating judge credentials secret from Claude OAuth bundle at ${CLAUDE_CREDS_PATH}..."
     kubectl -n nautiloop-system create secret generic nautiloop-judge-creds \
-        --from-literal="credentials.json=${JUDGE_CREDS_JSON}" \
+        --from-file="claude=${CLAUDE_CREDS_PATH}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+elif [ -n "$NAUTILOOP_ANTHROPIC_KEY" ]; then
+    echo "    Creating judge credentials secret from NAUTILOOP_ANTHROPIC_KEY (raw API key fallback)..."
+    kubectl -n nautiloop-system create secret generic nautiloop-judge-creds \
+        --from-literal="anthropic=${NAUTILOOP_ANTHROPIC_KEY}" \
         --dry-run=client -o yaml | kubectl apply -f -
 else
-    echo "    NAUTILOOP_JUDGE_API_KEY not set — orchestrator judge will use heuristic fallback."
+    echo "    No Claude creds found at ${CLAUDE_CREDS_PATH} and NAUTILOOP_ANTHROPIC_KEY not set — orchestrator judge will use heuristic fallback."
 fi
 
 # ── Wait for Postgres ─────────────────────────────────────────────────────────

@@ -25,6 +25,28 @@ spec:
           volumeMounts:
             - name: bare-repo
               mountPath: /bare-repo
+        - name: auth-sidecar
+          image: nautiloop-sidecar:dev
+          imagePullPolicy: Never
+          restartPolicy: Always
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: judge-creds
+              mountPath: /secrets/model-credentials
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 20Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          startupProbe:
+            tcpSocket:
+              port: 9090
+            periodSeconds: 2
+            failureThreshold: 30
       containers:
         - name: api-server
           image: nautiloop-control-plane:dev
@@ -116,6 +138,10 @@ spec:
         - name: git-ssh-known-hosts
           configMap:
             name: nautiloop-ssh-known-hosts
+        - name: judge-creds
+          secret:
+            secretName: nautiloop-judge-creds
+            optional: true
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -144,6 +170,28 @@ spec:
           volumeMounts:
             - name: bare-repo
               mountPath: /bare-repo
+        - name: auth-sidecar
+          image: nautiloop-sidecar:dev
+          imagePullPolicy: Never
+          restartPolicy: Always
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: judge-creds
+              mountPath: /secrets/model-credentials
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 20Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          startupProbe:
+            tcpSocket:
+              port: 9090
+            periodSeconds: 2
+            failureThreshold: 30
       containers:
         - name: loop-engine
           image: nautiloop-control-plane:dev
@@ -190,9 +238,6 @@ spec:
               readOnly: true
             - name: git-ssh-known-hosts
               mountPath: /etc/git-ssh-known-hosts
-              readOnly: true
-            - name: judge-creds
-              mountPath: /secrets/judge
               readOnly: true
           resources:
             requests:
