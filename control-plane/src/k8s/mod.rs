@@ -19,6 +19,11 @@ pub enum JobStatus {
     Failed { reason: String },
     /// Job failed with exit code 42 (auth/credential expiry convention).
     AuthExpired { reason: String },
+    /// Job was terminated by `activeDeadlineSeconds`. This is deterministic:
+    /// an identical retry will hit the same wall-clock budget. The loop
+    /// engine must NOT auto-retry; surface to the operator so they can
+    /// raise `--stage-timeout` and resume.
+    DeadlineExceeded { reason: String },
     /// Job not found.
     NotFound,
 }

@@ -61,6 +61,14 @@ enum Commands {
         /// Override reviewer model
         #[arg(long)]
         model_review: Option<String>,
+
+        /// Per-stage Job `activeDeadlineSeconds` override in seconds.
+        /// Applies uniformly to every stage (audit/revise/implement/test/review).
+        /// Floored to 300s server-side. Default: cluster config (audit/review: 900s,
+        /// implement/test: 1800s). Use when large specs need longer audits than
+        /// the cluster default, e.g. `--stage-timeout 2700` for 45-minute audits.
+        #[arg(long, value_name = "SECONDS")]
+        stage_timeout: Option<u32>,
     },
 
     /// Implement spec, create PR. Terminal: CONVERGED
@@ -105,6 +113,11 @@ enum Commands {
         /// Override reviewer model
         #[arg(long)]
         model_review: Option<String>,
+
+        /// Per-stage Job `activeDeadlineSeconds` override in seconds.
+        /// Applies uniformly to every stage. Floored to 300s server-side.
+        #[arg(long, value_name = "SECONDS")]
+        stage_timeout: Option<u32>,
     },
 
     /// Implement + auto-merge. Terminal: SHIPPED
@@ -135,6 +148,11 @@ enum Commands {
         /// Override reviewer model
         #[arg(long)]
         model_review: Option<String>,
+
+        /// Per-stage Job `activeDeadlineSeconds` override in seconds.
+        /// Applies uniformly to every stage. Floored to 300s server-side.
+        #[arg(long, value_name = "SECONDS")]
+        stage_timeout: Option<u32>,
     },
 
     /// Show your running loops
@@ -181,15 +199,18 @@ enum Commands {
     #[command(long_about = "Stream logs for a loop.\n\n\
         Streams real-time logs from a running loop via SSE, or fetches historical\n\
         logs from completed rounds. Filter by round and stage to narrow output.\n\
-        Use --tail for raw pod container stdout (live only).\n\n\
+        Use --tail for raw pod container stdout (live only). Use --follow with\n\
+        --tail to stream stdout until the pod exits — useful for audit/review\n\
+        stages that run `opencode --format json`, which buffers its NDJSON so a\n\
+        one-shot --tail may return an empty body.\n\n\
         Example:\n  \
           $ nemo logs 8cb88352-5cf4-4dda-9cd0-6a0d6851ba92\n  \
           [implement/r1] Setting up worktree...\n  \
           [implement/r1] Running agent...\n\n  \
           $ nemo logs 8cb88352-... --round 2 --stage review\n  \
           [review/r2] Reviewing implementation...\n\n  \
-          $ nemo logs 8cb88352-... --tail\n  \
-          # Raw pod stdout (live container output)\n\n\
+          $ nemo logs 8cb88352-... --tail --follow\n  \
+          # Streams stdout in real time (use for --format json audits)\n\n\
         See also: nemo status (find loop IDs), nemo ps (pod-level introspection).")]
     Logs {
         /// Loop ID
@@ -207,6 +228,13 @@ enum Commands {
         /// the Postgres log stream. Works mid-run without kubectl.
         #[arg(long)]
         tail: bool,
+
+        /// Stream pod stdout until the pod exits (requires --tail). Use this
+        /// for stages that buffer output (e.g. `opencode --format json`)
+        /// where a one-shot `--tail` returns an empty body because nothing
+        /// has been flushed to the kubelet yet.
+        #[arg(long)]
+        follow: bool,
 
         /// Max lines to return with --tail (default 500, max 10000)
         #[arg(long, default_value_t = 500)]
@@ -324,6 +352,13 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Raise the per-stage Job `activeDeadlineSeconds` before resuming.
+        /// Use this to recover from a `StageDeadlineExceeded` failure on a
+        /// stage whose wall-clock budget was too small — e.g. a large spec
+        /// whose audit exceeded the 900s default. Floored to 300s server-side.
+        #[arg(long, value_name = "SECONDS")]
+        stage_timeout: Option<u32>,
     },
 
     /// Extend a FAILED loop's max_rounds and resume it from the last stage
@@ -1064,6 +1099,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             spec_path,
             model_impl,
             model_review,
+            stage_timeout,
         } => {
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &nemo_config.models)?;
@@ -1079,6 +1115,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     ship_mode: false,
                     model_impl,
                     model_review,
+                    stage_timeout_secs: stage_timeout,
                 },
             )
             .await?;
@@ -1090,6 +1127,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             auto_approve,
             model_impl,
             model_review,
+            stage_timeout,
         } => {
             if let Some(warning) = commands::start::deprecation_warning(harden) {
                 eprintln!("{warning}");
@@ -1108,6 +1146,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     ship_mode: false,
                     model_impl,
                     model_review,
+                    stage_timeout_secs: stage_timeout,
                 },
             )
             .await?;
@@ -1117,6 +1156,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             harden,
             model_impl,
             model_review,
+            stage_timeout,
         } => {
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &nemo_config.models)?;
@@ -1132,6 +1172,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     ship_mode: true,
                     model_impl,
                     model_review,
+                    stage_timeout_secs: stage_timeout,
                 },
             )
             .await?;
@@ -1156,9 +1197,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             round,
             stage,
             tail,
+            follow,
             tail_lines,
             container,
         } => {
+            if follow && !tail {
+                anyhow::bail!(
+                    "--follow requires --tail (it streams pod stdout); drop --follow for SSE streaming via the historical log path"
+                );
+            }
             if tail {
                 if round.is_some() || stage.is_some() {
                     anyhow::bail!(
@@ -1166,7 +1213,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                          run without --tail for filtered historical logs"
                     );
                 }
-                match commands::logs::run_tail(&http_client, &loop_id, tail_lines, &container).await
+                match commands::logs::run_tail(
+                    &http_client,
+                    &loop_id,
+                    tail_lines,
+                    &container,
+                    follow,
+                )
+                .await
                 {
                     Ok(commands::logs::TailResult::Ok) => {}
                     Ok(commands::logs::TailResult::NoPod) => {
@@ -1205,8 +1259,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Inspect { path, json } => {
             commands::inspect::run(&http_client, &path, json).await?;
         }
-        Commands::Resume { loop_id, json } => {
-            commands::resume::run(&http_client, &loop_id, json).await?;
+        Commands::Resume {
+            loop_id,
+            json,
+            stage_timeout,
+        } => {
+            commands::resume::run(&http_client, &loop_id, json, stage_timeout).await?;
         }
         Commands::Extend { loop_id, add, json } => {
             commands::extend::run(&http_client, &loop_id, add, json).await?;

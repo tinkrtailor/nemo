@@ -19,6 +19,9 @@ pub struct StartArgs<'a> {
     pub ship_mode: bool,
     pub model_impl: Option<String>,
     pub model_review: Option<String>,
+    /// Optional per-stage Job `activeDeadlineSeconds` override. Uniform
+    /// across all stages. Server-side floored to 300s.
+    pub stage_timeout_secs: Option<u32>,
 }
 
 pub async fn run(client: &NemoClient, args: StartArgs<'_>) -> Result<()> {
@@ -161,6 +164,10 @@ fn build_start_body(args: &StartArgs<'_>, spec_content: &str) -> serde_json::Val
         });
     }
 
+    if let Some(secs) = args.stage_timeout_secs {
+        body["stage_timeout_secs"] = serde_json::json!(secs);
+    }
+
     body
 }
 
@@ -186,6 +193,7 @@ mod tests {
             ship_mode: false,
             model_impl: None,
             model_review: None,
+            stage_timeout_secs: None,
         };
         let body = build_start_body(&args, &content);
 
@@ -224,6 +232,7 @@ mod tests {
             ship_mode: false,
             model_impl: Some("claude-opus-4-6".to_string()),
             model_review: None,
+            stage_timeout_secs: None,
         };
         let body = build_start_body(&args, "# Spec");
         assert!(body["model_overrides"].is_object());
@@ -241,6 +250,7 @@ mod tests {
             ship_mode: false,
             model_impl: None,
             model_review: None,
+            stage_timeout_secs: None,
         };
         let body = build_start_body(&args, "# Spec");
         assert!(body.get("model_overrides").is_none());
@@ -289,6 +299,7 @@ mod tests {
             ship_mode: false,
             model_impl: None,
             model_review: None,
+            stage_timeout_secs: None,
         };
         let body = build_start_body(&args, "# Spec");
         assert_eq!(
@@ -309,6 +320,7 @@ mod tests {
             ship_mode: false,
             model_impl: None,
             model_review: None,
+            stage_timeout_secs: None,
         };
         let body = build_start_body(&args, "# Spec");
         assert_eq!(body["harden"], false, "--no-harden must send harden: false");
@@ -393,6 +405,7 @@ mod tests {
             ship_mode: false,
             model_impl: None,
             model_review: None,
+            stage_timeout_secs: None,
         };
         assert_eq!(
             phase_plan_label(&args),
@@ -412,6 +425,7 @@ mod tests {
             ship_mode: false,
             model_impl: None,
             model_review: None,
+            stage_timeout_secs: None,
         };
         assert_eq!(phase_plan_label(&args), "IMPLEMENT (harden skipped)");
     }
@@ -428,6 +442,7 @@ mod tests {
             ship_mode: false,
             model_impl: None,
             model_review: None,
+            stage_timeout_secs: None,
         };
         assert_eq!(phase_plan_label(&args), "HARDEN \u{2192} IMPLEMENT");
     }
@@ -444,6 +459,7 @@ mod tests {
             ship_mode: true,
             model_impl: None,
             model_review: None,
+            stage_timeout_secs: None,
         };
         assert_eq!(
             phase_plan_label(&args),
@@ -463,6 +479,7 @@ mod tests {
             ship_mode: false,
             model_impl: None,
             model_review: None,
+            stage_timeout_secs: None,
         };
         assert_eq!(phase_plan_label(&args), "HARDEN");
     }

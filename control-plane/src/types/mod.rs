@@ -290,6 +290,12 @@ pub struct LoopRecord {
     /// Resolved default branch name (e.g., "main"), frozen at loop creation.
     /// Used for PR --base and merge SHA resolution.
     pub resolved_default_branch: Option<String>,
+    /// Optional per-loop override for the `activeDeadlineSeconds`
+    /// budget on every stage's K8s Job (CLI `--stage-timeout=<secs>`).
+    /// When `None`, the cluster-default timeouts from config apply.
+    /// Persisted so `nemo resume --stage-timeout=<larger>` can raise
+    /// the budget without re-submitting the spec.
+    pub stage_timeout_secs: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

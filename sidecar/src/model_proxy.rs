@@ -62,10 +62,37 @@ const CHATGPT_CODEX_RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/
 const OPENAI_CRED_PATH: &str = "/secrets/model-credentials/openai";
 const ANTHROPIC_CRED_PATH: &str = "/secrets/model-credentials/anthropic";
 const OPENAI_OAUTH_REFRESH_MARGIN_MS: i64 = 60_000;
+/// Minimum wall-clock gap between OAuth refresh attempts after a
+/// failure. The upstream rejects re-use of an already-consumed
+/// `refresh_token` with `refresh_token_reused`; retrying immediately
+/// burns log volume and, worse, invalidates any refresh token another
+/// consumer (e.g. the engineer's local Codex CLI) may be holding. 60s
+/// is long enough to let the client back off and short enough that a
+/// genuinely recoverable error is not left unchecked for minutes.
+const OPENAI_OAUTH_REFRESH_COOLDOWN_MS: i64 = 60_000;
 const FORBIDDEN_BODY: &[u8] =
     br#"{"error":"only /openai/* and /anthropic/* routes are supported"}"#;
 
-type SharedOpenAiOauthCache = Arc<Mutex<Option<CodexOauthCredential>>>;
+/// Shared state for the OpenAI Codex OAuth refresh path.
+///
+/// Holds both the last successful credential (so freshly-refreshed
+/// tokens propagate across concurrent requests without re-reading the
+/// on-disk file) AND the last failed-refresh timestamp (so repeated
+/// failures inside the cooldown window short-circuit immediately
+/// instead of hammering the upstream with identical requests).
+#[derive(Default)]
+pub(crate) struct OauthCacheState {
+    credential: Option<CodexOauthCredential>,
+    last_failure: Option<OauthRefreshFailure>,
+}
+
+#[derive(Debug, Clone)]
+struct OauthRefreshFailure {
+    at_ms: i64,
+    message: String,
+}
+
+type SharedOpenAiOauthCache = Arc<Mutex<OauthCacheState>>;
 
 /// Errors produced by the server. These are surfaced to the caller in
 /// `main.rs`; per-request errors are turned into HTTP responses.
@@ -268,7 +295,8 @@ pub async fn serve(
     let connector = SsrfConnector::new(tls_config);
     let client: UpstreamClient = Client::builder(TokioExecutor::new()).build(connector);
     let client = Arc::new(client);
-    let openai_oauth_cache: SharedOpenAiOauthCache = Arc::new(Mutex::new(None));
+    let openai_oauth_cache: SharedOpenAiOauthCache =
+        Arc::new(Mutex::new(OauthCacheState::default()));
 
     let graceful = GracefulShutdown::new();
 
@@ -319,7 +347,7 @@ pub async fn serve(
 async fn handle(
     req: Request<Incoming>,
     client: &UpstreamClient,
-    openai_oauth_cache: &Mutex<Option<CodexOauthCredential>>,
+    openai_oauth_cache: &Mutex<OauthCacheState>,
 ) -> Response<BoxBody<Bytes, hyper::Error>> {
     handle_inner(req, client, openai_oauth_cache, None).await
 }
@@ -333,7 +361,7 @@ async fn handle(
 async fn handle_inner<C>(
     req: Request<Incoming>,
     client: &Client<C, UpstreamBody>,
-    openai_oauth_cache: &Mutex<Option<CodexOauthCredential>>,
+    openai_oauth_cache: &Mutex<OauthCacheState>,
     test_config: Option<&TestProxyConfigInner>,
 ) -> Response<BoxBody<Bytes, hyper::Error>>
 where
@@ -367,7 +395,16 @@ where
         match ensure_fresh_oauth_credential(client, credential, openai_oauth_cache).await {
             Ok(credential) => Some(credential),
             Err(e) => {
-                logging::error(&format!("failed to refresh OpenAI OAuth credentials: {e}"));
+                // `ensure_fresh_oauth_credential` already logs a single
+                // `warn` on the FIRST failure; subsequent failures within
+                // the cooldown window reach here and would otherwise
+                // produce one error line per request for up to 15 min
+                // (the audit stage deadline). Emit at `info` level
+                // instead to preserve per-request traceability without
+                // spamming operators.
+                logging::info(&format!(
+                    "openai oauth refresh unavailable (cooled down): {e}"
+                ));
                 return error_response(502, "openai oauth refresh failed");
             }
         }
@@ -619,7 +656,8 @@ pub async fn serve_for_test(
     let client: Client<HttpConnector, UpstreamBody> =
         Client::builder(TokioExecutor::new()).build(connector);
     let client = Arc::new(client);
-    let openai_oauth_cache: SharedOpenAiOauthCache = Arc::new(Mutex::new(None));
+    let openai_oauth_cache: SharedOpenAiOauthCache =
+        Arc::new(Mutex::new(OauthCacheState::default()));
 
     let graceful = GracefulShutdown::new();
 
@@ -753,13 +791,13 @@ fn oauth_needs_refresh(credential: &CodexOauthCredential) -> bool {
 
 async fn maybe_resolve_cached_oauth_credential(
     credential: OpenAiCredential,
-    openai_oauth_cache: &Mutex<Option<CodexOauthCredential>>,
+    openai_oauth_cache: &Mutex<OauthCacheState>,
 ) -> OpenAiCredential {
     let OpenAiCredential::CodexOauth(file_credential) = credential else {
         return credential;
     };
 
-    let cached = openai_oauth_cache.lock().await.clone();
+    let cached = openai_oauth_cache.lock().await.credential.clone();
     let effective = match cached {
         Some(cached_credential)
             if cached_credential.account_id == file_credential.account_id
@@ -776,7 +814,7 @@ async fn maybe_resolve_cached_oauth_credential(
 async fn ensure_fresh_oauth_credential<C>(
     client: &Client<C, UpstreamBody>,
     credential: OpenAiCredential,
-    openai_oauth_cache: &Mutex<Option<CodexOauthCredential>>,
+    openai_oauth_cache: &Mutex<OauthCacheState>,
 ) -> Result<OpenAiCredential, String>
 where
     C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + 'static,
@@ -789,9 +827,53 @@ where
         return Ok(OpenAiCredential::CodexOauth(oauth));
     }
 
-    let refreshed = refresh_codex_oauth_credential(client, &oauth).await?;
-    *openai_oauth_cache.lock().await = Some(refreshed.clone());
-    Ok(OpenAiCredential::CodexOauth(refreshed))
+    // Back off on repeated refresh failures. The upstream returns
+    // `refresh_token_reused` if the same refresh_token is consumed
+    // twice; without a cooldown, every request during the ~15 min
+    // audit window re-attempts the refresh every ~30s, spamming logs
+    // and invalidating tokens held by other consumers (e.g. the
+    // engineer's local Codex CLI). Short-circuit to the cached error
+    // while we wait.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    {
+        let guard = openai_oauth_cache.lock().await;
+        if let Some(ref failure) = guard.last_failure
+            && now_ms.saturating_sub(failure.at_ms) < OPENAI_OAUTH_REFRESH_COOLDOWN_MS
+        {
+            let remaining_ms = OPENAI_OAUTH_REFRESH_COOLDOWN_MS - (now_ms - failure.at_ms);
+            let remaining_secs = (remaining_ms / 1000).max(1);
+            return Err(format!(
+                "oauth refresh in cooldown ({remaining_secs}s remaining); last error: {}",
+                failure.message
+            ));
+        }
+    }
+
+    match refresh_codex_oauth_credential(client, &oauth).await {
+        Ok(refreshed) => {
+            let mut guard = openai_oauth_cache.lock().await;
+            guard.credential = Some(refreshed.clone());
+            // Clear the backoff window on success so the next legitimate
+            // failure gets a fresh timer rather than an already-aged one.
+            guard.last_failure = None;
+            Ok(OpenAiCredential::CodexOauth(refreshed))
+        }
+        Err(e) => {
+            let mut guard = openai_oauth_cache.lock().await;
+            let first_failure = guard.last_failure.is_none();
+            guard.last_failure = Some(OauthRefreshFailure {
+                at_ms: now_ms,
+                message: e.clone(),
+            });
+            if first_failure {
+                logging::warn(&format!(
+                    "OpenAI OAuth refresh failed; backing off for {}s before retrying: {e}",
+                    OPENAI_OAUTH_REFRESH_COOLDOWN_MS / 1000,
+                ));
+            }
+            Err(e)
+        }
+    }
 }
 
 async fn refresh_codex_oauth_credential<C>(
@@ -1037,6 +1119,73 @@ fn patch_responses_body(bytes: Bytes, is_codex_oauth: bool) -> Bytes {
 mod tests {
     use super::*;
     use http::HeaderMap;
+
+    #[tokio::test]
+    async fn oauth_cache_backoff_short_circuits_within_window() {
+        // v0.7.9 regression guard: when the upstream rejects the
+        // refresh token (e.g. `refresh_token_reused`), subsequent
+        // refresh attempts within the cooldown window must NOT
+        // re-hit the upstream. This used to cause one refresh per
+        // request for ~15 min per audit stage, burning log volume
+        // and invalidating tokens held by other consumers.
+        let cache: SharedOpenAiOauthCache = Arc::new(Mutex::new(OauthCacheState::default()));
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        // Seed a fresh failure.
+        cache.lock().await.last_failure = Some(OauthRefreshFailure {
+            at_ms: now_ms,
+            message: "refresh_token_reused".to_string(),
+        });
+
+        // Build a credential that would trigger refresh if not for the cooldown.
+        // (expires in the past → needs refresh).
+        let stale = CodexOauthCredential {
+            access: "stale-access".to_string(),
+            refresh: "stale-refresh".to_string(),
+            expires_ms: now_ms - 1,
+            account_id: Some("acct_1".to_string()),
+        };
+
+        // Use a real client but any resolver is fine — the cooldown
+        // path returns before any network call is made.
+        let connector = hyper_util::client::legacy::connect::HttpConnector::new();
+        let client: Client<_, UpstreamBody> =
+            Client::builder(TokioExecutor::new()).build(connector);
+        let result =
+            ensure_fresh_oauth_credential(&client, OpenAiCredential::CodexOauth(stale), &cache)
+                .await;
+        let err = result.expect_err("cooldown must short-circuit with Err");
+        assert!(
+            err.contains("cooldown"),
+            "error must mention cooldown so callers can distinguish from real refresh failures; got: {err}"
+        );
+        assert!(
+            err.contains("refresh_token_reused"),
+            "error must echo the original upstream message; got: {err}"
+        );
+
+        // Expire the backoff; now the function attempts a real refresh (which
+        // will fail against the no-op client, but that's fine — the test only
+        // proves that the short-circuit is scoped to the cooldown window).
+        cache.lock().await.last_failure = Some(OauthRefreshFailure {
+            at_ms: now_ms - OPENAI_OAUTH_REFRESH_COOLDOWN_MS - 1,
+            message: "stale".to_string(),
+        });
+        let stale = CodexOauthCredential {
+            access: "stale-access".to_string(),
+            refresh: "stale-refresh".to_string(),
+            expires_ms: now_ms - 1,
+            account_id: Some("acct_1".to_string()),
+        };
+        let result =
+            ensure_fresh_oauth_credential(&client, OpenAiCredential::CodexOauth(stale), &cache)
+                .await;
+        let err = result.expect_err("post-cooldown refresh hits upstream and fails");
+        assert!(
+            !err.contains("cooldown"),
+            "post-cooldown error must not be the cooldown short-circuit; got: {err}"
+        );
+    }
 
     // --- route_target ---
 

@@ -146,6 +146,10 @@ fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
         hardened_spec_path: row.get("hardened_spec_path"),
         spec_pr_url: row.get("spec_pr_url"),
         resolved_default_branch: row.try_get("resolved_default_branch").ok().flatten(),
+        stage_timeout_secs: row
+            .try_get::<Option<i32>, _>("stage_timeout_secs")
+            .ok()
+            .flatten(),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -321,6 +325,7 @@ impl StateStore for PgStateStore {
                 opencode_session_id, claude_session_id, active_job_name, retry_count, model_implementor,
                 model_reviewer, merge_sha, merged_at, hardened_spec_path, spec_pr_url,
                 resolved_default_branch,
+                stage_timeout_secs,
                 created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6::loop_kind,
@@ -330,7 +335,8 @@ impl StateStore for PgStateStore {
                 $22, $23, $24, $25, $26,
                 $27, $28, $29, $30, $31,
                 $32,
-                $33, $34
+                $33,
+                $34, $35
             )
             RETURNING *
             "#,
@@ -367,6 +373,7 @@ impl StateStore for PgStateStore {
         .bind(&record.hardened_spec_path)
         .bind(&record.spec_pr_url)
         .bind(&record.resolved_default_branch)
+        .bind(record.stage_timeout_secs)
         .bind(record.created_at)
         .bind(record.updated_at)
         .fetch_one(&self.pool)
@@ -607,6 +614,7 @@ impl StateStore for PgStateStore {
                 hardened_spec_path = $17, spec_pr_url = $18,
                 failed_from_state = $19::loop_state,
                 max_rounds = $20,
+                stage_timeout_secs = $21,
                 updated_at = NOW()
             WHERE id = $1
             "#,
@@ -631,6 +639,7 @@ impl StateStore for PgStateStore {
         .bind(&record.spec_pr_url)
         .bind(record.failed_from_state.map(loop_state_str))
         .bind(record.max_rounds)
+        .bind(record.stage_timeout_secs)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1100,6 +1109,7 @@ mod tests {
             hardened_spec_path: None,
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
+            stage_timeout_secs: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

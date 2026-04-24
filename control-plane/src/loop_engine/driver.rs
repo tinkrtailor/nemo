@@ -242,6 +242,14 @@ impl ConvergentLoopDriver {
                         // Job failed: check retry logic
                         self.handle_job_failed(record, &reason).await
                     }
+                    JobStatus::DeadlineExceeded { reason } => {
+                        // Stage hit activeDeadlineSeconds. Auto-retry would
+                        // repeat identical work and hit the same wall, so
+                        // transition directly to FAILED. Stay resumable
+                        // (#96 failed_from_state) so an operator can
+                        // `nemo resume --stage-timeout=<larger>`.
+                        self.handle_stage_deadline_exceeded(record, &reason).await
+                    }
                     JobStatus::AuthExpired { reason } => {
                         // Auth expired (exit code 42): go directly to AWAITING_REAUTH
                         self.handle_auth_expired(record, &reason).await
@@ -771,7 +779,7 @@ impl ConvergentLoopDriver {
         record.sub_state = Some(SubState::Dispatched);
         record.retry_count = 0; // Reset per-stage retry budget
 
-        let stage_config = self.test_stage_config();
+        let stage_config = self.test_stage_config(record);
         let mut ctx = self.build_context(record).await?;
         self.inject_test_services(record, &mut ctx).await;
 
@@ -1695,6 +1703,63 @@ impl ConvergentLoopDriver {
         self.handle_job_failed_inner(record, reason, true).await
     }
 
+    /// Handle `activeDeadlineSeconds` expiry on a stage Job. Unlike
+    /// a generic pod failure, this is deterministic: a retry hits the
+    /// same wall-clock budget and produces the same outcome. We
+    /// transition directly to FAILED (resumable via #96 so the
+    /// operator can raise `--stage-timeout` and resume without
+    /// re-submitting the spec) and delete the stale Job so the
+    /// resume path can reuse the `-t{N}` slot.
+    async fn handle_stage_deadline_exceeded(
+        &self,
+        record: &LoopRecord,
+        reason: &str,
+    ) -> Result<LoopState> {
+        self.sync_current_stage_logs(record).await;
+
+        if let Some(ref job_name) = record.active_job_name
+            && let Err(e) = self
+                .dispatcher
+                .delete_job(job_name, &self.config.cluster.jobs_namespace)
+                .await
+        {
+            tracing::warn!(
+                loop_id = %record.id,
+                job = job_name,
+                error = %e,
+                "Failed to delete deadline-exceeded job during transition to FAILED"
+            );
+        }
+
+        let budget_secs = self
+            .stage_timeout_for(record)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let operator_reason = if budget_secs > 0 {
+            format!(
+                "StageDeadlineExceeded: {reason} (budget was {budget_secs}s; raise --stage-timeout and resume)"
+            )
+        } else {
+            format!("StageDeadlineExceeded: {reason} (raise --stage-timeout and resume)")
+        };
+
+        let mut updated = record.clone();
+        updated.failed_from_state = Some(updated.state);
+        updated.state = LoopState::Failed;
+        updated.sub_state = None;
+        updated.failure_reason = Some(operator_reason.clone());
+        updated.active_job_name = None;
+        self.store.update_loop(&updated).await?;
+
+        tracing::error!(
+            loop_id = %record.id,
+            stage = ?record.state,
+            reason = %operator_reason,
+            "Stage hit activeDeadlineSeconds; transitioning to FAILED without retry"
+        );
+        Ok(LoopState::Failed)
+    }
+
     /// Like `handle_job_failed` but does NOT mark the exhausted Failed state
     /// as resumable via #96. Use this for failures where ingest_job_output
     /// has already stamped completed_at on the current round (e.g. a job
@@ -2066,7 +2131,7 @@ impl ConvergentLoopDriver {
                 }
             }
             LoopState::Implementing => (self.implement_stage_config(record), "implement"),
-            LoopState::Testing => (self.test_stage_config(), "test"),
+            LoopState::Testing => (self.test_stage_config(record), "test"),
             LoopState::Reviewing => (self.review_stage_config(record), "review"),
             _ => return Ok(record.state),
         };
@@ -2127,7 +2192,7 @@ impl ConvergentLoopDriver {
                     .unwrap_or_else(|| self.config.models.reviewer.clone()),
             ),
             prompt_template: Some(".nautiloop/prompts/spec-audit.md".to_string()),
-            timeout: self.config.timeouts.audit_duration(),
+            timeout: resolve_stage_timeout(record, self.config.timeouts.audit_duration()),
             max_retries: 2,
         }
     }
@@ -2142,7 +2207,7 @@ impl ConvergentLoopDriver {
                     .unwrap_or_else(|| self.config.models.implementor.clone()),
             ),
             prompt_template: Some(".nautiloop/prompts/spec-revise.md".to_string()),
-            timeout: self.config.timeouts.revise_duration(),
+            timeout: resolve_stage_timeout(record, self.config.timeouts.revise_duration()),
             max_retries: 2,
         }
     }
@@ -2157,17 +2222,17 @@ impl ConvergentLoopDriver {
                     .unwrap_or_else(|| self.config.models.implementor.clone()),
             ),
             prompt_template: Some(".nautiloop/prompts/implement.md".to_string()),
-            timeout: self.config.timeouts.implement_duration(),
+            timeout: resolve_stage_timeout(record, self.config.timeouts.implement_duration()),
             max_retries: 2,
         }
     }
 
-    fn test_stage_config(&self) -> StageConfig {
+    fn test_stage_config(&self, record: &LoopRecord) -> StageConfig {
         StageConfig {
             name: "test".to_string(),
             model: None,
             prompt_template: None,
-            timeout: self.config.timeouts.test_duration(),
+            timeout: resolve_stage_timeout(record, self.config.timeouts.test_duration()),
             max_retries: 2,
         }
     }
@@ -2182,7 +2247,7 @@ impl ConvergentLoopDriver {
                     .unwrap_or_else(|| self.config.models.reviewer.clone()),
             ),
             prompt_template: Some(".nautiloop/prompts/review.md".to_string()),
-            timeout: self.config.timeouts.review_duration(),
+            timeout: resolve_stage_timeout(record, self.config.timeouts.review_duration()),
             max_retries: 2,
         }
     }
@@ -2193,6 +2258,27 @@ impl ConvergentLoopDriver {
             .resolved_default_branch
             .clone()
             .unwrap_or_else(|| self.config.cluster.default_branch.clone())
+    }
+
+    /// Resolve the effective stage timeout for the loop's current state.
+    /// Returns `None` for non-active stages (Pending, Failed, etc.). The
+    /// per-loop `stage_timeout_secs` override, when set, supersedes the
+    /// cluster default; otherwise falls back to the matching
+    /// `Timeouts::*_duration()` value from config.
+    fn stage_timeout_for(&self, record: &LoopRecord) -> Option<std::time::Duration> {
+        let default = match record.state {
+            LoopState::Hardening => {
+                // Hardening can be audit or revise; pick based on the
+                // most recent round's stage (same logic as job name
+                // derivation in delete_stale_failed_attempts).
+                self.config.timeouts.audit_duration()
+            }
+            LoopState::Implementing => self.config.timeouts.implement_duration(),
+            LoopState::Testing => self.config.timeouts.test_duration(),
+            LoopState::Reviewing => self.config.timeouts.review_duration(),
+            _ => return None,
+        };
+        Some(resolve_stage_timeout(record, default))
     }
 
     fn max_retries_for_stage(&self, _state: LoopState) -> u32 {
@@ -2513,6 +2599,19 @@ impl ConvergentLoopDriver {
     }
 }
 
+/// Resolve the effective per-stage timeout for a loop record. If the
+/// record carries an explicit override (from `--stage-timeout` at
+/// submit or resume time), that wins; otherwise the stage's
+/// cluster-default duration is returned. Enforces a 300s floor to
+/// avoid nonsense values from CLI typos.
+fn resolve_stage_timeout(record: &LoopRecord, default: std::time::Duration) -> std::time::Duration {
+    const FLOOR_SECS: u64 = 300;
+    match record.stage_timeout_secs {
+        Some(secs) if secs > 0 => std::time::Duration::from_secs((secs as u64).max(FLOOR_SECS)),
+        _ => default,
+    }
+}
+
 /// Detect if a job failure reason indicates expired credentials.
 /// Agents use exit code 42 or specific error messages when auth fails.
 fn is_auth_error(reason: &str) -> bool {
@@ -2601,6 +2700,7 @@ mod tests {
             hardened_spec_path: None,
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
+            stage_timeout_secs: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -2915,6 +3015,71 @@ mod tests {
 
         let new_state = driver.tick(record.id).await.unwrap();
         assert_eq!(new_state, LoopState::Implementing);
+    }
+
+    #[tokio::test]
+    async fn test_stage_deadline_exceeded_does_not_retry() {
+        // v0.7.9 regression guard: a stage Job terminated by
+        // `activeDeadlineSeconds` must NOT be auto-retried. The budget
+        // is deterministic — a retry would hit the same wall and
+        // produce the same outcome (wasting 15+ minutes per attempt
+        // and burning LLM tokens). Instead we transition directly to
+        // FAILED with `failed_from_state` preserved so the operator
+        // can raise `--stage-timeout` and resume.
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let driver = make_driver(store.clone(), dispatcher.clone());
+        install_fresh_claude_creds(&dispatcher).await;
+
+        let mut record = make_pending_loop(true);
+        record.state = LoopState::Hardening;
+        record.sub_state = Some(SubState::Dispatched);
+        record.round = 1;
+        record.retry_count = 0;
+        record.active_job_name = Some("audit-job".to_string());
+        store.create_loop(&record).await.unwrap();
+
+        let job = k8s_openapi::api::batch::v1::Job {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("audit-job".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        dispatcher.create_job(&job).await.unwrap();
+        dispatcher
+            .set_job_status(
+                "audit-job",
+                JobStatus::DeadlineExceeded {
+                    reason: "DeadlineExceeded: Job was active longer than specified deadline"
+                        .to_string(),
+                },
+            )
+            .await;
+
+        let new_state = driver.tick(record.id).await.unwrap();
+        assert_eq!(
+            new_state,
+            LoopState::Failed,
+            "deadline-exceeded must transition straight to FAILED"
+        );
+
+        let updated = store.get_loop(record.id).await.unwrap().unwrap();
+        assert_eq!(updated.retry_count, 0, "deadline must NOT bump retry_count");
+        assert_eq!(
+            updated.failed_from_state,
+            Some(LoopState::Hardening),
+            "failed_from_state must be preserved so `nemo resume --stage-timeout` can restart"
+        );
+        let reason = updated.failure_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("StageDeadlineExceeded"),
+            "failure_reason must surface the deadline distinctly from generic pod failures; got: {reason}"
+        );
+        assert!(
+            reason.contains("stage-timeout"),
+            "failure_reason must tell the operator how to recover; got: {reason}"
+        );
     }
 
     #[tokio::test]

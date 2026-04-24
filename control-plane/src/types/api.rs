@@ -23,6 +23,12 @@ pub struct StartRequest {
     pub ship_mode: bool,
     #[serde(default)]
     pub model_overrides: Option<ModelOverrides>,
+    /// Optional per-loop override for the per-stage K8s Job
+    /// `activeDeadlineSeconds` budget. CLI `--stage-timeout=<secs>`.
+    /// Applies uniformly to every stage (audit/revise/implement/test/review).
+    /// Floored to 300s server-side to avoid nonsense values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_timeout_secs: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,12 +129,28 @@ pub struct ApproveResponse {
     pub approve_requested: bool,
 }
 
+/// POST /resume/:id request body. Optional — an empty body is valid
+/// and preserves prior behaviour. Present mostly so operators can raise
+/// the per-stage timeout before resuming a loop that hit
+/// `StageDeadlineExceeded`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResumeRequest {
+    /// Optional per-loop override for per-stage Job `activeDeadlineSeconds`.
+    /// Applies from the next redispatch onward. Floored to 300s server-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_timeout_secs: Option<u32>,
+}
+
 /// POST /resume/:id response body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResumeResponse {
     pub loop_id: Uuid,
     pub state: LoopState,
     pub resume_requested: bool,
+    /// Echo of the per-loop stage timeout after any update made by the
+    /// resume call. Useful so the CLI can confirm the override took.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_timeout_secs: Option<u32>,
 }
 
 /// POST /extend/:id request body.
