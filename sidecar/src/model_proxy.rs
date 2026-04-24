@@ -84,7 +84,28 @@ const FORBIDDEN_BODY: &[u8] =
 pub(crate) struct OauthCacheState {
     credential: Option<CodexOauthCredential>,
     last_failure: Option<OauthRefreshFailure>,
+    /// Consecutive refresh failures since the last success. Once
+    /// this passes `AUTH_DEGRADED_THRESHOLD`, the sidecar writes the
+    /// `/tmp/shared/auth-degraded` flag so the agent entrypoint can
+    /// abort the stage with exit 42 (auth-expired) instead of
+    /// burning the full deadline on opencode's exponential retry of
+    /// 502s. Reset to 0 on every successful refresh.
+    consecutive_failures: u32,
 }
+
+/// Number of consecutive refresh failures before we declare auth
+/// "degraded" and signal the agent to bail. With the 60s cooldown
+/// from earlier, this gives the upstream ~5 minutes to recover from
+/// transient outages before we give up — long enough to absorb a
+/// brief network blip, short enough that an actually-stale refresh
+/// token doesn't burn the rest of the stage budget.
+const AUTH_DEGRADED_THRESHOLD: u32 = 5;
+
+/// Path to the flag file the sidecar writes on persistent auth
+/// degradation. Lives on the `/tmp/shared` emptyDir mount that's
+/// already shared between sidecar and agent containers (used today
+/// for the sidecar's startup-probe handshake).
+const AUTH_DEGRADED_FLAG_PATH: &str = "/tmp/shared/auth-degraded";
 
 #[derive(Debug, Clone)]
 struct OauthRefreshFailure {
@@ -856,20 +877,48 @@ where
             // Clear the backoff window on success so the next legitimate
             // failure gets a fresh timer rather than an already-aged one.
             guard.last_failure = None;
+            guard.consecutive_failures = 0;
+            // Best-effort: a successful refresh implies any prior
+            // "auth-degraded" state cleared. Removing the flag lets
+            // the agent's watcher reset if it was about to abort.
+            let _ = std::fs::remove_file(AUTH_DEGRADED_FLAG_PATH);
             Ok(OpenAiCredential::CodexOauth(refreshed))
         }
         Err(e) => {
-            let mut guard = openai_oauth_cache.lock().await;
-            let first_failure = guard.last_failure.is_none();
-            guard.last_failure = Some(OauthRefreshFailure {
-                at_ms: now_ms,
-                message: e.clone(),
-            });
+            let (first_failure, failures_now) = {
+                let mut guard = openai_oauth_cache.lock().await;
+                let first = guard.last_failure.is_none();
+                guard.last_failure = Some(OauthRefreshFailure {
+                    at_ms: now_ms,
+                    message: e.clone(),
+                });
+                guard.consecutive_failures = guard.consecutive_failures.saturating_add(1);
+                (first, guard.consecutive_failures)
+            };
             if first_failure {
                 logging::warn(&format!(
                     "OpenAI OAuth refresh failed; backing off for {}s before retrying: {e}",
                     OPENAI_OAUTH_REFRESH_COOLDOWN_MS / 1000,
                 ));
+            }
+            // After N consecutive failures across the cooldown window,
+            // the refresh token is almost certainly dead and waiting
+            // longer just burns the stage budget. Drop a flag the
+            // agent entrypoint polls; on detection it kills the CLI
+            // and exits with the auth-expired exit code, which the
+            // control plane maps to AWAITING_REAUTH instead of a
+            // generic stage failure.
+            if failures_now == AUTH_DEGRADED_THRESHOLD {
+                logging::warn(&format!(
+                    "OpenAI OAuth refresh failed {failures_now} times in a row; \
+                     signalling auth-degraded so the agent can abort the stage early",
+                ));
+                let payload = format!("openai_oauth: {e}\n");
+                if let Err(write_err) = std::fs::write(AUTH_DEGRADED_FLAG_PATH, payload) {
+                    logging::warn(&format!(
+                        "failed to write auth-degraded flag at {AUTH_DEGRADED_FLAG_PATH}: {write_err}"
+                    ));
+                }
             }
             Err(e)
         }

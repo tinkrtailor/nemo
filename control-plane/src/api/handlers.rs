@@ -268,6 +268,7 @@ pub async fn start(
             .as_ref()
             .filter(|m| !m.is_empty())
             .and_then(|m| serde_json::to_value(m).ok()),
+        last_activity_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -412,6 +413,7 @@ pub async fn status(
             model_reviewer: loop_record.model_reviewer.clone(),
             created_at: loop_record.created_at,
             updated_at: loop_record.updated_at,
+            last_activity_at: loop_record.last_activity_at,
         });
     }
 
@@ -1614,6 +1616,7 @@ mod tests {
             audit_timeout_secs: None,
             revise_timeout_secs: None,
             cache_env_overrides: None,
+            last_activity_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1683,6 +1686,7 @@ mod tests {
             audit_timeout_secs: None,
             revise_timeout_secs: None,
             cache_env_overrides: None,
+            last_activity_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1746,6 +1750,7 @@ mod tests {
             audit_timeout_secs: None,
             revise_timeout_secs: None,
             cache_env_overrides: None,
+            last_activity_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -2617,6 +2622,7 @@ mod tests {
             audit_timeout_secs: None,
             revise_timeout_secs: None,
             cache_env_overrides: None,
+            last_activity_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

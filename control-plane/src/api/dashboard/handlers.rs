@@ -1800,6 +1800,7 @@ mod tests {
             audit_timeout_secs: None,
             revise_timeout_secs: None,
             cache_env_overrides: None,
+            last_activity_at: None,
             created_at: now,
             updated_at: now,
         }

@@ -314,6 +314,13 @@ pub struct LoopRecord {
     /// on collisions. `None` means no override (use cluster default
     /// verbatim). Shape: `{"BUN_INSTALL_CACHE_DIR": "/cache/bun", ...}`.
     pub cache_env_overrides: Option<serde_json::Value>,
+    /// Wall-clock heartbeat: the most recent moment the reconciler
+    /// observed any signal of forward progress on this loop's pod
+    /// (new log bytes, K8s status transition, fresh dispatch). `None`
+    /// when the loop has never had an active pod. Surfaced in
+    /// `nemo status` so operators can distinguish "still working"
+    /// from "wedged on dead credentials" without kubectl-exec.
+    pub last_activity_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

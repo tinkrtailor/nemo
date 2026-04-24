@@ -83,6 +83,14 @@ pub trait StateStore: Send + Sync + 'static {
     /// Set current_sha on a loop (narrow update, no full record overwrite).
     async fn set_current_sha(&self, id: Uuid, sha: &str) -> Result<()>;
 
+    /// Bump `last_activity_at` to NOW() for the given loop. Narrow
+    /// update so the heartbeat path stays cheap and doesn't race with
+    /// `update_loop` overwrites that the reconciler may be doing in
+    /// parallel for the same record. Best-effort: errors are
+    /// downgraded to debug logs by callers — a failed heartbeat
+    /// write should never tank a tick.
+    async fn touch_last_activity(&self, id: Uuid) -> Result<()>;
+
     /// Check if there is an active loop for the given branch.
     async fn has_active_loop_for_branch(&self, branch: &str) -> Result<bool>;
 
@@ -449,6 +457,14 @@ pub mod memory {
             if let Some(record) = loops.get_mut(&id) {
                 record.current_sha = Some(sha.to_string());
                 record.updated_at = chrono::Utc::now();
+            }
+            Ok(())
+        }
+
+        async fn touch_last_activity(&self, id: Uuid) -> Result<()> {
+            let mut loops = self.loops.write().await;
+            if let Some(record) = loops.get_mut(&id) {
+                record.last_activity_at = Some(chrono::Utc::now());
             }
             Ok(())
         }

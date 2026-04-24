@@ -87,6 +87,7 @@ mod tests {
             model_reviewer: None,
             created_at: "2026-04-10T10:00:00Z".to_string(),
             updated_at: "2026-04-10T10:00:00Z".to_string(),
+            last_activity_at: None,
         }
     }
 
