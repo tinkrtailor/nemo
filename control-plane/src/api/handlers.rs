@@ -388,10 +388,24 @@ pub async fn status(
         )
         .await?;
 
+    // Batch-fetch rounds for every loop in one query so the token
+    // aggregation doesn't N+1-query the DB. Empty when there are no
+    // active loops.
+    let loop_ids: Vec<uuid::Uuid> = loops.iter().map(|l| l.id).collect();
+    let rounds_by_loop = if loop_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        state.store.get_rounds_for_loops(&loop_ids).await?
+    };
+
     let mut summaries = Vec::with_capacity(loops.len());
     for loop_record in loops {
         let current_stage = current_stage_for_loop(&state, &loop_record).await?;
         let active_job_name = loop_record.active_job_name.clone();
+        let (tokens_input, tokens_output) = rounds_by_loop
+            .get(&loop_record.id)
+            .map(|rounds| sum_round_tokens(rounds))
+            .unwrap_or((0, 0));
         summaries.push(LoopSummary {
             loop_id: loop_record.id,
             engineer: loop_record.engineer.clone(),
@@ -414,10 +428,35 @@ pub async fn status(
             created_at: loop_record.created_at,
             updated_at: loop_record.updated_at,
             last_activity_at: loop_record.last_activity_at,
+            tokens_input,
+            tokens_output,
         });
     }
 
     Ok(Json(StatusResponse { loops: summaries }))
+}
+
+/// Sum input/output tokens across every round whose `output` JSON
+/// carries a `token_usage` block. Rounds without one contribute 0
+/// (still in-flight, or non-LLM stages like `test`). Tolerant of
+/// missing or wrong-typed fields — best-effort surfacing.
+fn sum_round_tokens(rounds: &[crate::types::RoundRecord]) -> (u64, u64) {
+    let mut input: u64 = 0;
+    let mut output: u64 = 0;
+    for r in rounds {
+        let Some(out) = r.output.as_ref() else {
+            continue;
+        };
+        let usage = out.get("token_usage").or_else(|| {
+            // Some envelopes nest the verdict under `data`.
+            out.get("data").and_then(|d| d.get("token_usage"))
+        });
+        if let Some(u) = usage {
+            input = input.saturating_add(u.get("input").and_then(|v| v.as_u64()).unwrap_or(0));
+            output = output.saturating_add(u.get("output").and_then(|v| v.as_u64()).unwrap_or(0));
+        }
+    }
+    (input, output)
 }
 
 fn current_stage_source_state(record: &LoopRecord) -> Option<LoopState> {

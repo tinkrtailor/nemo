@@ -60,7 +60,49 @@ MAIN_PID=$$
     done
 ) &
 AUTH_WATCHDOG_PID=$!
-trap 'kill "$AUTH_WATCHDOG_PID" 2>/dev/null || true' EXIT
+
+# --- Opencode event-stream tailer ---
+#
+# `opencode run --format json` doesn't stream anything human-useful
+# to stdout — operators watching `nemo logs --tail` see nothing for
+# the full stage budget. opencode DOES write a structured log file
+# to ~/.local/share/opencode/log/*.log with INFO/WARN/ERROR per
+# tool call and per LLM round-trip, so we tail that file in the
+# background and forward filtered lines to pod stdout. They land
+# in the K8s pod logs, the reconciler's sync_current_stage_logs
+# ingests them on every tick, and `nemo logs --tail --follow`
+# shows them live.
+#
+# Best-effort: if opencode never runs (e.g. on a claude-only
+# stage), the tailer waits for a file that never appears and exits
+# cleanly when the trap fires.
+OPENCODE_LOG_DIR="${HOME:-/home/agent}/.local/share/opencode/log"
+mkdir -p "$OPENCODE_LOG_DIR"
+(
+    # Wait up to 10 minutes for opencode to create its log file. If it
+    # never does (claude-only stages), exit clean.
+    waited=0
+    while [ -z "$(ls -A "$OPENCODE_LOG_DIR" 2>/dev/null)" ]; do
+        sleep 2
+        waited=$((waited + 2))
+        if [ "$waited" -ge 600 ]; then
+            exit 0
+        fi
+    done
+    # tail -F follows rotations; --line-buffered grep prevents
+    # multi-second buffering of bursty events.
+    tail -F "$OPENCODE_LOG_DIR"/*.log 2>/dev/null \
+        | grep --line-buffered -E 'INFO|WARN|ERROR|tool|llm|model' \
+        | while IFS= read -r line; do
+            # Prefix with stage/round so multiple rounds in one pod
+            # remain disambiguable. Keep terse — these go straight
+            # into the logs table and bloat the pod log volume.
+            printf 'NEMO_EVENT: [%s/r%s] %s\n' "${STAGE:-?}" "${ROUND:-?}" "$line"
+        done
+) &
+OPENCODE_TAILER_PID=$!
+
+trap 'kill "$AUTH_WATCHDOG_PID" "$OPENCODE_TAILER_PID" 2>/dev/null || true' EXIT
 # Map SIGTERM (from the watchdog above) to the agent-expired exit code
 # so the K8s Job carries the right signal up to the control plane.
 trap 'exit 42' TERM

@@ -81,6 +81,14 @@ pub struct LoopSummary {
     /// without exec'ing into the cluster.
     #[serde(default)]
     pub last_activity_at: Option<String>,
+    /// Cumulative input tokens across all completed rounds. Defaults
+    /// to 0 when the server is older than v0.7.15 or the loop has
+    /// no rounds yet.
+    #[serde(default)]
+    pub tokens_input: u64,
+    /// Cumulative output tokens. Same source as `tokens_input`.
+    #[serde(default)]
+    pub tokens_output: u64,
 }
 
 /// GET /pod-introspect/:loop_id response.

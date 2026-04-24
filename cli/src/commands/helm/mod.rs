@@ -2637,6 +2637,8 @@ mod tests {
             created_at: updated_at.to_string(),
             updated_at: updated_at.to_string(),
             last_activity_at: None,
+            tokens_input: 0,
+            tokens_output: 0,
         }
     }
 

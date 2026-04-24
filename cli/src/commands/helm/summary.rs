@@ -178,6 +178,8 @@ mod tests {
             created_at: "2026-04-10T10:00:00Z".to_string(),
             updated_at: "2026-04-10T10:00:00Z".to_string(),
             last_activity_at: None,
+            tokens_input: 0,
+            tokens_output: 0,
         }
     }
 

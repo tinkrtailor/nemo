@@ -120,6 +120,19 @@ pub struct LoopSummary {
     /// wedged loops without exec'ing into the cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<DateTime<Utc>>,
+    /// Cumulative input tokens across every completed round on this
+    /// loop. Aggregated from each round's `output.token_usage.input`
+    /// JSON; rounds without a parsable token_usage block contribute 0.
+    /// Defaulted to 0 so a loop in PENDING with no rounds yet still
+    /// renders cleanly in `nemo status`. Operators paying per-token
+    /// can read these without standing up dashboard queries or
+    /// running ad-hoc psql.
+    #[serde(default)]
+    pub tokens_input: u64,
+    /// Cumulative output tokens. Same aggregation source as
+    /// `tokens_input`.
+    #[serde(default)]
+    pub tokens_output: u64,
 }
 
 /// GET /status query parameters.
