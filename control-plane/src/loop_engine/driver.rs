@@ -461,39 +461,39 @@ impl ConvergentLoopDriver {
     }
 
     fn persist_session_id_for_stage(record: &mut LoopRecord, stage: &str, session_id: &str) {
-        match stage {
-            "audit" | "review" => {
-                if session_id.starts_with("ses_") {
-                    record.opencode_session_id = Some(session_id.to_string());
-                } else {
-                    tracing::warn!(
-                        loop_id = %record.id,
-                        stage,
-                        session_id,
-                        "Stage emitted non-opencode session ID; not persisting"
-                    );
-                }
-            }
-            "implement" | "revise" => {
-                if uuid::Uuid::try_parse(session_id).is_ok() {
-                    record.claude_session_id = Some(session_id.to_string());
-                } else {
-                    tracing::warn!(
-                        loop_id = %record.id,
-                        stage,
-                        session_id,
-                        "Stage emitted non-claude session ID; not persisting"
-                    );
-                }
-            }
-            _ => {
-                tracing::warn!(
-                    loop_id = %record.id,
-                    stage,
-                    session_id,
-                    "Non-resumable stage emitted a session ID; ignoring"
-                );
-            }
+        // Route to the typed column by session-ID FORMAT, not stage name.
+        // Earlier versions assumed audit/review always ran through opencode
+        // (`ses_*`) and implement/revise always through claude (UUID). That
+        // held while the default model pairings were pinned, but operators
+        // can now flip `--model-review claude-*` or `--model-impl openai/*`
+        // via nemo.toml; the old gate then silently discarded every
+        // successful transcript because the format didn't match the
+        // stage's assumed provider. The verdict JSON is reaped with the
+        // pod, so an operator only learns it happened by tailing logs.
+        let format_is_opencode = session_id.starts_with("ses_");
+        let format_is_claude = uuid::Uuid::try_parse(session_id).is_ok();
+
+        if !matches!(stage, "audit" | "review" | "implement" | "revise") {
+            tracing::warn!(
+                loop_id = %record.id,
+                stage,
+                session_id,
+                "Non-resumable stage emitted a session ID; ignoring"
+            );
+            return;
+        }
+
+        if format_is_opencode {
+            record.opencode_session_id = Some(session_id.to_string());
+        } else if format_is_claude {
+            record.claude_session_id = Some(session_id.to_string());
+        } else {
+            tracing::warn!(
+                loop_id = %record.id,
+                stage,
+                session_id,
+                "Stage emitted session ID in an unrecognised format (not `ses_*` or UUID); not persisting"
+            );
         }
     }
 
@@ -3856,7 +3856,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_output_ingestion_rejects_wrong_tool_session_shape() {
+    async fn test_output_ingestion_routes_session_id_by_format_not_stage() {
+        // v0.7.13 regression guard: session IDs route to the
+        // matching typed column by FORMAT, not by stage name. Earlier
+        // versions hardcoded audit/review → opencode and
+        // implement/revise → claude, so running audit with
+        // `--model-review claude-*` silently dropped every successful
+        // verdict because the emitted UUID didn't match the stage's
+        // assumed provider. Fixing that to route by format solves the
+        // bug without moving the provider choice into the backend.
         let store = Arc::new(MemoryStateStore::new());
         let dispatcher = Arc::new(MockJobDispatcher::new());
         let git = Arc::new(MockGitOperations::new());
@@ -3903,8 +3911,58 @@ mod tests {
         let mut updated = store.get_loop(record.id).await.unwrap().unwrap();
         driver.ingest_job_output(&mut updated).await.unwrap();
 
+        // UUID on review stage → Claude column (reviewer model was Claude).
         assert_eq!(updated.opencode_session_id, None);
-        assert_eq!(updated.claude_session_id, None);
+        assert_eq!(
+            updated.claude_session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000"),
+            "UUID-format session IDs must land on the claude column regardless of stage"
+        );
+    }
+
+    #[test]
+    fn persist_session_id_routes_opencode_prefix_and_uuid_by_format() {
+        // Unit-level coverage for the format-routing table used by
+        // both ingest_job_output and any future resume path.
+        let base = |s: LoopState| {
+            let mut r = make_pending_loop(true);
+            r.state = s;
+            r.opencode_session_id = None;
+            r.claude_session_id = None;
+            r
+        };
+
+        // opencode-format on a historically-claude stage (implement).
+        let mut r = base(LoopState::Implementing);
+        ConvergentLoopDriver::persist_session_id_for_stage(
+            &mut r,
+            "implement",
+            "ses_example_opencode_id",
+        );
+        assert_eq!(
+            r.opencode_session_id.as_deref(),
+            Some("ses_example_opencode_id")
+        );
+        assert!(r.claude_session_id.is_none());
+
+        // Claude-format on a historically-opencode stage (audit).
+        let mut r = base(LoopState::Hardening);
+        ConvergentLoopDriver::persist_session_id_for_stage(
+            &mut r,
+            "audit",
+            "550e8400-e29b-41d4-a716-446655440000",
+        );
+        assert_eq!(
+            r.claude_session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert!(r.opencode_session_id.is_none());
+
+        // Unknown format on a resumable stage — drop, don't crash.
+        let mut r = base(LoopState::Implementing);
+        ConvergentLoopDriver::persist_session_id_for_stage(&mut r, "implement", "not-a-session");
+        assert!(r.opencode_session_id.is_none());
+        assert!(r.claude_session_id.is_none());
     }
 
     #[tokio::test]

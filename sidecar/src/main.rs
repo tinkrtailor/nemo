@@ -245,9 +245,18 @@ fn is_truthy_env(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Env vars are process-global. Cargo runs tests in threads by
+    // default, so two tests mutating PARITY_BIND_ALL_INTERFACES_ENV
+    // concurrently race: one test removes the var mid-read of the
+    // other's assertion and the default-loopback branch fires when
+    // "true" was expected. Seen intermittently in CI; serialize.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn private_listener_bind_ip_defaults_to_loopback() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var(PARITY_BIND_ALL_INTERFACES_ENV);
         }
@@ -259,6 +268,7 @@ mod tests {
 
     #[test]
     fn private_listener_bind_ip_uses_all_interfaces_when_enabled() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var(PARITY_BIND_ALL_INTERFACES_ENV, "true");
         }

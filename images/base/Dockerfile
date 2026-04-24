@@ -96,7 +96,14 @@ RUN chmod +x /usr/local/bin/opencode && /usr/local/bin/opencode --version
 ARG BUN_VERSION=1.1.43
 RUN set -eux; \
     case "$(uname -m)" in \
-      x86_64)  asset=bun-linux-x64.zip ;; \
+      # Bun's `bun-linux-x64.zip` build assumes AVX2; running under
+      # QEMU x86_64 emulation (common for local multi-arch buildx)
+      # crashes with SIGILL on the `bun --version` smoke immediately
+      # after install. The `bun-linux-x64-baseline.zip` variant drops
+      # the AVX2 requirement and runs on any x86-64 CPU — including
+      # QEMU and older physical hosts — with ~5% startup-time cost
+      # that doesn't matter for short-lived agent pods.
+      x86_64)  asset=bun-linux-x64-baseline.zip ;; \
       aarch64) asset=bun-linux-aarch64.zip ;; \
       *)       echo "Unsupported arch for bun: $(uname -m)" >&2; exit 1 ;; \
     esac; \
