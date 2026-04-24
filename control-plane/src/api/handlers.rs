@@ -9,15 +9,21 @@ use crate::error::NautiloopError;
 use crate::state::LoopFlag;
 use crate::types::api::{
     ApproveResponse, CancelResponse, CredentialRequest, DiffQuery, DiffResponse, ExtendRequest,
-    ExtendResponse, InspectResponse, LogsQuery, LoopSummary, ResumeResponse, RoundSummary,
-    StartRequest, StartResponse, StatusQuery, StatusResponse,
+    ExtendResponse, InspectResponse, LogsQuery, LoopSummary, ResumeRequest, ResumeResponse,
+    RoundSummary, StartRequest, StartResponse, StatusQuery, StatusResponse,
 };
 use crate::types::{LoopKind, LoopRecord, LoopState, generate_branch_name};
 
-/// Query parameters for GET /inspect
+/// Query parameters for GET /inspect. Exactly one of `id` or `branch`
+/// must be supplied. We accept both because the CLI frequently has a
+/// loop ID (UUID) in hand and prepending `agent/` to a UUID produces a
+/// nonsense branch name that bypasses the real lookup.
 #[derive(Debug, serde::Deserialize)]
 pub struct InspectQuery {
-    pub branch: String,
+    #[serde(default)]
+    pub id: Option<Uuid>,
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// POST /start - Submit a spec for processing.
@@ -231,6 +237,7 @@ pub async fn start(
                 .unwrap_or(&default_ref)
                 .to_string(),
         ),
+        stage_timeout_secs: req.stage_timeout_secs.map(|s| s as i32),
         created_at: now,
         updated_at: now,
     };
@@ -479,6 +486,10 @@ pub async fn logs(
 /// - `tail`: max lines to return (default 500, max 10000)
 /// - `container`: container name to read from (default "agent"; "auth-sidecar"
 ///   is the other interesting one for egress debugging)
+/// - `follow`: if "true", stream the container's stdout until the pod exits
+///   rather than returning a one-shot snapshot. Useful for stages running
+///   `opencode --format json`, which buffers NDJSON and so may produce an
+///   empty body for a one-shot tail right after dispatch.
 pub async fn pod_logs(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -544,6 +555,7 @@ pub async fn pod_logs(
             "container must be 'agent' or 'auth-sidecar', got {container}"
         )));
     }
+    let follow = query.get("follow").is_some_and(|v| v == "true" || v == "1");
 
     let kube_client = state.kube_client.as_ref().ok_or_else(|| {
         NautiloopError::Internal("K8s client not available — pod logs disabled".to_string())
@@ -590,10 +602,58 @@ pub async fn pod_logs(
     });
 
     let log_params = kube::api::LogParams {
-        container: Some(container),
+        container: Some(container.clone()),
         tail_lines: Some(tail_lines),
+        follow,
         ..Default::default()
     };
+
+    // Streaming (follow) path: wire the kubelet log stream through to
+    // the HTTP client as chunked text so an operator sees NDJSON
+    // bursts in real time. `log_stream` returns an `AsyncBufRead`; we
+    // wrap it in an `async_stream` so Axum can consume it as a byte
+    // stream body without pulling in tokio-util just for this.
+    if follow {
+        use futures::AsyncReadExt;
+
+        let Some(pod_name) = sorted_pods.first().and_then(|p| p.metadata.name.clone()) else {
+            return Ok(info_response(format!(
+                "# no pod yet for job {job_name} (pre-creation race or TTL cleanup)\n"
+            )));
+        };
+
+        let mut reader = pods_api
+            .log_stream(&pod_name, &log_params)
+            .await
+            .map_err(|e| {
+                NautiloopError::Internal(format!(
+                    "Failed to open log stream for pod {pod_name}: {e}"
+                ))
+            })?;
+
+        let body_stream = async_stream::stream! {
+            let mut buf = vec![0u8; 8192];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => yield Ok::<_, std::io::Error>(axum::body::Bytes::copy_from_slice(&buf[..n])),
+                    Err(e) => {
+                        yield Err(std::io::Error::other(format!("kube log stream error: {e}")));
+                        break;
+                    }
+                }
+            }
+        };
+        let body = axum::body::Body::from_stream(body_stream);
+
+        return Ok((
+            axum::http::StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            body,
+        )
+            .into_response());
+    }
+
     let mut logs: Option<String> = None;
     for pod in &sorted_pods {
         if let Some(pod_name) = &pod.metadata.name {
@@ -718,7 +778,9 @@ pub async fn approve(
 pub async fn resume(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    body: Option<Json<ResumeRequest>>,
 ) -> Result<Json<ResumeResponse>, NautiloopError> {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
     let record = state
         .store
         .get_loop(id)
@@ -767,6 +829,24 @@ pub async fn resume(
         });
     }
 
+    // If the caller supplied a new --stage-timeout, persist it before
+    // raising the resume flag so the next reconciler tick's redispatch
+    // picks up the larger budget. The driver's resolve_stage_timeout
+    // floors this at 300s; we also reject <1 here to keep "unset"
+    // distinct from "explicit zero".
+    let mut updated_timeout = record.stage_timeout_secs;
+    if let Some(secs) = req.stage_timeout_secs {
+        if secs == 0 {
+            return Err(NautiloopError::BadRequest(
+                "stage_timeout_secs must be a positive integer (minimum 300)".to_string(),
+            ));
+        }
+        let mut updated = record.clone();
+        updated.stage_timeout_secs = Some(secs as i32);
+        state.store.update_loop(&updated).await?;
+        updated_timeout = Some(secs as i32);
+    }
+
     state
         .store
         .set_loop_flag(id, LoopFlag::Resume, true)
@@ -776,6 +856,7 @@ pub async fn resume(
         loop_id: id,
         state: record.state,
         resume_requested: true,
+        stage_timeout_secs: updated_timeout.map(|v| v as u32),
     }))
 }
 
@@ -858,20 +939,32 @@ pub async fn extend(
     }))
 }
 
-/// GET /inspect?branch=agent/alice/slug-hash - View detailed loop state.
-/// Branch passed as query param because branch names contain slashes.
+/// GET /inspect?id=<uuid> | ?branch=agent/alice/slug-hash - View detailed loop state.
+/// Exactly one of `id` or `branch` must be supplied; `id` wins if both are
+/// present. Branch passed as query param because branch names contain slashes.
 pub async fn inspect(
     State(state): State<AppState>,
     Query(params): Query<InspectQuery>,
 ) -> Result<Json<InspectResponse>, NautiloopError> {
-    let branch = &params.branch;
-
-    // Use get_loop_by_branch_any to include terminal loops (N5)
-    let record = state
-        .store
-        .get_loop_by_branch_any(branch)
-        .await?
-        .ok_or_else(|| NautiloopError::BadRequest(format!("No loop found for branch: {branch}")))?;
+    let record = match (&params.id, &params.branch) {
+        (Some(id), _) => state
+            .store
+            .get_loop(*id)
+            .await?
+            .ok_or_else(|| NautiloopError::BadRequest(format!("No loop found for id: {id}")))?,
+        (None, Some(branch)) => state
+            .store
+            .get_loop_by_branch_any(branch)
+            .await?
+            .ok_or_else(|| {
+                NautiloopError::BadRequest(format!("No loop found for branch: {branch}"))
+            })?,
+        (None, None) => {
+            return Err(NautiloopError::BadRequest(
+                "inspect requires either ?id=<uuid> or ?branch=<branch>".to_string(),
+            ));
+        }
+    };
 
     let rounds = state.store.get_rounds(record.id).await?;
 
@@ -1443,6 +1536,7 @@ mod tests {
             hardened_spec_path: None,
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
+            stage_timeout_secs: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1505,6 +1599,7 @@ mod tests {
             hardened_spec_path: None,
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
+            stage_timeout_secs: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1561,6 +1656,7 @@ mod tests {
             hardened_spec_path: None,
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
+            stage_timeout_secs: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -2425,6 +2521,7 @@ mod tests {
             hardened_spec_path: None,
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
+            stage_timeout_secs: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

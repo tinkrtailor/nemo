@@ -76,6 +76,7 @@ fn make_loop(engineer: &str, state: LoopState) -> LoopRecord {
         hardened_spec_path: None,
         spec_pr_url: None,
         resolved_default_branch: Some("main".to_string()),
+        stage_timeout_secs: None,
         created_at: now,
         updated_at: now,
     }

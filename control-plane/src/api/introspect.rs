@@ -155,7 +155,7 @@ pub async fn pod_introspect(
 
     // Parse exec output — timeout/failure → partial snapshot with metrics (FR-2c, NFR-4)
     let mut warnings: Vec<String> = Vec::new();
-    let (processes, worktree) = match exec_result {
+    let (processes, worktree, had_processes_key) = match exec_result {
         Ok(output) => parse_introspect_output(&output),
         Err(ExecError::Timeout {
             msg,
@@ -169,15 +169,34 @@ pub async fn pod_introspect(
             // was slow and got cancelled.
             match partial_output {
                 Some(ref partial) if !partial.trim().is_empty() => parse_introspect_output(partial),
-                _ => (Vec::new(), default_worktree()),
+                _ => (Vec::new(), default_worktree(), false),
             }
         }
         Err(ExecError::Other(e)) => {
             tracing::warn!(pod = %pod_name, error = %e, "introspect exec failed, returning partial");
             warnings.push(format!("exec failed ({e}), showing partial data"));
-            (Vec::new(), default_worktree())
+            (Vec::new(), default_worktree(), false)
         }
     };
+
+    // FR-1b fallback detection: if exec succeeded but the output never
+    // contained a `processes` key, the in-pod fallback `echo '{...}'`
+    // ran and the real `nautiloop-introspect` binary is missing or
+    // crashed before emitting its first NDJSON line. Promote this to
+    // a warning so operators see the failure instead of mistaking an
+    // empty list for a quiet pod.
+    if !had_processes_key {
+        tracing::warn!(
+            pod = %pod_name,
+            "introspect script unavailable in container (fallback path produced worktree-only output); \
+             `nemo ps` will report no processes"
+        );
+        warnings.push(
+            "introspect script unavailable in container (fallback ran); \
+             process list is not the real state — use `kubectl exec` or `nemo logs` instead"
+                .to_string(),
+        );
+    }
 
     let response = PodIntrospectResponse {
         loop_id,
@@ -489,10 +508,18 @@ pub fn parse_memory_to_bytes(mem: &str) -> u64 {
 /// worktree collection is killed mid-flight (FR-2c). We also support the legacy
 /// single-object format (one JSON object with both keys) for backward
 /// compatibility with older agent images and the exec fallback.
-pub fn parse_introspect_output(output: &str) -> (Vec<ProcessInfo>, WorktreeInfo) {
+/// Parse the NDJSON/JSON output from the in-pod introspect script.
+/// The third tuple element is `true` when the output contained an
+/// explicit `processes` key (even if the array was empty) — the
+/// absence of the key is the signal that the shell fallback ran and
+/// the real script either timed out, was missing from the image, or
+/// crashed at startup. Callers use that flag to promote the empty
+/// process list from "pod is idle" into a loud warning, so operators
+/// do not mistake a broken introspect path for a quiet pod.
+pub fn parse_introspect_output(output: &str) -> (Vec<ProcessInfo>, WorktreeInfo, bool) {
     let trimmed = output.trim();
     if trimmed.is_empty() {
-        return (Vec::new(), default_worktree());
+        return (Vec::new(), default_worktree(), false);
     }
 
     // Collect all parsed JSON values. Try the whole output as a single object
@@ -518,9 +545,11 @@ pub fn parse_introspect_output(output: &str) -> (Vec<ProcessInfo>, WorktreeInfo)
 
     let mut processes = Vec::new();
     let mut worktree = default_worktree();
+    let mut had_processes_key = false;
 
     for parsed in &values {
         if let Some(arr) = parsed.get("processes").and_then(|p| p.as_array()) {
+            had_processes_key = true;
             processes = arr
                 .iter()
                 .filter_map(|v| {
@@ -554,7 +583,7 @@ pub fn parse_introspect_output(output: &str) -> (Vec<ProcessInfo>, WorktreeInfo)
         }
     }
 
-    (processes, worktree)
+    (processes, worktree, had_processes_key)
 }
 
 fn default_worktree() -> WorktreeInfo {
@@ -633,6 +662,7 @@ mod tests {
             hardened_spec_path: None,
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
+            stage_timeout_secs: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -847,7 +877,7 @@ mod tests {
             r#"{"worktree":{"path":"/work","target_dir_bytes":3221225472,"target_dir_artifacts":1069,"uncommitted_files":2,"head_sha":"42bffd9"}}"#,
         );
 
-        let (processes, worktree) = parse_introspect_output(output);
+        let (processes, worktree, had_processes_key) = parse_introspect_output(output);
         assert_eq!(processes.len(), 2);
         assert_eq!(processes[0].pid, 12);
         assert_eq!(processes[0].cmd, "claude");
@@ -856,6 +886,7 @@ mod tests {
         assert_eq!(worktree.target_dir_bytes, Some(3221225472));
         assert_eq!(worktree.uncommitted_files, Some(2));
         assert_eq!(worktree.head_sha.as_deref(), Some("42bffd9"));
+        assert!(had_processes_key);
     }
 
     #[test]
@@ -864,7 +895,7 @@ mod tests {
         // but before worktree emission (FR-2c). Processes must be preserved.
         let output = r#"{"processes":[{"pid":12,"ppid":1,"user":"agent","cpu_percent":3.2,"cmd":"claude","age_seconds":1320}]}"#;
 
-        let (processes, worktree) = parse_introspect_output(output);
+        let (processes, worktree, had_processes_key) = parse_introspect_output(output);
         assert_eq!(processes.len(), 1);
         assert_eq!(processes[0].pid, 12);
         assert_eq!(processes[0].cmd, "claude");
@@ -872,6 +903,7 @@ mod tests {
         assert_eq!(worktree.path, "/work");
         assert_eq!(worktree.target_dir_bytes, None);
         assert_eq!(worktree.head_sha, None);
+        assert!(had_processes_key);
     }
 
     #[test]
@@ -890,40 +922,46 @@ mod tests {
             }
         }"#;
 
-        let (processes, worktree) = parse_introspect_output(output);
+        let (processes, worktree, had_processes_key) = parse_introspect_output(output);
         assert_eq!(processes.len(), 1);
         assert_eq!(processes[0].pid, 12);
         assert_eq!(worktree.target_dir_artifacts, Some(1069));
         assert_eq!(worktree.uncommitted_files, Some(2));
+        assert!(had_processes_key);
     }
 
     #[test]
     fn test_parse_introspect_output_empty() {
-        let (processes, worktree) = parse_introspect_output("");
+        let (processes, worktree, had_processes_key) = parse_introspect_output("");
         assert!(processes.is_empty());
         assert_eq!(worktree.path, "/work");
+        assert!(!had_processes_key);
     }
 
     #[test]
     fn test_parse_introspect_output_garbage() {
-        let (processes, worktree) = parse_introspect_output("not json at all");
+        let (processes, worktree, had_processes_key) = parse_introspect_output("not json at all");
         assert!(processes.is_empty());
         assert_eq!(worktree.path, "/work");
+        assert!(!had_processes_key);
     }
 
     #[test]
     fn test_parse_introspect_output_partial_worktree() {
         // Matches the fallback JSON emitted when the script is absent or crashes:
         // only worktree defaults (no processes key), so it cannot overwrite real
-        // process data already emitted before a timeout.
+        // process data already emitted before a timeout. `had_processes_key`
+        // must be false here so the handler promotes this to a loud warning
+        // rather than letting `nemo ps` silently report "(no processes)".
         let output = r#"{"worktree":{"path":"/work","target_dir_bytes":null,"target_dir_artifacts":null,"uncommitted_files":null,"head_sha":null}}"#;
-        let (processes, worktree) = parse_introspect_output(output);
+        let (processes, worktree, had_processes_key) = parse_introspect_output(output);
         assert!(processes.is_empty());
         assert_eq!(worktree.path, "/work");
         assert_eq!(worktree.target_dir_bytes, None);
         assert_eq!(worktree.target_dir_artifacts, None);
         assert_eq!(worktree.uncommitted_files, None); // null → None (unknown)
         assert_eq!(worktree.head_sha, None);
+        assert!(!had_processes_key);
     }
 
     #[test]
@@ -936,7 +974,7 @@ mod tests {
             "\n",
             r#"{"worktree":{"path":"/work","target_dir_bytes":null,"target_dir_artifacts":null,"uncommitted_files":null,"head_sha":null}}"#,
         );
-        let (processes, worktree) = parse_introspect_output(output);
+        let (processes, worktree, had_processes_key) = parse_introspect_output(output);
         assert_eq!(
             processes.len(),
             1,
@@ -946,5 +984,6 @@ mod tests {
         assert_eq!(processes[0].cmd, "claude");
         assert_eq!(worktree.path, "/work");
         assert_eq!(worktree.target_dir_bytes, None);
+        assert!(had_processes_key);
     }
 }

@@ -25,22 +25,51 @@ pub async fn run_tail(
     loop_id: &str,
     tail_lines: u32,
     container: &str,
+    follow: bool,
 ) -> Result<TailResult> {
-    let path = format!("/pod-logs/{loop_id}?tail={tail_lines}&container={container}");
+    let follow_param = if follow { "&follow=true" } else { "" };
+    let path = format!("/pod-logs/{loop_id}?tail={tail_lines}&container={container}{follow_param}");
     let resp = client.get_stream(&path).await?;
     let status = resp.status();
-    let text = resp.text().await?;
+
     // Server returns 204 No Content for benign "no pod" states.
     // 4xx/5xx are real errors. 200 = real log output.
     if status == reqwest::StatusCode::NO_CONTENT {
         return Ok(TailResult::NoPod);
     }
     if !status.is_success() {
+        let text = resp.text().await?;
         anyhow::bail!("pod-logs returned {status}: {text}");
     }
-    print!("{text}");
-    if !text.ends_with('\n') {
-        println!();
+
+    if follow {
+        // Stream chunks as they arrive so the operator sees output
+        // without waiting for the pod to exit. Critical for
+        // `opencode --format json` audits whose NDJSON lands in the
+        // kubelet log in bursts rather than continuously.
+        use std::io::Write;
+        let mut stream = resp.bytes_stream();
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        let mut last_ended_with_newline = true;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if chunk.is_empty() {
+                continue;
+            }
+            last_ended_with_newline = chunk.last() == Some(&b'\n');
+            handle.write_all(&chunk)?;
+            handle.flush()?;
+        }
+        if !last_ended_with_newline {
+            writeln!(handle)?;
+        }
+    } else {
+        let text = resp.text().await?;
+        print!("{text}");
+        if !text.ends_with('\n') {
+            println!();
+        }
     }
     Ok(TailResult::Ok)
 }

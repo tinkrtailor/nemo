@@ -130,6 +130,7 @@ fn make_reviewing_loop(round: i32) -> LoopRecord {
         hardened_spec_path: None,
         spec_pr_url: None,
         resolved_default_branch: Some("main".to_string()),
+        stage_timeout_secs: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -170,6 +171,7 @@ fn make_hardening_loop(round: i32) -> LoopRecord {
         hardened_spec_path: None,
         spec_pr_url: None,
         resolved_default_branch: Some("main".to_string()),
+        stage_timeout_secs: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

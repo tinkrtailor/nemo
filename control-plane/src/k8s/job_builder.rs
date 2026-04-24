@@ -966,6 +966,33 @@ mod tests {
     }
 
     #[test]
+    fn test_build_job_sidecar_present_on_retry_attempts() {
+        // Regression guard for the v0.7.9 production observation that
+        // retry pods (`-t2`, `-t3`, ...) appeared to lack the
+        // `auth-sidecar` container. The job builder takes `retry_count`
+        // only as an opaque counter that influences the generated job
+        // name — it must NOT gate sidecar inclusion. This test locks
+        // that invariant so a future refactor can't silently drop the
+        // sidecar from retry pods (which would break OAuth and git
+        // push for every recovered attempt).
+        let stage = test_stage();
+        let cfg = test_cfg();
+        for retry_count in [0u32, 1, 2, 5] {
+            let mut ctx = test_ctx();
+            ctx.retry_count = retry_count;
+            let job = build_job(&ctx, &stage, &cfg);
+            let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+            let inits = pod_spec.init_containers.as_ref().unwrap_or_else(|| {
+                panic!("retry_count={retry_count}: init_containers must be Some")
+            });
+            assert!(
+                inits.iter().any(|c| c.name == "auth-sidecar"),
+                "retry_count={retry_count}: auth-sidecar must be present in init_containers"
+            );
+        }
+    }
+
+    #[test]
     fn test_build_job_sidecar_security_context() {
         let ctx = test_ctx();
         let stage = test_stage();

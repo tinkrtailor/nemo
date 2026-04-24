@@ -72,7 +72,16 @@ impl JobDispatcher for KubeJobDispatcher {
 
         let mut status = job_to_status(&job);
 
-        // For failed jobs, inspect pod exit codes for auth expiry (exit code 42)
+        // For failed jobs, inspect pods for two terminal signals that the
+        // bare Job.status.conditions list can't always reveal in time:
+        //   - exit code 42 (agent convention) ⇒ AuthExpired
+        //   - pod.status.reason == "DeadlineExceeded" ⇒ DeadlineExceeded
+        //
+        // The deadline check also covers the race where `failed > 0` has
+        // incremented on the Job but the `type=Failed` condition has not
+        // yet been materialised with `reason=DeadlineExceeded`, producing
+        // the misleading "Pod failure" fallback on the first status read
+        // after kill time.
         if matches!(status, JobStatus::Failed { .. }) {
             let pods_api: Api<Pod> = Api::namespaced(self.client.clone(), ns);
             let lp = ListParams::default().labels(&format!("job-name={name}"));
@@ -86,6 +95,14 @@ impl JobDispatcher for KubeJobDispatcher {
                             _ => "Auth expired (exit code 42)".to_string(),
                         };
                         status = JobStatus::AuthExpired { reason };
+                        break;
+                    }
+                    if pod_deadline_exceeded(pod) {
+                        let reason = match &status {
+                            JobStatus::Failed { reason } => reason.clone(),
+                            _ => "DeadlineExceeded".to_string(),
+                        };
+                        status = JobStatus::DeadlineExceeded { reason };
                         break;
                     }
                 }
@@ -193,6 +210,33 @@ fn extract_exit_code(pod: &Pod) -> Option<i32> {
     None
 }
 
+/// Detect whether a pod was terminated because the Job's
+/// `activeDeadlineSeconds` elapsed. Kubelet stamps this as
+/// `pod.status.reason == "DeadlineExceeded"`; the agent container
+/// is also recorded as terminated with `reason: DeadlineExceeded`.
+/// We check both because kubelet ordering is not guaranteed.
+fn pod_deadline_exceeded(pod: &Pod) -> bool {
+    let Some(status) = pod.status.as_ref() else {
+        return false;
+    };
+    if status.reason.as_deref() == Some("DeadlineExceeded") {
+        return true;
+    }
+    if let Some(statuses) = status.container_statuses.as_ref() {
+        for cs in statuses {
+            if cs.name != "agent" {
+                continue;
+            }
+            if let Some(terminated) = cs.state.as_ref().and_then(|s| s.terminated.as_ref())
+                && terminated.reason.as_deref() == Some("DeadlineExceeded")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Extract job status from K8s Job resource.
 fn job_to_status(job: &Job) -> JobStatus {
     let status = match &job.status {
@@ -214,6 +258,13 @@ fn job_to_status(job: &Job) -> JobStatus {
                     (None, Some(m)) => m.clone(),
                     (None, None) => "Unknown failure".to_string(),
                 };
+                // Distinguish activeDeadlineSeconds termination from
+                // genuine pod failure. K8s stamps `reason: DeadlineExceeded`
+                // on the condition when the Job's deadline trips; an
+                // identical retry will hit the same wall-clock budget.
+                if condition.reason.as_deref() == Some("DeadlineExceeded") {
+                    return JobStatus::DeadlineExceeded { reason };
+                }
                 return JobStatus::Failed { reason };
             }
         }
