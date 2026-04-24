@@ -82,6 +82,44 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.87
 COPY --from=opencode-src /opt/opencode/opencode /usr/local/bin/opencode
 RUN chmod +x /usr/local/bin/opencode && /usr/local/bin/opencode --version
 
+# FR-3b: Install Bun + pnpm system-wide so audit/implement/test stages
+# can run JS monorepos that have migrated off npm. Node + npm come from
+# the base image; Bun ships a standalone binary with its own runtime,
+# so pinning by version + verifying via the release's SHASUMS256.txt
+# gives the same supply-chain guarantee as the opencode/sccache fetches
+# above without us having to hardcode per-arch digests that drift with
+# every bump.
+#
+# pnpm is installed via corepack (ships with node:22) so the version
+# pinned in each repo's `packageManager` field is honored at runtime
+# without us having to track per-monorepo pnpm releases here.
+ARG BUN_VERSION=1.1.43
+RUN set -eux; \
+    case "$(uname -m)" in \
+      x86_64)  asset=bun-linux-x64.zip ;; \
+      aarch64) asset=bun-linux-aarch64.zip ;; \
+      *)       echo "Unsupported arch for bun: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*; \
+    base_url="https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}"; \
+    # Download with the original asset filename so `sha256sum -c` can
+    # find it: SHASUMS256.txt references `bun-linux-<arch>.zip`, and
+    # `sha256sum -c` resolves the filename in that line against cwd.
+    cd /tmp; \
+    curl -fsSL -O "${base_url}/${asset}"; \
+    curl -fsSL -o /tmp/SHASUMS256.txt "${base_url}/SHASUMS256.txt"; \
+    grep -E "  ${asset}\$" SHASUMS256.txt | sha256sum -c -; \
+    unzip -q "/tmp/${asset}" -d /tmp; \
+    dir="$(find /tmp -maxdepth 1 -type d -name 'bun-linux-*' | head -n1)"; \
+    mv "${dir}/bun" /usr/local/bin/bun; \
+    chmod +x /usr/local/bin/bun; \
+    ln -sf /usr/local/bin/bun /usr/local/bin/bunx; \
+    rm -rf "/tmp/${asset}" /tmp/SHASUMS256.txt /tmp/bun-linux-*; \
+    /usr/local/bin/bun --version
+# Enable corepack (ships with node:22) so `pnpm` / `yarn` invocations
+# resolve to the version pinned in each repo's package.json.
+RUN corepack enable && corepack prepare pnpm@latest --activate && pnpm --version
+
 # Optional: Rust toolchain for Rust-targeted repos (e.g. nautiloop itself).
 # Off by default to keep the base image lean (~200MB saved). Enable per-build
 # with `--build-arg INCLUDE_RUST=true`. Production release workflow leaves it off
