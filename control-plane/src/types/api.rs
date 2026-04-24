@@ -35,6 +35,12 @@ pub struct StartRequest {
     /// Per-stage wins over uniform.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<StageTimeouts>,
+    /// Optional `[cache.env]` overrides from the repo-level `nemo.toml`.
+    /// Shape: `{"BUN_INSTALL_CACHE_DIR": "/cache/bun", ...}`. Merged
+    /// with the cluster-default cache env when the driver builds each
+    /// stage Job; per-loop keys win on collisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_env: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Per-stage `activeDeadlineSeconds` overrides mirroring the
@@ -168,6 +174,12 @@ pub struct ResumeRequest {
     /// already pinned on the loop row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<StageTimeouts>,
+    /// Optional `[cache.env]` override replacement. When present,
+    /// replaces the loop's existing cache_env_overrides wholesale
+    /// (not merged). Pass an empty object to clear. Absent field
+    /// leaves the stored overrides unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_env: Option<std::collections::HashMap<String, String>>,
 }
 
 /// POST /resume/:id response body.

@@ -62,8 +62,23 @@ impl ConvergentLoopDriver {
         }
     }
 
-    /// Build the K8s job configuration from cluster config.
-    fn job_build_config(&self) -> job_builder::JobBuildConfig {
+    /// Build the K8s job configuration from cluster config. Accepts
+    /// an optional per-loop cache-env override (from the repo-level
+    /// `nemo.toml` `[cache.env]` block plumbed through the CLI at
+    /// submit time); those keys overlay the cluster default, with
+    /// per-loop winning on collisions. Empty/missing override leaves
+    /// the cluster default untouched.
+    fn job_build_config_for(&self, record: &LoopRecord) -> job_builder::JobBuildConfig {
+        let mut cache = self.config.resolved_cache_config();
+        if let Some(ref overrides) = record.cache_env_overrides
+            && let Some(map) = overrides.as_object()
+        {
+            for (k, v) in map {
+                if let Some(s) = v.as_str() {
+                    cache.env.insert(k.clone(), s.to_string());
+                }
+            }
+        }
         job_builder::JobBuildConfig {
             namespace: self.config.cluster.jobs_namespace.clone(),
             agent_image: self.config.cluster.agent_image.clone(),
@@ -74,7 +89,7 @@ impl ConvergentLoopDriver {
             git_repo_url: self.config.cluster.git_repo_url.clone(),
             ssh_known_hosts_configmap: self.config.cluster.ssh_known_hosts_configmap.clone(),
             skip_iptables: self.config.cluster.skip_iptables,
-            cache: self.config.resolved_cache_config(),
+            cache,
         }
     }
 
@@ -161,7 +176,8 @@ impl ConvergentLoopDriver {
             let stage_config = self.audit_stage_config(record);
             let mut ctx = self.build_context(&updated).await?;
             ctx.session_id = Self::session_id_for_stage(record, "audit");
-            let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+            let job =
+                job_builder::build_job(&ctx, &stage_config, &self.job_build_config_for(&updated));
             self.persist_then_dispatch(&mut updated, "audit", &job)
                 .await?;
 
@@ -783,7 +799,7 @@ impl ConvergentLoopDriver {
         let mut ctx = self.build_context(record).await?;
         self.inject_test_services(record, &mut ctx).await;
 
-        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config_for(record));
         self.persist_then_dispatch(record, "test", &job).await?;
 
         tracing::info!(loop_id = %record.id, round = record.round, "IMPLEMENTING -> TESTING/DISPATCHED");
@@ -1909,7 +1925,7 @@ impl ConvergentLoopDriver {
         let stage_config = self.implement_stage_config(record);
         let mut ctx = self.build_context(&updated).await?;
         ctx.session_id = Self::session_id_for_stage(&updated, "implement");
-        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config_for(&updated));
         self.persist_then_dispatch(&mut updated, "implement", &job)
             .await?;
 
@@ -1926,7 +1942,7 @@ impl ConvergentLoopDriver {
         let stage_config = self.audit_stage_config(record);
         let mut ctx = self.build_context(record).await?;
         ctx.session_id = Self::session_id_for_stage(record, "audit");
-        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config_for(record));
         self.persist_then_dispatch(record, "audit", &job).await?;
 
         Ok(LoopState::Hardening)
@@ -1987,7 +2003,7 @@ impl ConvergentLoopDriver {
         let mut ctx = self.build_context(record).await?;
         ctx.session_id = Self::session_id_for_stage(record, "revise");
         ctx.feedback_path = Some(feedback_path.clone());
-        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config_for(record));
         self.persist_then_dispatch(record, "revise", &job).await?;
 
         tracing::info!(
@@ -2009,7 +2025,7 @@ impl ConvergentLoopDriver {
         let stage_config = self.review_stage_config(record);
         let mut ctx = self.build_context(record).await?;
         ctx.session_id = Self::session_id_for_stage(record, "review");
-        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config_for(record));
         self.persist_then_dispatch(record, "review", &job).await?;
 
         tracing::info!(loop_id = %record.id, round = record.round, "TESTING -> REVIEWING/DISPATCHED");
@@ -2058,7 +2074,7 @@ impl ConvergentLoopDriver {
         ctx.session_id = Self::session_id_for_stage(record, "implement");
         ctx.feedback_path = Some(feedback_path.to_string());
 
-        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config_for(record));
         self.persist_then_dispatch(record, "implement", &job)
             .await?;
 
@@ -2160,7 +2176,7 @@ impl ConvergentLoopDriver {
             });
         }
 
-        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config());
+        let job = job_builder::build_job(&ctx, &stage_config, &self.job_build_config_for(&updated));
 
         // Persist state FIRST, then create K8s Job
         let job_name = job
@@ -2711,6 +2727,48 @@ mod tests {
             .await;
     }
 
+    #[tokio::test]
+    async fn job_build_config_for_merges_per_loop_cache_env() {
+        // v0.7.13 regression guard: [cache.env] in a repo-level
+        // nemo.toml, plumbed through the CLI as a per-loop override,
+        // must land in the K8s Job's env vars. Per-loop keys win over
+        // cluster defaults on collisions; unrelated cluster-default
+        // keys stay intact.
+        use crate::types::LoopRecord;
+        use serde_json::json;
+
+        let store = Arc::new(MemoryStateStore::new());
+        let dispatcher = Arc::new(MockJobDispatcher::new());
+        let driver = make_driver(store, dispatcher);
+
+        let mut record: LoopRecord = make_pending_loop(true);
+        record.cache_env_overrides = Some(json!({
+            "BUN_INSTALL_CACHE_DIR": "/cache/bun-loop-override",
+            "NPM_CONFIG_CACHE": "/cache/npm-loop-override",
+        }));
+
+        let cfg = driver.job_build_config_for(&record);
+
+        // Per-loop keys win.
+        assert_eq!(
+            cfg.cache
+                .env
+                .get("BUN_INSTALL_CACHE_DIR")
+                .map(String::as_str),
+            Some("/cache/bun-loop-override"),
+        );
+        assert_eq!(
+            cfg.cache.env.get("NPM_CONFIG_CACHE").map(String::as_str),
+            Some("/cache/npm-loop-override"),
+        );
+        // Unrelated cluster-default keys survive the merge.
+        assert_eq!(
+            cfg.cache.env.get("RUSTC_WRAPPER").map(String::as_str),
+            Some("sccache"),
+            "cluster-default sccache env must survive per-loop merge"
+        );
+    }
+
     #[test]
     fn resolve_stage_timeout_precedence_per_stage_beats_uniform_beats_default() {
         // v0.7.12 regression guard: per-stage override (from nemo.toml
@@ -2763,6 +2821,7 @@ mod tests {
                 review_timeout_secs: None,
                 audit_timeout_secs: None,
                 revise_timeout_secs: None,
+                cache_env_overrides: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }
@@ -2856,6 +2915,7 @@ mod tests {
             review_timeout_secs: None,
             audit_timeout_secs: None,
             revise_timeout_secs: None,
+            cache_env_overrides: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

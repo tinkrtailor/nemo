@@ -27,6 +27,10 @@ pub struct StartArgs<'a> {
     /// the server can stamp them on the loop record; per-stage beats
     /// uniform `stage_timeout_secs` at stage-dispatch time.
     pub project_timeouts: crate::project_config::TimeoutsSection,
+    /// `[cache.env]` overrides from the repo-level `nemo.toml`.
+    /// Merged with the cluster-default cache env at dispatch time;
+    /// per-loop keys win on collisions. Empty map = no override.
+    pub project_cache_env: crate::project_config::CacheSection,
 }
 
 pub async fn run(client: &NemoClient, args: StartArgs<'_>) -> Result<()> {
@@ -178,6 +182,11 @@ fn build_start_body(args: &StartArgs<'_>, spec_content: &str) -> serde_json::Val
             serde_json::to_value(&args.project_timeouts).unwrap_or(serde_json::Value::Null);
     }
 
+    if !args.project_cache_env.is_empty() {
+        body["cache_env"] =
+            serde_json::to_value(&args.project_cache_env.env).unwrap_or(serde_json::Value::Null);
+    }
+
     body
 }
 
@@ -205,6 +214,7 @@ mod tests {
             model_review: None,
             stage_timeout_secs: None,
             project_timeouts: Default::default(),
+            project_cache_env: Default::default(),
         };
         let body = build_start_body(&args, &content);
 
@@ -245,6 +255,7 @@ mod tests {
             model_review: None,
             stage_timeout_secs: None,
             project_timeouts: Default::default(),
+            project_cache_env: Default::default(),
         };
         let body = build_start_body(&args, "# Spec");
         assert!(body["model_overrides"].is_object());
@@ -275,6 +286,7 @@ mod tests {
                 revise_secs: Some(3600),
                 watchdog_secs: None,
             },
+            project_cache_env: Default::default(),
         };
         let body = build_start_body(&args, "# Spec");
         let timeouts = &body["timeouts"];
@@ -284,6 +296,60 @@ mod tests {
         assert!(
             timeouts.get("watchdog_secs").is_none(),
             "unset stages must not appear; server treats absent as cluster default"
+        );
+    }
+
+    #[test]
+    fn test_build_start_body_includes_project_cache_env() {
+        // v0.7.13 regression guard: [cache.env] in repo-level nemo.toml
+        // must flow through to the submit body so the server can stamp
+        // per-loop overrides on the loop record and merge them at
+        // stage dispatch. Same dead-letter shape the [timeouts] fix
+        // addressed in v0.7.12.
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "BUN_INSTALL_CACHE_DIR".to_string(),
+            "/cache/bun".to_string(),
+        );
+        env.insert("TURBO_CACHE_DIR".to_string(), "/cache/turbo".to_string());
+        let args = StartArgs {
+            engineer: "alice",
+            spec_path: "specs/js-monorepo.md",
+            harden: true,
+            harden_only: true,
+            auto_approve: false,
+            ship_mode: false,
+            model_impl: None,
+            model_review: None,
+            stage_timeout_secs: None,
+            project_timeouts: Default::default(),
+            project_cache_env: crate::project_config::CacheSection { env },
+        };
+        let body = build_start_body(&args, "# Spec");
+        let cache_env = &body["cache_env"];
+        assert_eq!(cache_env["BUN_INSTALL_CACHE_DIR"], "/cache/bun");
+        assert_eq!(cache_env["TURBO_CACHE_DIR"], "/cache/turbo");
+    }
+
+    #[test]
+    fn test_build_start_body_omits_empty_project_cache_env() {
+        let args = StartArgs {
+            engineer: "alice",
+            spec_path: "specs/ok.md",
+            harden: true,
+            harden_only: false,
+            auto_approve: false,
+            ship_mode: false,
+            model_impl: None,
+            model_review: None,
+            stage_timeout_secs: None,
+            project_timeouts: Default::default(),
+            project_cache_env: Default::default(),
+        };
+        let body = build_start_body(&args, "# Spec");
+        assert!(
+            body.get("cache_env").is_none(),
+            "empty [cache.env] must not be serialized"
         );
     }
 
@@ -300,6 +366,7 @@ mod tests {
             model_review: None,
             stage_timeout_secs: None,
             project_timeouts: Default::default(),
+            project_cache_env: Default::default(),
         };
         let body = build_start_body(&args, "# Spec");
         assert!(
@@ -321,6 +388,7 @@ mod tests {
             model_review: None,
             stage_timeout_secs: None,
             project_timeouts: Default::default(),
+            project_cache_env: Default::default(),
         };
         let body = build_start_body(&args, "# Spec");
         assert!(body.get("model_overrides").is_none());
@@ -371,6 +439,7 @@ mod tests {
             model_review: None,
             stage_timeout_secs: None,
             project_timeouts: Default::default(),
+            project_cache_env: Default::default(),
         };
         let body = build_start_body(&args, "# Spec");
         assert_eq!(
@@ -393,6 +462,7 @@ mod tests {
             model_review: None,
             stage_timeout_secs: None,
             project_timeouts: Default::default(),
+            project_cache_env: Default::default(),
         };
         let body = build_start_body(&args, "# Spec");
         assert_eq!(body["harden"], false, "--no-harden must send harden: false");
@@ -479,6 +549,7 @@ mod tests {
             model_review: None,
             stage_timeout_secs: None,
             project_timeouts: Default::default(),
+            project_cache_env: Default::default(),
         };
         assert_eq!(
             phase_plan_label(&args),
@@ -500,6 +571,7 @@ mod tests {
             model_review: None,
             stage_timeout_secs: None,
             project_timeouts: Default::default(),
+            project_cache_env: Default::default(),
         };
         assert_eq!(phase_plan_label(&args), "IMPLEMENT (harden skipped)");
     }
@@ -518,6 +590,7 @@ mod tests {
             model_review: None,
             stage_timeout_secs: None,
             project_timeouts: Default::default(),
+            project_cache_env: Default::default(),
         };
         assert_eq!(phase_plan_label(&args), "HARDEN \u{2192} IMPLEMENT");
     }
@@ -536,6 +609,7 @@ mod tests {
             model_review: None,
             stage_timeout_secs: None,
             project_timeouts: Default::default(),
+            project_cache_env: Default::default(),
         };
         assert_eq!(
             phase_plan_label(&args),
@@ -557,6 +631,7 @@ mod tests {
             model_review: None,
             stage_timeout_secs: None,
             project_timeouts: Default::default(),
+            project_cache_env: Default::default(),
         };
         assert_eq!(phase_plan_label(&args), "HARDEN");
     }

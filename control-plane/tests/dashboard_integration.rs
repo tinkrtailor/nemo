@@ -82,6 +82,7 @@ fn make_loop(engineer: &str, state: LoopState) -> LoopRecord {
         review_timeout_secs: None,
         audit_timeout_secs: None,
         revise_timeout_secs: None,
+        cache_env_overrides: None,
         created_at: now,
         updated_at: now,
     }

@@ -668,6 +668,7 @@ mod tests {
             review_timeout_secs: None,
             audit_timeout_secs: None,
             revise_timeout_secs: None,
+            cache_env_overrides: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

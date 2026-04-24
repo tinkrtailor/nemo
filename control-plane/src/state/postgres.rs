@@ -170,6 +170,10 @@ fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
             .try_get::<Option<i32>, _>("revise_timeout_secs")
             .ok()
             .flatten(),
+        cache_env_overrides: row
+            .try_get::<Option<serde_json::Value>, _>("cache_env_overrides")
+            .ok()
+            .flatten(),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -348,6 +352,7 @@ impl StateStore for PgStateStore {
                 stage_timeout_secs,
                 implement_timeout_secs, test_timeout_secs, review_timeout_secs,
                 audit_timeout_secs, revise_timeout_secs,
+                cache_env_overrides,
                 created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6::loop_kind,
@@ -360,7 +365,8 @@ impl StateStore for PgStateStore {
                 $33,
                 $34, $35, $36,
                 $37, $38,
-                $39, $40
+                $39,
+                $40, $41
             )
             RETURNING *
             "#,
@@ -403,6 +409,7 @@ impl StateStore for PgStateStore {
         .bind(record.review_timeout_secs)
         .bind(record.audit_timeout_secs)
         .bind(record.revise_timeout_secs)
+        .bind(&record.cache_env_overrides)
         .bind(record.created_at)
         .bind(record.updated_at)
         .fetch_one(&self.pool)
@@ -649,6 +656,7 @@ impl StateStore for PgStateStore {
                 review_timeout_secs = $24,
                 audit_timeout_secs = $25,
                 revise_timeout_secs = $26,
+                cache_env_overrides = $27,
                 updated_at = NOW()
             WHERE id = $1
             "#,
@@ -679,6 +687,7 @@ impl StateStore for PgStateStore {
         .bind(record.review_timeout_secs)
         .bind(record.audit_timeout_secs)
         .bind(record.revise_timeout_secs)
+        .bind(&record.cache_env_overrides)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1154,6 +1163,7 @@ mod tests {
             review_timeout_secs: None,
             audit_timeout_secs: None,
             revise_timeout_secs: None,
+            cache_env_overrides: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

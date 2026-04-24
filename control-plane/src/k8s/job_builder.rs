@@ -76,7 +76,7 @@ pub fn build_job(ctx: &LoopContext, stage: &StageConfig, cfg: &JobBuildConfig) -
     let is_test = matches!(parsed_stage, Some(Stage::Test));
 
     // FR-27: Environment variables on the agent container
-    let agent_env = build_agent_env_vars(ctx, stage, is_test, is_implement_or_revise, &cfg.cache);
+    let agent_env = build_agent_env_vars(ctx, stage, is_test, &cfg.cache);
 
     // Build volumes (FR-25, FR-26, FR-30)
     let mut volumes = build_volumes(
@@ -287,7 +287,6 @@ fn build_agent_env_vars(
     ctx: &LoopContext,
     stage: &StageConfig,
     is_test: bool,
-    is_implement_or_revise: bool,
     cache: &CacheConfig,
 ) -> Vec<EnvVar> {
     let mut env = vec![
@@ -404,11 +403,20 @@ fn build_agent_env_vars(
         }
     }
 
-    // Cache env vars for implement/revise stages. Driven by [cache.env] in
-    // nemo.toml (FR-3a). When [cache] is absent, sccache defaults are injected
-    // by NautiloopConfig::resolved_cache_config(). When disabled=true, no env
-    // vars are set. Sorted by key for deterministic pod specs.
-    if is_implement_or_revise && !cache.disabled {
+    // Cache env vars on every stage. Driven by [cache.env] in nemo.toml
+    // (FR-3a). When [cache] is absent, the common defaults are injected
+    // by NautiloopConfig::resolved_cache_config(). When disabled=true,
+    // no env vars are set. Sorted by key for deterministic pod specs.
+    //
+    // Previously gated on IMPLEMENT/REVISE. That meant audit/review pods
+    // (which routinely run `bun install`, `npm test`, etc. against the
+    // live repo to verify a spec) had no path-aware env vars and cold-
+    // started every filesystem cache on every retry. The /cache mount
+    // is now present on every stage (read-only on review/audit), so
+    // the env vars need to reach those stages too — a `BUN_INSTALL_CACHE_DIR`
+    // pointing at `/cache/bun` is a pure loss when `/cache` isn't there,
+    // and a pure win the moment it is.
+    if !cache.disabled {
         let mut keys: Vec<&String> = cache.env.keys().collect();
         keys.sort();
         for key in keys {
@@ -589,13 +597,23 @@ fn build_agent_mounts(
         },
     ];
 
-    // FR-2a: Mount shared cache PVC at /cache for IMPLEMENT/REVISE only.
-    // Review/audit are read-only stages. Test is per-service.
-    // FR-3d: Skip mount when cache is disabled.
-    if is_implement_or_revise && !cache.disabled {
+    // Mount the shared cache PVC at /cache on every stage.
+    //
+    // Earlier versions gated this on IMPLEMENT/REVISE on the theory
+    // that review/audit are "read-only" stages and shouldn't pollute
+    // the cache. In practice audit and review drive `bun install`,
+    // `npm test`, and similar real commands against the live repo, so
+    // cold-starting every filesystem cache per retry is a pure loss
+    // for operators — and the `[cache.env]` block on nemo.toml then
+    // silently dropped because the env vars referenced `/cache/...`
+    // paths that didn't exist. Mount read-only on review/audit so
+    // they can read existing cache entries without mutating them.
+    // Implement/revise and test remain read-write.
+    if !cache.disabled {
         mounts.push(VolumeMount {
             name: "cache".to_string(),
             mount_path: "/cache".to_string(),
+            read_only: Some(is_review_or_audit),
             ..Default::default()
         });
     }
@@ -784,7 +802,7 @@ mod tests {
             git_repo_url: "git@github.com:test-org/test-repo.git".to_string(),
             ssh_known_hosts_configmap: "nautiloop-ssh-known-hosts".to_string(),
             skip_iptables: false,
-            cache: CacheConfig::sccache_defaults(),
+            cache: CacheConfig::common_defaults(),
         }
     }
 
@@ -1371,31 +1389,84 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_env_vars_not_on_review() {
-        // NFR-3: Zero cache env vars on review/audit/test stages.
-        let ctx = test_ctx();
-        let stage = StageConfig {
-            name: "review".to_string(),
-            timeout: Duration::from_secs(900),
-            ..Default::default()
-        };
-        let mut cfg = test_cfg();
-        let mut env = std::collections::HashMap::new();
-        env.insert("FOO".to_string(), "/cache/foo".to_string());
-        cfg.cache = CacheConfig {
-            disabled: false,
-            env,
-        };
+    fn test_cache_env_vars_on_review_and_audit() {
+        // v0.7.13 regression guard (inverts earlier NFR-3): audit /
+        // review pods routinely run `bun install`, `npm test`,
+        // etc. against the live repo to verify a spec. Dropping their
+        // cache env vars silently broke [cache.env] for the two
+        // stages that need it most. Now they receive the same env
+        // vars as implement/revise (with a read-only /cache mount
+        // so they can't clobber the cache).
+        for stage_name in ["review", "audit"] {
+            let ctx = test_ctx();
+            let stage = StageConfig {
+                name: stage_name.to_string(),
+                timeout: Duration::from_secs(900),
+                ..Default::default()
+            };
+            let mut cfg = test_cfg();
+            let mut env = std::collections::HashMap::new();
+            env.insert("FOO".to_string(), "/cache/foo".to_string());
+            cfg.cache = CacheConfig {
+                disabled: false,
+                env,
+            };
 
+            let job = build_job(&ctx, &stage, &cfg);
+            let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+            let env_vars = agent.env.as_ref().unwrap();
+            let foo = env_vars.iter().find(|e| e.name == "FOO");
+            assert!(
+                foo.is_some(),
+                "cache env vars must reach the {stage_name} stage"
+            );
+            assert_eq!(foo.unwrap().value.as_deref(), Some("/cache/foo"));
+        }
+    }
+
+    #[test]
+    fn test_cache_mount_read_only_on_review_and_audit() {
+        // Complement to the env-var test: the `/cache` volume mount
+        // is present on review/audit but read-only so those stages
+        // can read existing cache entries without mutating them.
+        for stage_name in ["review", "audit"] {
+            let ctx = test_ctx();
+            let stage = StageConfig {
+                name: stage_name.to_string(),
+                timeout: Duration::from_secs(900),
+                ..Default::default()
+            };
+            let cfg = test_cfg();
+
+            let job = build_job(&ctx, &stage, &cfg);
+            let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+            let mounts = agent.volume_mounts.as_ref().unwrap();
+            let cache_mount = mounts
+                .iter()
+                .find(|m| m.mount_path == "/cache")
+                .unwrap_or_else(|| panic!("{stage_name} pod missing /cache mount"));
+            assert_eq!(
+                cache_mount.read_only,
+                Some(true),
+                "/cache on {stage_name} must be read-only"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cache_mount_read_write_on_implement() {
+        let ctx = test_ctx();
+        let stage = test_stage(); // implement
+        let cfg = test_cfg();
         let job = build_job(&ctx, &stage, &cfg);
         let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
-        let env_vars = agent.env.as_ref().unwrap();
-
-        // FOO should not be in env for review stage
-        assert!(
-            !env_vars.iter().any(|e| e.name == "FOO"),
-            "cache env vars must not appear on review stage"
-        );
+        let mounts = agent.volume_mounts.as_ref().unwrap();
+        let cache_mount = mounts
+            .iter()
+            .find(|m| m.mount_path == "/cache")
+            .expect("implement pod missing /cache mount");
+        // read_only: None or Some(false) both mean writable.
+        assert_ne!(cache_mount.read_only, Some(true));
     }
 
     #[test]
@@ -1502,28 +1573,47 @@ mod tests {
     }
 
     #[test]
-    fn test_sccache_defaults_on_implement() {
-        // NFR-3: Default sccache env vars appear on implement when using defaults.
-        let ctx = test_ctx();
-        let stage = test_stage(); // implement
-        let cfg = test_cfg(); // Uses CacheConfig::sccache_defaults()
+    fn test_common_cache_defaults_on_every_stage() {
+        // v0.7.13: the default cache env block now spans Rust + JS
+        // toolchains and ships on every stage, not just implement.
+        // This test locks the "default env reaches audit/review"
+        // invariant that motivated the v0.7.13 fix.
+        for stage_name in ["implement", "revise", "test", "review", "audit"] {
+            let ctx = test_ctx();
+            let stage = StageConfig {
+                name: stage_name.to_string(),
+                timeout: Duration::from_secs(900),
+                ..Default::default()
+            };
+            let cfg = test_cfg();
 
-        let job = build_job(&ctx, &stage, &cfg);
-        let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
-        let env_vars = agent.env.as_ref().unwrap();
+            let job = build_job(&ctx, &stage, &cfg);
+            let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+            let env_vars = agent.env.as_ref().unwrap();
 
-        let find_env = |name: &str| -> Option<String> {
-            env_vars
-                .iter()
-                .find(|e| e.name == name)
-                .and_then(|e| e.value.clone())
-        };
+            let find_env = |name: &str| -> Option<String> {
+                env_vars
+                    .iter()
+                    .find(|e| e.name == name)
+                    .and_then(|e| e.value.clone())
+            };
 
-        // Sccache defaults
-        assert_eq!(find_env("RUSTC_WRAPPER").unwrap(), "sccache");
-        assert_eq!(find_env("SCCACHE_DIR").unwrap(), "/cache/sccache");
-        assert_eq!(find_env("SCCACHE_CACHE_SIZE").unwrap(), "15G");
-        assert_eq!(find_env("SCCACHE_IDLE_TIMEOUT").unwrap(), "0");
+            assert_eq!(
+                find_env("RUSTC_WRAPPER").unwrap(),
+                "sccache",
+                "sccache default missing on {stage_name}"
+            );
+            assert_eq!(
+                find_env("BUN_INSTALL_CACHE_DIR").unwrap(),
+                "/cache/bun",
+                "bun default missing on {stage_name}"
+            );
+            assert_eq!(
+                find_env("PLAYWRIGHT_BROWSERS_PATH").unwrap(),
+                "/cache/playwright",
+                "playwright default missing on {stage_name}"
+            );
+        }
     }
 
     #[test]
@@ -1555,8 +1645,12 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_not_mounted_on_test_stage() {
-        // FR-2a: Test stages do NOT get the /cache mount.
+    fn test_cache_mounted_read_write_on_test_stage() {
+        // v0.7.13 (inverts prior FR-2a): test stages DO get the /cache
+        // mount read-write. Filesystem caches are the whole point of
+        // the test stage — sccache, Vitest cache, Playwright browser
+        // download cache — and the prior "read-only pods only" gate
+        // meant every test retry cold-started every cache.
         let ctx = test_ctx();
         let stage = StageConfig {
             name: "test".to_string(),
@@ -1568,9 +1662,14 @@ mod tests {
         let job = build_job(&ctx, &stage, &cfg);
         let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
         let mounts = agent.volume_mounts.as_ref().unwrap();
-        assert!(
-            !mounts.iter().any(|m| m.mount_path == "/cache"),
-            "/cache mount must not appear on test stage"
+        let cache_mount = mounts
+            .iter()
+            .find(|m| m.mount_path == "/cache")
+            .expect("test pod missing /cache mount");
+        assert_ne!(
+            cache_mount.read_only,
+            Some(true),
+            "test stage writes to cache (sccache, vitest); must be read-write"
         );
     }
 }

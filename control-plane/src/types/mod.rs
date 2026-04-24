@@ -308,6 +308,12 @@ pub struct LoopRecord {
     pub review_timeout_secs: Option<i32>,
     pub audit_timeout_secs: Option<i32>,
     pub revise_timeout_secs: Option<i32>,
+    /// Per-loop `[cache.env]` overrides plumbed from the repo-level
+    /// `nemo.toml` by the CLI at submit time. Merged with the
+    /// cluster-default cache env at stage-dispatch; per-loop keys win
+    /// on collisions. `None` means no override (use cluster default
+    /// verbatim). Shape: `{"BUN_INSTALL_CACHE_DIR": "/cache/bun", ...}`.
+    pub cache_env_overrides: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

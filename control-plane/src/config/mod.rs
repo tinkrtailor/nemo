@@ -123,12 +123,13 @@ impl NautiloopConfig {
     /// Resolve the cache configuration for the job builder.
     ///
     /// Three cases (FR-3b):
-    /// - `None` (absent `[cache]` section) → inject sccache defaults
+    /// - `None` (absent `[cache]` section) → inject common defaults
+    ///   (Rust + JS toolchain paths under `/cache/<tool>`).
     /// - `Some(CacheConfig { disabled: true, .. })` → no mount, no env vars
     /// - `Some(CacheConfig { disabled: false, env })` → use env as-is (may be empty)
     pub fn resolved_cache_config(&self) -> CacheConfig {
         match &self.cache {
-            None => CacheConfig::sccache_defaults(),
+            None => CacheConfig::common_defaults(),
             Some(c) => c.clone(),
         }
     }
@@ -619,19 +620,21 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_resolved_cache_absent_injects_sccache_defaults() {
-        // NFR-3: absent [cache] section (None) → sccache defaults injected.
+    fn test_resolved_cache_absent_injects_common_defaults() {
+        // v0.7.13: absent [cache] section (None) → common defaults
+        // (Rust + JS toolchain) injected. Older releases only injected
+        // sccache env vars here, which meant JS monorepos got zero
+        // cache paths even with /cache mounted.
         let config = NautiloopConfig {
             cache: None,
             ..Default::default()
         };
         let resolved = config.resolved_cache_config();
         assert!(!resolved.disabled);
-        assert_eq!(resolved.env.len(), 4);
         assert_eq!(resolved.env["RUSTC_WRAPPER"], "sccache");
-        assert_eq!(resolved.env["SCCACHE_DIR"], "/cache/sccache");
-        assert_eq!(resolved.env["SCCACHE_CACHE_SIZE"], "15G");
-        assert_eq!(resolved.env["SCCACHE_IDLE_TIMEOUT"], "0");
+        assert_eq!(resolved.env["BUN_INSTALL_CACHE_DIR"], "/cache/bun");
+        assert_eq!(resolved.env["PNPM_STORE_PATH"], "/cache/pnpm");
+        assert_eq!(resolved.env["TURBO_CACHE_DIR"], "/cache/turbo");
     }
 
     #[test]

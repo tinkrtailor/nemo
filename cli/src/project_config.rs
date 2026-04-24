@@ -68,12 +68,32 @@ impl TimeoutsSection {
     }
 }
 
+/// `[cache]` + `[cache.env]` block from repo-level `nemo.toml`.
+/// Mirrors the server-side `CacheConfig` just enough to read env
+/// overrides; the `disabled` flag stays server-side only since a
+/// per-loop "disable cache" doesn't really make sense (operators
+/// would set `[cache] disabled = true` on the cluster config, not
+/// per-loop).
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct CacheSection {
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+impl CacheSection {
+    pub fn is_empty(&self) -> bool {
+        self.env.is_empty()
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ProjectTomlShape {
     #[serde(default)]
     models: ModelsSection,
     #[serde(default)]
     timeouts: TimeoutsSection,
+    #[serde(default)]
+    cache: CacheSection,
 }
 
 /// Walk up from `start` looking for `nemo.toml`. Returns its directory
@@ -122,6 +142,21 @@ pub fn load_project_timeouts(start: &Path) -> Result<TimeoutsSection> {
     let contents = std::fs::read_to_string(&path)?;
     let parsed: ProjectTomlShape = toml::from_str(&contents)?;
     Ok(parsed.timeouts)
+}
+
+/// Load `[cache.env]` from the nearest `./nemo.toml`, walking up from
+/// `start`. Returns an empty section when no file is found or the
+/// section is absent. Used at submit time so repo-level cache env
+/// overrides flow through to the K8s Job spec instead of being
+/// silently dropped by the server (same bug shape as [timeouts] was
+/// before v0.7.12).
+pub fn load_project_cache_env(start: &Path) -> Result<CacheSection> {
+    let Some(path) = find_project_toml(start) else {
+        return Ok(CacheSection::default());
+    };
+    let contents = std::fs::read_to_string(&path)?;
+    let parsed: ProjectTomlShape = toml::from_str(&contents)?;
+    Ok(parsed.cache)
 }
 
 /// Resolve the effective (implementor, reviewer) model pair using the

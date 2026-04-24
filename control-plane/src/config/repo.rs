@@ -27,18 +27,58 @@ pub struct CacheConfig {
 }
 
 impl CacheConfig {
-    /// Sccache defaults injected when `[cache]` is absent from nemo.toml.
-    /// Byte-identical to #130 behavior.
-    pub fn sccache_defaults() -> Self {
+    /// Default cache env vars injected when `[cache]` is absent from
+    /// nemo.toml. Covers the common Rust + JS toolchain so operators
+    /// whose monorepo fits the 80th-percentile shape (Cargo, Bun,
+    /// pnpm, Turborepo, Vitest, Playwright) get a warm cache across
+    /// retries out of the box. Setting a single env var to a
+    /// `/cache/<tool>` path is cheap — if the tool is absent the env
+    /// var is ignored; if present it hits the shared PVC on every
+    /// stage.
+    ///
+    /// Operators who want to prune the list or add repo-specific
+    /// entries can still do so via `[cache.env]` in `nemo.toml`; any
+    /// keys set there override the corresponding defaults, and any
+    /// new keys are layered on top.
+    pub fn common_defaults() -> Self {
         let mut env = HashMap::new();
+        // Rust: sccache compilation cache.
         env.insert("RUSTC_WRAPPER".to_string(), "sccache".to_string());
         env.insert("SCCACHE_DIR".to_string(), "/cache/sccache".to_string());
         env.insert("SCCACHE_CACHE_SIZE".to_string(), "15G".to_string());
         env.insert("SCCACHE_IDLE_TIMEOUT".to_string(), "0".to_string());
+        // JS package-manager + build caches. These all key on
+        // `/cache/<tool>` to match the PVC layout that implement/
+        // audit/review pods mount. No-op when the tool is not on the
+        // PATH — setting e.g. `BUN_INSTALL_CACHE_DIR` in a non-Bun
+        // repo is harmless.
+        env.insert(
+            "BUN_INSTALL_CACHE_DIR".to_string(),
+            "/cache/bun".to_string(),
+        );
+        env.insert("NPM_CONFIG_CACHE".to_string(), "/cache/npm".to_string());
+        env.insert("PNPM_STORE_PATH".to_string(), "/cache/pnpm".to_string());
+        env.insert("YARN_GLOBAL_FOLDER".to_string(), "/cache/yarn".to_string());
+        env.insert("TURBO_CACHE_DIR".to_string(), "/cache/turbo".to_string());
+        // Test-runner caches.
+        env.insert("VITEST_CACHE_DIR".to_string(), "/cache/vitest".to_string());
+        env.insert(
+            "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+            "/cache/playwright".to_string(),
+        );
         Self {
             disabled: false,
             env,
         }
+    }
+
+    /// Back-compat alias. Earlier releases exposed the defaults via
+    /// `sccache_defaults`; renamed to reflect that the list now spans
+    /// the JS toolchain too. Kept for callers outside this crate
+    /// during the deprecation window.
+    #[deprecated(note = "use `common_defaults()` — the list is no longer sccache-only")]
+    pub fn sccache_defaults() -> Self {
+        Self::common_defaults()
     }
 }
 
@@ -426,14 +466,26 @@ mod tests {
     }
 
     #[test]
-    fn test_sccache_defaults() {
-        let defaults = CacheConfig::sccache_defaults();
+    fn test_common_defaults() {
+        let defaults = CacheConfig::common_defaults();
         assert!(!defaults.disabled);
-        assert_eq!(defaults.env.len(), 4);
+        // Rust sccache group.
         assert_eq!(defaults.env["RUSTC_WRAPPER"], "sccache");
         assert_eq!(defaults.env["SCCACHE_DIR"], "/cache/sccache");
         assert_eq!(defaults.env["SCCACHE_CACHE_SIZE"], "15G");
         assert_eq!(defaults.env["SCCACHE_IDLE_TIMEOUT"], "0");
+        // JS package-manager caches.
+        assert_eq!(defaults.env["BUN_INSTALL_CACHE_DIR"], "/cache/bun");
+        assert_eq!(defaults.env["NPM_CONFIG_CACHE"], "/cache/npm");
+        assert_eq!(defaults.env["PNPM_STORE_PATH"], "/cache/pnpm");
+        assert_eq!(defaults.env["YARN_GLOBAL_FOLDER"], "/cache/yarn");
+        assert_eq!(defaults.env["TURBO_CACHE_DIR"], "/cache/turbo");
+        // Test-runner caches.
+        assert_eq!(defaults.env["VITEST_CACHE_DIR"], "/cache/vitest");
+        assert_eq!(
+            defaults.env["PLAYWRIGHT_BROWSERS_PATH"],
+            "/cache/playwright"
+        );
     }
 
     #[test]

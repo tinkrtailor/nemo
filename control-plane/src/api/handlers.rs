@@ -263,6 +263,11 @@ pub async fn start(
             .as_ref()
             .and_then(|t| t.revise_secs)
             .map(|s| s as i32),
+        cache_env_overrides: req
+            .cache_env
+            .as_ref()
+            .filter(|m| !m.is_empty())
+            .and_then(|m| serde_json::to_value(m).ok()),
         created_at: now,
         updated_at: now,
     };
@@ -872,7 +877,8 @@ pub async fn resume(
         })
         .unwrap_or(false);
     let mut updated_timeout = record.stage_timeout_secs;
-    if req.stage_timeout_secs.is_some() || has_per_stage {
+    let has_cache_env = req.cache_env.is_some();
+    if req.stage_timeout_secs.is_some() || has_per_stage || has_cache_env {
         if let Some(0) = req.stage_timeout_secs {
             return Err(NautiloopError::BadRequest(
                 "stage_timeout_secs must be a positive integer (minimum 300)".to_string(),
@@ -899,6 +905,15 @@ pub async fn resume(
             if let Some(s) = t.revise_secs {
                 updated.revise_timeout_secs = Some(s as i32);
             }
+        }
+        // Cache env replacement semantics: present → replace wholesale;
+        // absent → leave existing overrides untouched. Empty map clears.
+        if let Some(ref m) = req.cache_env {
+            updated.cache_env_overrides = if m.is_empty() {
+                None
+            } else {
+                serde_json::to_value(m).ok()
+            };
         }
         state.store.update_loop(&updated).await?;
     }
@@ -1598,6 +1613,7 @@ mod tests {
             review_timeout_secs: None,
             audit_timeout_secs: None,
             revise_timeout_secs: None,
+            cache_env_overrides: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1666,6 +1682,7 @@ mod tests {
             review_timeout_secs: None,
             audit_timeout_secs: None,
             revise_timeout_secs: None,
+            cache_env_overrides: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1728,6 +1745,7 @@ mod tests {
             review_timeout_secs: None,
             audit_timeout_secs: None,
             revise_timeout_secs: None,
+            cache_env_overrides: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -2598,6 +2616,7 @@ mod tests {
             review_timeout_secs: None,
             audit_timeout_secs: None,
             revise_timeout_secs: None,
+            cache_env_overrides: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
