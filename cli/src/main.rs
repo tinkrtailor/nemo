@@ -434,6 +434,14 @@ enum Commands {
         #[arg(long)]
         ssh: bool,
 
+        /// Push GitHub PAT only. Extracted via `gh auth token` so the
+        /// engineer's existing `gh auth login` setup is the source of
+        /// truth. Stored in the engineer's K8s secret under the
+        /// `github` key and mounted as `GH_TOKEN` in agent pods so
+        /// `gh pr create` works without re-prompting.
+        #[arg(long)]
+        github: bool,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -1298,6 +1306,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             claude,
             openai,
             ssh,
+            github,
             json,
         } => {
             commands::auth::run(
@@ -1308,6 +1317,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 claude,
                 openai,
                 ssh,
+                github,
                 json,
             )
             .await?;

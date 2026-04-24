@@ -377,6 +377,39 @@ fn build_agent_env_vars(
         "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 9091 localhost",
     ));
 
+    // GH_TOKEN for `gh pr create` from the agent. Pulled from the
+    // engineer's `nautiloop-creds-{engineer}` secret under the
+    // `github` key (populated by `nemo auth --github` from the
+    // engineer's local `gh auth token`). Marked optional so pods
+    // whose engineer hasn't run `nemo auth --github` still start —
+    // the eventual `gh pr create` will fail with the upstream
+    // "not authenticated" message, which is the same situation we
+    // had pre-v0.7.15 and is at least an obvious failure rather
+    // than a startup crash. Once the engineer runs `nemo auth
+    // --github` and re-dispatches, the env appears.
+    //
+    // This is a deliberate exception to the "secrets never touch
+    // the agent" rule (CLAUDE.md): GitHub PR creation is genuinely
+    // an agent-side operation and proxying gh CLI through a sidecar
+    // route would require either re-implementing the GitHub REST
+    // API or forking gh — both of which are larger surface area
+    // than the existing sidecar's git+ssh path. The token is scoped
+    // to the engineer's PAT (already limited by their gh login)
+    // and lives only in the pod's env, not on disk.
+    let safe_engineer: String = ctx.engineer.to_lowercase().replace('_', "-");
+    env.push(EnvVar {
+        name: "GH_TOKEN".to_string(),
+        value_from: Some(k8s_openapi::api::core::v1::EnvVarSource {
+            secret_key_ref: Some(k8s_openapi::api::core::v1::SecretKeySelector {
+                name: format!("nautiloop-creds-{safe_engineer}"),
+                key: "github".to_string(),
+                optional: Some(true),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+
     // FR-7: Session ID for round > 1
     if let Some(ref session_id) = ctx.session_id {
         env.push(env_var("SESSION_ID", session_id));
@@ -1105,6 +1138,44 @@ mod tests {
         assert_eq!(
             git_url.value.as_deref(),
             Some("git@github.com:test-org/test-repo.git")
+        );
+    }
+
+    #[test]
+    fn test_build_job_gh_token_env_from_engineer_secret() {
+        // v0.7.15: GH_TOKEN injected as an env var pulled from the
+        // engineer's secret under the `github` key, marked optional
+        // so pods don't fail to start when an engineer hasn't yet
+        // run `nemo auth --github`. Locked by this test because
+        // dropping the optional flag silently breaks every loop
+        // submitted before the operator has set up their PAT.
+        let ctx = test_ctx();
+        let stage = test_stage();
+        let cfg = test_cfg();
+        let job = build_job(&ctx, &stage, &cfg);
+        let agent = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let env = agent.env.as_ref().unwrap();
+        let gh_token = env
+            .iter()
+            .find(|e| e.name == "GH_TOKEN")
+            .expect("GH_TOKEN env var must be set on the agent container");
+        let value_from = gh_token
+            .value_from
+            .as_ref()
+            .expect("GH_TOKEN must use valueFrom, not a literal value");
+        let secret_ref = value_from
+            .secret_key_ref
+            .as_ref()
+            .expect("GH_TOKEN valueFrom must be a secretKeyRef");
+        // Engineer slug (alice in the test fixture) is lowercased
+        // and underscore-replaced to match the existing
+        // `nautiloop-creds-{engineer}` convention.
+        assert_eq!(secret_ref.name, "nautiloop-creds-alice");
+        assert_eq!(secret_ref.key, "github");
+        assert_eq!(
+            secret_ref.optional,
+            Some(true),
+            "the github key must be optional so pods start before nemo auth --github"
         );
     }
 

@@ -35,6 +35,7 @@ pub async fn run(
     claude: bool,
     openai: bool,
     ssh: bool,
+    github: bool,
     json: bool,
 ) -> Result<()> {
     if engineer.is_empty() {
@@ -51,9 +52,12 @@ pub async fn run(
     if ssh {
         providers.push("ssh");
     }
-    // Default: all three if none specified
+    if github {
+        providers.push("github");
+    }
+    // Default: all four if none specified
     if providers.is_empty() {
-        providers = vec!["claude", "openai", "ssh"];
+        providers = vec!["claude", "openai", "ssh", "github"];
     }
 
     let mut any_registered = false;
@@ -100,7 +104,88 @@ pub async fn run(
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
                 format!("{home}/.ssh/id_ed25519")
             }
+            "github" => {
+                // Sentinel — there is no "credential file" for GitHub.
+                // We extract the PAT via `gh auth token` further down,
+                // which is the gh CLI's documented way to surface
+                // whatever auth backend (PAT, device flow, secrets
+                // manager) the engineer has configured. Using a
+                // non-path string here lets the existence check below
+                // (`std::path::Path::new(&cred_path).exists()`) fall
+                // through to our explicit github branch.
+                "<gh-auth-token>".to_string()
+            }
             _ => continue,
+        };
+
+        // Provider-specific override: for `github`, run `gh auth token`
+        // to extract the PAT from the engineer's gh config. This is
+        // what `gh` itself uses for `gh pr create`, so we get exactly
+        // the same auth path the agent pod will use at run time.
+        let github_token: Option<String> = if *provider == "github" {
+            match std::process::Command::new("gh")
+                .arg("auth")
+                .arg("token")
+                .arg("--hostname")
+                .arg("github.com")
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if s.is_empty() {
+                        let msg =
+                            "gh auth token returned empty output; run `gh auth login --hostname github.com` first".to_string();
+                        if !json {
+                            eprintln!("Error: {msg}");
+                        }
+                        messages.push(msg);
+                        json_results.push(AuthProviderResult {
+                            provider: provider.to_string(),
+                            status: "error".to_string(),
+                            messages,
+                        });
+                        any_error = true;
+                        continue;
+                    }
+                    Some(s)
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let msg = format!(
+                        "gh auth token failed (exit {}): {stderr}. Run `gh auth login --hostname github.com`.",
+                        out.status,
+                    );
+                    if !json {
+                        eprintln!("Error: {msg}");
+                    }
+                    messages.push(msg);
+                    json_results.push(AuthProviderResult {
+                        provider: provider.to_string(),
+                        status: "error".to_string(),
+                        messages,
+                    });
+                    any_error = true;
+                    continue;
+                }
+                Err(e) => {
+                    let msg = format!(
+                        "could not invoke gh CLI: {e}. Install gh and run `gh auth login --hostname github.com`."
+                    );
+                    if !json {
+                        eprintln!("Error: {msg}");
+                    }
+                    messages.push(msg);
+                    json_results.push(AuthProviderResult {
+                        provider: provider.to_string(),
+                        status: "error".to_string(),
+                        messages,
+                    });
+                    any_error = true;
+                    continue;
+                }
+            }
+        } else {
+            None
         };
 
         // For claude on macOS: if the disk file is missing but the keychain has a
@@ -122,7 +207,10 @@ pub async fn run(
                 None
             };
 
-        if !std::path::Path::new(&cred_path).exists() && claude_keychain_fallback.is_none() {
+        if *provider != "github"
+            && !std::path::Path::new(&cred_path).exists()
+            && claude_keychain_fallback.is_none()
+        {
             if !json {
                 eprintln!("No {provider} credentials found at {cred_path}");
                 match *provider {
@@ -141,15 +229,18 @@ pub async fn run(
                 messages,
             });
             // If the provider was explicitly requested (not default "all"), treat as error
-            if claude || openai || ssh {
+            if claude || openai || ssh || github {
                 any_error = true;
             }
             continue;
         }
 
         // Read the credential file. For Claude on macOS, prefer a fresh
-        // keychain entry over a stale disk file.
-        let content = {
+        // keychain entry over a stale disk file. For GitHub, the
+        // token came from `gh auth token` above, not a file.
+        let content = if let Some(token) = github_token.clone() {
+            token
+        } else {
             let file_content = std::fs::read_to_string(&cred_path);
             if *provider == "claude" {
                 let now = crate::claude_creds::now_ms();
