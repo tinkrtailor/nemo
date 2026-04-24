@@ -593,6 +593,7 @@ impl ConvergentLoopDriver {
             .unwrap_or(0);
 
         let base_timestamp = chrono::Utc::now();
+        let mut appended = 0usize;
         for (offset, line) in new_lines.into_iter().skip(overlap).enumerate() {
             self.store
                 .append_log(&LogEvent {
@@ -604,6 +605,24 @@ impl ConvergentLoopDriver {
                     line,
                 })
                 .await?;
+            appended += 1;
+        }
+
+        // Heartbeat: any new log bytes from the agent pod count as
+        // forward progress. Surfaced in `nemo status` so an operator
+        // can distinguish "still working" from "wedged on dead
+        // credentials" without kubectl-exec'ing to read /proc.
+        // Best-effort — a heartbeat write failure should never tank
+        // a tick (the rest of the reconciler doesn't depend on this
+        // column).
+        if appended > 0
+            && let Err(e) = self.store.touch_last_activity(loop_id).await
+        {
+            tracing::debug!(
+                loop_id = %loop_id,
+                error = %e,
+                "Heartbeat write failed; status will show stale last_activity_at"
+            );
         }
 
         Ok(())
@@ -2480,7 +2499,17 @@ impl ConvergentLoopDriver {
 
         // Now create the K8s Job
         match self.dispatcher.create_job(job).await {
-            Ok(name) => Ok(name),
+            Ok(name) => {
+                // Heartbeat: the dispatch itself is a forward-progress
+                // signal — the loop has a live pod (or will momentarily).
+                // Without this initial bump, a new loop sits with
+                // last_activity_at=NULL until the agent emits its
+                // first log line, which on a slow image pull can be a
+                // few minutes and looks indistinguishable from "stuck"
+                // in `nemo status`.
+                let _ = self.store.touch_last_activity(record.id).await;
+                Ok(name)
+            }
             Err(e) => {
                 // K8s creation failed: clear job name so next tick can retry
                 record.active_job_name = None;
@@ -2822,6 +2851,7 @@ mod tests {
                 audit_timeout_secs: None,
                 revise_timeout_secs: None,
                 cache_env_overrides: None,
+                last_activity_at: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }
@@ -2916,6 +2946,7 @@ mod tests {
             audit_timeout_secs: None,
             revise_timeout_secs: None,
             cache_env_overrides: None,
+            last_activity_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

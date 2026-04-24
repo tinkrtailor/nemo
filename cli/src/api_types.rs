@@ -75,6 +75,12 @@ pub struct LoopSummary {
     pub model_reviewer: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Heartbeat from the reconciler (ISO-8601 string). `None` for
+    /// loops that have never had a pod. Surfaced in `nemo status`
+    /// as a relative "Xm ago" so operators can spot wedged loops
+    /// without exec'ing into the cluster.
+    #[serde(default)]
+    pub last_activity_at: Option<String>,
 }
 
 /// GET /pod-introspect/:loop_id response.

@@ -113,6 +113,13 @@ pub struct LoopSummary {
     pub model_reviewer: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Heartbeat: most recent moment the reconciler observed forward
+    /// progress (new log bytes from the agent pod, or initial dispatch).
+    /// `None` for loops that have never had a pod (e.g. PENDING). The
+    /// CLI renders this as a relative "Xm ago" so operators can spot
+    /// wedged loops without exec'ing into the cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
 }
 
 /// GET /status query parameters.

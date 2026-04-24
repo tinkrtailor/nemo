@@ -3,6 +3,7 @@ mod claude_creds;
 mod client;
 mod commands;
 mod config;
+mod preflight;
 mod project_config;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -1107,6 +1108,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 project_config::load_project_timeouts(&std::env::current_dir()?)?;
             let project_cache_env =
                 project_config::load_project_cache_env(&std::env::current_dir()?)?;
+            preflight::render_and_decide(&preflight::run_all().await?)?;
             claude_creds::ensure_fresh(&http_client, engineer, eng_name, eng_email).await?;
             commands::start::run(
                 &http_client,
@@ -1144,6 +1146,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 project_config::load_project_timeouts(&std::env::current_dir()?)?;
             let project_cache_env =
                 project_config::load_project_cache_env(&std::env::current_dir()?)?;
+            preflight::render_and_decide(&preflight::run_all().await?)?;
             claude_creds::ensure_fresh(&http_client, engineer, eng_name, eng_email).await?;
             commands::start::run(
                 &http_client,
@@ -1176,6 +1179,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 project_config::load_project_timeouts(&std::env::current_dir()?)?;
             let project_cache_env =
                 project_config::load_project_cache_env(&std::env::current_dir()?)?;
+            preflight::render_and_decide(&preflight::run_all().await?)?;
             claude_creds::ensure_fresh(&http_client, engineer, eng_name, eng_email).await?;
             commands::start::run(
                 &http_client,

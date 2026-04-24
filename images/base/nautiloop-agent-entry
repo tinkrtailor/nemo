@@ -17,6 +17,54 @@ while [ ! -f "$READY_FILE" ]; do
     sleep 0.1
 done
 
+# --- Auth-degraded watchdog ---
+#
+# The sidecar's model proxy writes /tmp/shared/auth-degraded after N
+# consecutive OAuth refresh failures (see sidecar/src/model_proxy.rs
+# AUTH_DEGRADED_THRESHOLD). When that file appears we abort the
+# stage with the "auth expired" exit code so the control plane maps
+# the failure to AWAITING_REAUTH instead of burning the rest of the
+# stage budget on opencode's exponential retry of 502s.
+#
+# Background-poll every 5s. On detection: emit a NAUTILOOP_RESULT
+# error envelope so `nemo logs` shows the cause, then SIGTERM the
+# main entrypoint PID. tini (PID 1) propagates the signal to the
+# whole pod and the K8s Job picks up exit 42 → AuthExpired.
+AUTH_DEGRADED_FLAG="/tmp/shared/auth-degraded"
+MAIN_PID=$$
+(
+    while true; do
+        if [ -f "$AUTH_DEGRADED_FLAG" ]; then
+            reason=$(cat "$AUTH_DEGRADED_FLAG" 2>/dev/null || echo "unknown")
+            echo "NAUTILOOP_ERROR: sidecar reported auth-degraded; aborting stage" >&2
+            # Best-effort jq — if absent we still emit a parseable line.
+            if command -v jq >/dev/null 2>&1; then
+                jq -nc \
+                    --arg stage "${STAGE:-unknown}" \
+                    --arg reason "$reason" \
+                    '{stage: $stage, data: {exit_code: 42, error: ("Auth expired: " + $reason)}}' \
+                    | sed 's/^/NAUTILOOP_RESULT:/'
+            else
+                printf 'NAUTILOOP_RESULT:{"stage":"%s","data":{"exit_code":42,"error":"Auth expired"}}\n' \
+                    "${STAGE:-unknown}"
+            fi
+            # Signal the entrypoint. set -e on the main script will
+            # propagate; we don't use kill -KILL so cleanup traps
+            # (if any) get a chance to run.
+            kill -TERM "$MAIN_PID" 2>/dev/null || true
+            sleep 5
+            kill -KILL "$MAIN_PID" 2>/dev/null || true
+            exit 42
+        fi
+        sleep 5
+    done
+) &
+AUTH_WATCHDOG_PID=$!
+trap 'kill "$AUTH_WATCHDOG_PID" 2>/dev/null || true' EXIT
+# Map SIGTERM (from the watchdog above) to the agent-expired exit code
+# so the K8s Job carries the right signal up to the control plane.
+trap 'exit 42' TERM
+
 # --- Validate required environment variables (Edge Case: Template variable not set) ---
 required_vars="STAGE SPEC_PATH BRANCH SHA ROUND LOOP_ID"
 missing=""

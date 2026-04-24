@@ -2636,6 +2636,7 @@ mod tests {
             model_reviewer: None,
             created_at: updated_at.to_string(),
             updated_at: updated_at.to_string(),
+            last_activity_at: None,
         }
     }
 

@@ -174,6 +174,10 @@ fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
             .try_get::<Option<serde_json::Value>, _>("cache_env_overrides")
             .ok()
             .flatten(),
+        last_activity_at: row
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_activity_at")
+            .ok()
+            .flatten(),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -353,6 +357,7 @@ impl StateStore for PgStateStore {
                 implement_timeout_secs, test_timeout_secs, review_timeout_secs,
                 audit_timeout_secs, revise_timeout_secs,
                 cache_env_overrides,
+                last_activity_at,
                 created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6::loop_kind,
@@ -366,7 +371,8 @@ impl StateStore for PgStateStore {
                 $34, $35, $36,
                 $37, $38,
                 $39,
-                $40, $41
+                $40,
+                $41, $42
             )
             RETURNING *
             "#,
@@ -410,6 +416,7 @@ impl StateStore for PgStateStore {
         .bind(record.audit_timeout_secs)
         .bind(record.revise_timeout_secs)
         .bind(&record.cache_env_overrides)
+        .bind(record.last_activity_at)
         .bind(record.created_at)
         .bind(record.updated_at)
         .fetch_one(&self.pool)
@@ -712,6 +719,19 @@ impl StateStore for PgStateStore {
         sqlx::query("UPDATE loops SET current_sha = $2, updated_at = NOW() WHERE id = $1")
             .bind(id)
             .bind(sha)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn touch_last_activity(&self, id: Uuid) -> Result<()> {
+        // Narrow update by design — does NOT bump `updated_at` so
+        // unrelated reconciler decisions that hinge on
+        // `updated_at >= X` (resume races, replacement-loop checks)
+        // aren't perturbed by a heartbeat write. The heartbeat is a
+        // separate signal from "the row was edited".
+        sqlx::query("UPDATE loops SET last_activity_at = NOW() WHERE id = $1")
+            .bind(id)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -1164,6 +1184,7 @@ mod tests {
             audit_timeout_secs: None,
             revise_timeout_secs: None,
             cache_env_overrides: None,
+            last_activity_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

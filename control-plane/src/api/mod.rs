@@ -226,6 +226,9 @@ mod tests {
         async fn set_current_sha(&self, _: Uuid, _: &str) -> crate::error::Result<()> {
             unimplemented!()
         }
+        async fn touch_last_activity(&self, _: Uuid) -> crate::error::Result<()> {
+            unimplemented!()
+        }
         async fn has_active_loop_for_branch(&self, _: &str) -> crate::error::Result<bool> {
             unimplemented!()
         }
