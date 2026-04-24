@@ -150,6 +150,26 @@ fn row_to_loop_record(row: &PgRow) -> Result<LoopRecord> {
             .try_get::<Option<i32>, _>("stage_timeout_secs")
             .ok()
             .flatten(),
+        implement_timeout_secs: row
+            .try_get::<Option<i32>, _>("implement_timeout_secs")
+            .ok()
+            .flatten(),
+        test_timeout_secs: row
+            .try_get::<Option<i32>, _>("test_timeout_secs")
+            .ok()
+            .flatten(),
+        review_timeout_secs: row
+            .try_get::<Option<i32>, _>("review_timeout_secs")
+            .ok()
+            .flatten(),
+        audit_timeout_secs: row
+            .try_get::<Option<i32>, _>("audit_timeout_secs")
+            .ok()
+            .flatten(),
+        revise_timeout_secs: row
+            .try_get::<Option<i32>, _>("revise_timeout_secs")
+            .ok()
+            .flatten(),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -326,6 +346,8 @@ impl StateStore for PgStateStore {
                 model_reviewer, merge_sha, merged_at, hardened_spec_path, spec_pr_url,
                 resolved_default_branch,
                 stage_timeout_secs,
+                implement_timeout_secs, test_timeout_secs, review_timeout_secs,
+                audit_timeout_secs, revise_timeout_secs,
                 created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6::loop_kind,
@@ -336,7 +358,9 @@ impl StateStore for PgStateStore {
                 $27, $28, $29, $30, $31,
                 $32,
                 $33,
-                $34, $35
+                $34, $35, $36,
+                $37, $38,
+                $39, $40
             )
             RETURNING *
             "#,
@@ -374,6 +398,11 @@ impl StateStore for PgStateStore {
         .bind(&record.spec_pr_url)
         .bind(&record.resolved_default_branch)
         .bind(record.stage_timeout_secs)
+        .bind(record.implement_timeout_secs)
+        .bind(record.test_timeout_secs)
+        .bind(record.review_timeout_secs)
+        .bind(record.audit_timeout_secs)
+        .bind(record.revise_timeout_secs)
         .bind(record.created_at)
         .bind(record.updated_at)
         .fetch_one(&self.pool)
@@ -615,6 +644,11 @@ impl StateStore for PgStateStore {
                 failed_from_state = $19::loop_state,
                 max_rounds = $20,
                 stage_timeout_secs = $21,
+                implement_timeout_secs = $22,
+                test_timeout_secs = $23,
+                review_timeout_secs = $24,
+                audit_timeout_secs = $25,
+                revise_timeout_secs = $26,
                 updated_at = NOW()
             WHERE id = $1
             "#,
@@ -640,6 +674,11 @@ impl StateStore for PgStateStore {
         .bind(record.failed_from_state.map(loop_state_str))
         .bind(record.max_rounds)
         .bind(record.stage_timeout_secs)
+        .bind(record.implement_timeout_secs)
+        .bind(record.test_timeout_secs)
+        .bind(record.review_timeout_secs)
+        .bind(record.audit_timeout_secs)
+        .bind(record.revise_timeout_secs)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1110,6 +1149,11 @@ mod tests {
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
             stage_timeout_secs: None,
+            implement_timeout_secs: None,
+            test_timeout_secs: None,
+            review_timeout_secs: None,
+            audit_timeout_secs: None,
+            revise_timeout_secs: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

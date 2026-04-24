@@ -11,6 +11,20 @@ locals {
     ((var.domain == null || var.domain == "") ? false : null)
   )
 
+  # Render a [timeouts] block only if the operator provided at least
+  # one override. Unset stages fall through to the control-plane's
+  # compile-time defaults (7200s / 3600s) — emitting `key = null` in
+  # TOML would break the parser, so we build the block line by line.
+  _timeout_lines = var.timeouts == null ? [] : compact([
+    var.timeouts.implement_secs != null ? "implement_secs = ${var.timeouts.implement_secs}" : "",
+    var.timeouts.review_secs != null ? "review_secs = ${var.timeouts.review_secs}" : "",
+    var.timeouts.test_secs != null ? "test_secs = ${var.timeouts.test_secs}" : "",
+    var.timeouts.audit_secs != null ? "audit_secs = ${var.timeouts.audit_secs}" : "",
+    var.timeouts.revise_secs != null ? "revise_secs = ${var.timeouts.revise_secs}" : "",
+    var.timeouts.watchdog_secs != null ? "watchdog_secs = ${var.timeouts.watchdog_secs}" : "",
+  ])
+  _timeouts_block = length(local._timeout_lines) == 0 ? "" : "\n[timeouts]\n${join("\n", local._timeout_lines)}\n"
+
   nautiloop_toml = <<-TOML
 [cluster]
 git_repo_url = "${var.git_repo_url}"
@@ -18,6 +32,7 @@ agent_image = "${var.agent_base_image}"
 sidecar_image = "${var.sidecar_image}"
 ${var.image_pull_secret_dockerconfigjson != null ? "image_pull_secret = \"nautiloop-registry-creds\"" : ""}
 ${local._dashboard_secure_cookie_resolved != null ? "dashboard_secure_cookie = ${local._dashboard_secure_cookie_resolved}" : ""}
+${local._timeouts_block}
 TOML
 
   config_checksum = sha256(local.nautiloop_toml)

@@ -238,6 +238,31 @@ pub async fn start(
                 .to_string(),
         ),
         stage_timeout_secs: req.stage_timeout_secs.map(|s| s as i32),
+        implement_timeout_secs: req
+            .timeouts
+            .as_ref()
+            .and_then(|t| t.implement_secs)
+            .map(|s| s as i32),
+        test_timeout_secs: req
+            .timeouts
+            .as_ref()
+            .and_then(|t| t.test_secs)
+            .map(|s| s as i32),
+        review_timeout_secs: req
+            .timeouts
+            .as_ref()
+            .and_then(|t| t.review_secs)
+            .map(|s| s as i32),
+        audit_timeout_secs: req
+            .timeouts
+            .as_ref()
+            .and_then(|t| t.audit_secs)
+            .map(|s| s as i32),
+        revise_timeout_secs: req
+            .timeouts
+            .as_ref()
+            .and_then(|t| t.revise_secs)
+            .map(|s| s as i32),
         created_at: now,
         updated_at: now,
     };
@@ -829,22 +854,53 @@ pub async fn resume(
         });
     }
 
-    // If the caller supplied a new --stage-timeout, persist it before
-    // raising the resume flag so the next reconciler tick's redispatch
-    // picks up the larger budget. The driver's resolve_stage_timeout
-    // floors this at 300s; we also reject <1 here to keep "unset"
-    // distinct from "explicit zero".
+    // If the caller supplied a new --stage-timeout or per-stage
+    // overrides, persist them before raising the resume flag so the
+    // next reconciler tick's redispatch picks up the larger budget.
+    // `resolve_stage_timeout` floors all explicit values at 300s; we
+    // also reject 0 here to keep "unset" distinct from "explicit
+    // zero".
+    let has_per_stage = req
+        .timeouts
+        .as_ref()
+        .map(|t| {
+            t.implement_secs.is_some()
+                || t.test_secs.is_some()
+                || t.review_secs.is_some()
+                || t.audit_secs.is_some()
+                || t.revise_secs.is_some()
+        })
+        .unwrap_or(false);
     let mut updated_timeout = record.stage_timeout_secs;
-    if let Some(secs) = req.stage_timeout_secs {
-        if secs == 0 {
+    if req.stage_timeout_secs.is_some() || has_per_stage {
+        if let Some(0) = req.stage_timeout_secs {
             return Err(NautiloopError::BadRequest(
                 "stage_timeout_secs must be a positive integer (minimum 300)".to_string(),
             ));
         }
         let mut updated = record.clone();
-        updated.stage_timeout_secs = Some(secs as i32);
+        if let Some(secs) = req.stage_timeout_secs {
+            updated.stage_timeout_secs = Some(secs as i32);
+            updated_timeout = Some(secs as i32);
+        }
+        if let Some(ref t) = req.timeouts {
+            if let Some(s) = t.implement_secs {
+                updated.implement_timeout_secs = Some(s as i32);
+            }
+            if let Some(s) = t.test_secs {
+                updated.test_timeout_secs = Some(s as i32);
+            }
+            if let Some(s) = t.review_secs {
+                updated.review_timeout_secs = Some(s as i32);
+            }
+            if let Some(s) = t.audit_secs {
+                updated.audit_timeout_secs = Some(s as i32);
+            }
+            if let Some(s) = t.revise_secs {
+                updated.revise_timeout_secs = Some(s as i32);
+            }
+        }
         state.store.update_loop(&updated).await?;
-        updated_timeout = Some(secs as i32);
     }
 
     state
@@ -1537,6 +1593,11 @@ mod tests {
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
             stage_timeout_secs: None,
+            implement_timeout_secs: None,
+            test_timeout_secs: None,
+            review_timeout_secs: None,
+            audit_timeout_secs: None,
+            revise_timeout_secs: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1600,6 +1661,11 @@ mod tests {
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
             stage_timeout_secs: None,
+            implement_timeout_secs: None,
+            test_timeout_secs: None,
+            review_timeout_secs: None,
+            audit_timeout_secs: None,
+            revise_timeout_secs: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1657,6 +1723,11 @@ mod tests {
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
             stage_timeout_secs: None,
+            implement_timeout_secs: None,
+            test_timeout_secs: None,
+            review_timeout_secs: None,
+            audit_timeout_secs: None,
+            revise_timeout_secs: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -2522,6 +2593,11 @@ mod tests {
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
             stage_timeout_secs: None,
+            implement_timeout_secs: None,
+            test_timeout_secs: None,
+            review_timeout_secs: None,
+            audit_timeout_secs: None,
+            revise_timeout_secs: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

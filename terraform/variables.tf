@@ -123,3 +123,16 @@ variable "image_pull_secret_dockerconfigjson" {
   default     = null
   sensitive   = true
 }
+
+variable "timeouts" {
+  description = "Cluster-wide [timeouts] overrides for stage Jobs. See module docs for precedence."
+  type = object({
+    implement_secs = optional(number)
+    review_secs    = optional(number)
+    test_secs      = optional(number)
+    audit_secs     = optional(number)
+    revise_secs    = optional(number)
+    watchdog_secs  = optional(number)
+  })
+  default = null
+}

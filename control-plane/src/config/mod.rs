@@ -328,23 +328,32 @@ impl TimeoutConfig {
     }
 }
 
+// Defaults bumped in 0.7.12: the prior 900s / 1800s budgets were too
+// aggressive for real-world specs. A 32 KB spec audited by
+// `opencode --format json -m openai/gpt-5.4` against a real monorepo
+// consistently exceeded 15 min, tripping `activeDeadlineSeconds` before
+// the stage produced a verdict. The new floor is roomy enough that the
+// deadline is genuinely a watchdog, not an expected-runtime gate.
+// Operators who want tighter budgets can override via the [timeouts]
+// block on the server's nemo.toml ConfigMap (terraform var
+// `timeouts`), or per-loop via `--stage-timeout` on the CLI.
 fn default_implement_timeout() -> u64 {
-    1800
+    7200
 }
 fn default_review_timeout() -> u64 {
-    900
+    3600
 }
 fn default_test_timeout() -> u64 {
-    1800
+    7200
 }
 fn default_audit_timeout() -> u64 {
-    900
+    3600
 }
 fn default_revise_timeout() -> u64 {
-    900
+    3600
 }
 fn default_watchdog_timeout() -> u64 {
-    900
+    3600
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -527,8 +536,8 @@ mod tests {
         let config = NautiloopConfig::default();
         assert_eq!(config.limits.max_rounds_harden, 10);
         assert_eq!(config.limits.max_rounds_implement, 15);
-        assert_eq!(config.timeouts.implement_secs, 1800);
-        assert_eq!(config.timeouts.review_secs, 900);
+        assert_eq!(config.timeouts.implement_secs, 7200);
+        assert_eq!(config.timeouts.review_secs, 3600);
         assert_eq!(config.cluster.max_connections, 20);
         assert_eq!(config.cluster.reconcile_interval_secs, 5);
     }
@@ -536,9 +545,11 @@ mod tests {
     #[test]
     fn test_timeout_durations() {
         let config = TimeoutConfig::default();
-        assert_eq!(config.implement_duration(), Duration::from_secs(1800));
-        assert_eq!(config.review_duration(), Duration::from_secs(900));
-        assert_eq!(config.test_duration(), Duration::from_secs(1800));
+        assert_eq!(config.implement_duration(), Duration::from_secs(7200));
+        assert_eq!(config.review_duration(), Duration::from_secs(3600));
+        assert_eq!(config.test_duration(), Duration::from_secs(7200));
+        assert_eq!(config.audit_duration(), Duration::from_secs(3600));
+        assert_eq!(config.revise_duration(), Duration::from_secs(3600));
     }
 
     #[test]
@@ -559,7 +570,7 @@ mod tests {
         assert_eq!(config.limits.max_rounds_harden, 5);
         assert_eq!(config.limits.max_rounds_implement, 10);
         assert_eq!(config.timeouts.implement_secs, 3600);
-        assert_eq!(config.timeouts.review_secs, 900); // default
+        assert_eq!(config.timeouts.review_secs, 3600); // default
         assert_eq!(config.models.implementor, "claude-sonnet-4");
     }
 

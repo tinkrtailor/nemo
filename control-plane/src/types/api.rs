@@ -29,6 +29,29 @@ pub struct StartRequest {
     /// Floored to 300s server-side to avoid nonsense values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_timeout_secs: Option<u32>,
+    /// Optional per-stage overrides read from the repo-level `nemo.toml`
+    /// `[timeouts]` block. Any stage left `None` falls through to the
+    /// uniform `stage_timeout_secs` (if set) or the cluster default.
+    /// Per-stage wins over uniform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeouts: Option<StageTimeouts>,
+}
+
+/// Per-stage `activeDeadlineSeconds` overrides mirroring the
+/// `[timeouts]` block in `nemo.toml`. All fields optional so operators
+/// can pin just the stage(s) they care about; the rest fall through.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StageTimeouts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implement_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revise_secs: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +162,12 @@ pub struct ResumeRequest {
     /// Applies from the next redispatch onward. Floored to 300s server-side.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_timeout_secs: Option<u32>,
+    /// Optional per-stage overrides (mirrors `[timeouts]` in nemo.toml).
+    /// Each field overrides the corresponding stage's deadline for
+    /// future redispatches. Fields left `None` preserve whatever was
+    /// already pinned on the loop row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeouts: Option<StageTimeouts>,
 }
 
 /// POST /resume/:id response body.

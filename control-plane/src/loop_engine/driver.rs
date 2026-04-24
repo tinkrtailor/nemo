@@ -2192,7 +2192,11 @@ impl ConvergentLoopDriver {
                     .unwrap_or_else(|| self.config.models.reviewer.clone()),
             ),
             prompt_template: Some(".nautiloop/prompts/spec-audit.md".to_string()),
-            timeout: resolve_stage_timeout(record, self.config.timeouts.audit_duration()),
+            timeout: resolve_stage_timeout(
+                record,
+                record.audit_timeout_secs,
+                self.config.timeouts.audit_duration(),
+            ),
             max_retries: 2,
         }
     }
@@ -2207,7 +2211,11 @@ impl ConvergentLoopDriver {
                     .unwrap_or_else(|| self.config.models.implementor.clone()),
             ),
             prompt_template: Some(".nautiloop/prompts/spec-revise.md".to_string()),
-            timeout: resolve_stage_timeout(record, self.config.timeouts.revise_duration()),
+            timeout: resolve_stage_timeout(
+                record,
+                record.revise_timeout_secs,
+                self.config.timeouts.revise_duration(),
+            ),
             max_retries: 2,
         }
     }
@@ -2222,7 +2230,11 @@ impl ConvergentLoopDriver {
                     .unwrap_or_else(|| self.config.models.implementor.clone()),
             ),
             prompt_template: Some(".nautiloop/prompts/implement.md".to_string()),
-            timeout: resolve_stage_timeout(record, self.config.timeouts.implement_duration()),
+            timeout: resolve_stage_timeout(
+                record,
+                record.implement_timeout_secs,
+                self.config.timeouts.implement_duration(),
+            ),
             max_retries: 2,
         }
     }
@@ -2232,7 +2244,11 @@ impl ConvergentLoopDriver {
             name: "test".to_string(),
             model: None,
             prompt_template: None,
-            timeout: resolve_stage_timeout(record, self.config.timeouts.test_duration()),
+            timeout: resolve_stage_timeout(
+                record,
+                record.test_timeout_secs,
+                self.config.timeouts.test_duration(),
+            ),
             max_retries: 2,
         }
     }
@@ -2247,7 +2263,11 @@ impl ConvergentLoopDriver {
                     .unwrap_or_else(|| self.config.models.reviewer.clone()),
             ),
             prompt_template: Some(".nautiloop/prompts/review.md".to_string()),
-            timeout: resolve_stage_timeout(record, self.config.timeouts.review_duration()),
+            timeout: resolve_stage_timeout(
+                record,
+                record.review_timeout_secs,
+                self.config.timeouts.review_duration(),
+            ),
             max_retries: 2,
         }
     }
@@ -2261,24 +2281,37 @@ impl ConvergentLoopDriver {
     }
 
     /// Resolve the effective stage timeout for the loop's current state.
-    /// Returns `None` for non-active stages (Pending, Failed, etc.). The
-    /// per-loop `stage_timeout_secs` override, when set, supersedes the
-    /// cluster default; otherwise falls back to the matching
-    /// `Timeouts::*_duration()` value from config.
+    /// Returns `None` for non-active stages (Pending, Failed, etc.).
+    /// Applies the same precedence as the stage-config helpers:
+    /// per-stage override > uniform override > cluster default.
     fn stage_timeout_for(&self, record: &LoopRecord) -> Option<std::time::Duration> {
-        let default = match record.state {
+        let (per_stage, default) = match record.state {
             LoopState::Hardening => {
-                // Hardening can be audit or revise; pick based on the
-                // most recent round's stage (same logic as job name
-                // derivation in delete_stale_failed_attempts).
-                self.config.timeouts.audit_duration()
+                // Hardening is audit or revise; we can't know which
+                // without the last round record, so bias toward audit
+                // (the more common case) when picking the override
+                // column. The default side uses audit for the same
+                // reason.
+                (
+                    record.audit_timeout_secs,
+                    self.config.timeouts.audit_duration(),
+                )
             }
-            LoopState::Implementing => self.config.timeouts.implement_duration(),
-            LoopState::Testing => self.config.timeouts.test_duration(),
-            LoopState::Reviewing => self.config.timeouts.review_duration(),
+            LoopState::Implementing => (
+                record.implement_timeout_secs,
+                self.config.timeouts.implement_duration(),
+            ),
+            LoopState::Testing => (
+                record.test_timeout_secs,
+                self.config.timeouts.test_duration(),
+            ),
+            LoopState::Reviewing => (
+                record.review_timeout_secs,
+                self.config.timeouts.review_duration(),
+            ),
             _ => return None,
         };
-        Some(resolve_stage_timeout(record, default))
+        Some(resolve_stage_timeout(record, per_stage, default))
     }
 
     fn max_retries_for_stage(&self, _state: LoopState) -> u32 {
@@ -2599,17 +2632,35 @@ impl ConvergentLoopDriver {
     }
 }
 
-/// Resolve the effective per-stage timeout for a loop record. If the
-/// record carries an explicit override (from `--stage-timeout` at
-/// submit or resume time), that wins; otherwise the stage's
-/// cluster-default duration is returned. Enforces a 300s floor to
-/// avoid nonsense values from CLI typos.
-fn resolve_stage_timeout(record: &LoopRecord, default: std::time::Duration) -> std::time::Duration {
+/// Resolve the effective timeout for a specific stage on a loop record.
+///
+/// Precedence (first set wins):
+///
+/// 1. Per-stage override on the record (from repo-level `nemo.toml`
+///    `[timeouts]` block plumbed through the CLI at submit time).
+/// 2. Uniform `stage_timeout_secs` (CLI `--stage-timeout`).
+/// 3. Cluster-default duration passed as `default`.
+///
+/// Every explicit override is floored at 300s to prevent CLI typos
+/// from producing a deadline that fires before the pod finishes
+/// pulling its image.
+fn resolve_stage_timeout(
+    record: &LoopRecord,
+    per_stage: Option<i32>,
+    default: std::time::Duration,
+) -> std::time::Duration {
     const FLOOR_SECS: u64 = 300;
-    match record.stage_timeout_secs {
-        Some(secs) if secs > 0 => std::time::Duration::from_secs((secs as u64).max(FLOOR_SECS)),
-        _ => default,
+    if let Some(secs) = per_stage
+        && secs > 0
+    {
+        return std::time::Duration::from_secs((secs as u64).max(FLOOR_SECS));
     }
+    if let Some(secs) = record.stage_timeout_secs
+        && secs > 0
+    {
+        return std::time::Duration::from_secs((secs as u64).max(FLOOR_SECS));
+    }
+    default
 }
 
 /// Detect if a job failure reason indicates expired credentials.
@@ -2660,6 +2711,105 @@ mod tests {
             .await;
     }
 
+    #[test]
+    fn resolve_stage_timeout_precedence_per_stage_beats_uniform_beats_default() {
+        // v0.7.12 regression guard: per-stage override (from nemo.toml
+        // [timeouts]) must win over the uniform --stage-timeout
+        // override, which must win over the cluster default. If this
+        // breaks, operators who pin `audit_secs = 3600` in nemo.toml
+        // silently get whatever the cluster was shipped with.
+        use crate::types::LoopRecord;
+        use chrono::Utc;
+        use std::time::Duration;
+
+        fn blank() -> LoopRecord {
+            LoopRecord {
+                id: uuid::Uuid::new_v4(),
+                engineer: "alice".to_string(),
+                spec_path: "x.md".to_string(),
+                spec_content_hash: "h".to_string(),
+                branch: "agent/alice/x-h".to_string(),
+                kind: LoopKind::Harden,
+                state: LoopState::Hardening,
+                sub_state: None,
+                round: 1,
+                max_rounds: 10,
+                harden: true,
+                harden_only: false,
+                auto_approve: false,
+                cancel_requested: false,
+                approve_requested: false,
+                resume_requested: false,
+                paused_from_state: None,
+                reauth_from_state: None,
+                failed_from_state: None,
+                failure_reason: None,
+                current_sha: None,
+                opencode_session_id: None,
+                claude_session_id: None,
+                active_job_name: None,
+                retry_count: 0,
+                ship_mode: false,
+                model_implementor: None,
+                model_reviewer: None,
+                merge_sha: None,
+                merged_at: None,
+                hardened_spec_path: None,
+                spec_pr_url: None,
+                resolved_default_branch: Some("main".to_string()),
+                stage_timeout_secs: None,
+                implement_timeout_secs: None,
+                test_timeout_secs: None,
+                review_timeout_secs: None,
+                audit_timeout_secs: None,
+                revise_timeout_secs: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        let default = Duration::from_secs(900);
+
+        // 1. No overrides → cluster default.
+        let r = blank();
+        assert_eq!(resolve_stage_timeout(&r, None, default), default);
+
+        // 2. Uniform override only → applies to every stage.
+        let mut r = blank();
+        r.stage_timeout_secs = Some(2700);
+        assert_eq!(
+            resolve_stage_timeout(&r, None, default),
+            Duration::from_secs(2700)
+        );
+
+        // 3. Per-stage override only → beats default even without uniform.
+        let mut r = blank();
+        r.audit_timeout_secs = Some(3600);
+        assert_eq!(
+            resolve_stage_timeout(&r, r.audit_timeout_secs, default),
+            Duration::from_secs(3600)
+        );
+
+        // 4. Per-stage wins over uniform when BOTH are set.
+        let mut r = blank();
+        r.stage_timeout_secs = Some(1800);
+        r.audit_timeout_secs = Some(3600);
+        assert_eq!(
+            resolve_stage_timeout(&r, r.audit_timeout_secs, default),
+            Duration::from_secs(3600),
+            "per-stage must win over uniform"
+        );
+
+        // 5. Floor: a 60s typo gets clamped to 300s, not honoured.
+        let mut r = blank();
+        r.audit_timeout_secs = Some(60);
+        assert_eq!(
+            resolve_stage_timeout(&r, r.audit_timeout_secs, default),
+            Duration::from_secs(300),
+            "300s floor must apply to per-stage overrides"
+        );
+    }
+
     fn make_pending_loop(auto_approve: bool) -> LoopRecord {
         LoopRecord {
             id: Uuid::new_v4(),
@@ -2701,6 +2851,11 @@ mod tests {
             spec_pr_url: None,
             resolved_default_branch: Some("main".to_string()),
             stage_timeout_secs: None,
+            implement_timeout_secs: None,
+            test_timeout_secs: None,
+            review_timeout_secs: None,
+            audit_timeout_secs: None,
+            revise_timeout_secs: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

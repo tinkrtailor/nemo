@@ -213,3 +213,39 @@ variable "judge_claude_credentials" {
   default     = null
   sensitive   = true
 }
+
+# --- Cluster-wide [timeouts] for stage Jobs ---
+
+variable "timeouts" {
+  description = <<-EOT
+    Cluster-wide per-stage `activeDeadlineSeconds` budgets, mirroring
+    the [timeouts] block in nemo.toml. Each stage is optional; unset
+    stages use the control-plane's compile-time defaults (7200s for
+    implement/test, 3600s for everything else). Operators who run
+    larger specs can raise these once via terraform instead of
+    editing every loop's nemo.toml.
+
+    Per-loop overrides still apply on top of these defaults: `nemo
+    harden --stage-timeout` wins uniformly, and the repo-level
+    nemo.toml [timeouts] plumbed by the CLI wins per-stage.
+  EOT
+  type = object({
+    implement_secs = optional(number)
+    review_secs    = optional(number)
+    test_secs      = optional(number)
+    audit_secs     = optional(number)
+    revise_secs    = optional(number)
+    watchdog_secs  = optional(number)
+  })
+  default = null
+
+  validation {
+    condition = (
+      var.timeouts == null
+      || alltrue([
+        for k, v in var.timeouts : v == null || v >= 300
+      ])
+    )
+    error_message = "Every timeouts.*_secs value must be >= 300 (server floor). Set null to inherit the compile-time default."
+  }
+}

@@ -290,12 +290,24 @@ pub struct LoopRecord {
     /// Resolved default branch name (e.g., "main"), frozen at loop creation.
     /// Used for PR --base and merge SHA resolution.
     pub resolved_default_branch: Option<String>,
-    /// Optional per-loop override for the `activeDeadlineSeconds`
+    /// Optional per-loop uniform override for the `activeDeadlineSeconds`
     /// budget on every stage's K8s Job (CLI `--stage-timeout=<secs>`).
-    /// When `None`, the cluster-default timeouts from config apply.
-    /// Persisted so `nemo resume --stage-timeout=<larger>` can raise
-    /// the budget without re-submitting the spec.
+    /// When `None`, per-stage overrides (below) win, then the cluster
+    /// default. Persisted so `nemo resume --stage-timeout=<larger>` can
+    /// raise the budget without re-submitting the spec.
     pub stage_timeout_secs: Option<i32>,
+    /// Per-stage `activeDeadlineSeconds` overrides plumbed from the
+    /// repo-level `nemo.toml` `[timeouts]` block by the CLI at submit
+    /// time. Each `Some(n)` pins that stage's deadline to `n` seconds
+    /// (300s floor enforced server-side). `None` falls through to the
+    /// uniform override, then the cluster default. Per-stage beats
+    /// uniform because operators sometimes want a long audit budget
+    /// without also extending every implement stage.
+    pub implement_timeout_secs: Option<i32>,
+    pub test_timeout_secs: Option<i32>,
+    pub review_timeout_secs: Option<i32>,
+    pub audit_timeout_secs: Option<i32>,
+    pub revise_timeout_secs: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

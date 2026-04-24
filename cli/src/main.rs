@@ -1103,6 +1103,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &nemo_config.models)?;
+            let project_timeouts =
+                project_config::load_project_timeouts(&std::env::current_dir()?)?;
             claude_creds::ensure_fresh(&http_client, engineer, eng_name, eng_email).await?;
             commands::start::run(
                 &http_client,
@@ -1116,6 +1118,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     model_impl,
                     model_review,
                     stage_timeout_secs: stage_timeout,
+                    project_timeouts,
                 },
             )
             .await?;
@@ -1134,6 +1137,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &nemo_config.models)?;
+            let project_timeouts =
+                project_config::load_project_timeouts(&std::env::current_dir()?)?;
             claude_creds::ensure_fresh(&http_client, engineer, eng_name, eng_email).await?;
             commands::start::run(
                 &http_client,
@@ -1147,6 +1152,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     model_impl,
                     model_review,
                     stage_timeout_secs: stage_timeout,
+                    project_timeouts,
                 },
             )
             .await?;
@@ -1160,6 +1166,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             let (model_impl, model_review) =
                 project_config::resolve_models(model_impl, model_review, &nemo_config.models)?;
+            let project_timeouts =
+                project_config::load_project_timeouts(&std::env::current_dir()?)?;
             claude_creds::ensure_fresh(&http_client, engineer, eng_name, eng_email).await?;
             commands::start::run(
                 &http_client,
@@ -1173,6 +1181,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     model_impl,
                     model_review,
                     stage_timeout_secs: stage_timeout,
+                    project_timeouts,
                 },
             )
             .await?;

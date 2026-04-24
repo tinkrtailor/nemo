@@ -64,13 +64,18 @@ default_branch = "{default_branch}"
 max_rounds_harden = 10
 max_rounds_implement = 15
 
+# Per-stage K8s Job `activeDeadlineSeconds` overrides. These flow
+# through to every `nemo harden` / `nemo start` / `nemo ship` run
+# submitted from this repo — the CLI attaches them to the submit
+# request and the server pins them on the loop record so retries and
+# resumes inherit the budget. Floor enforced at 300s server-side.
 [timeouts]
-implement_secs = 1800
-review_secs = 900
-test_secs = 1800
-audit_secs = 900
-revise_secs = 900
-watchdog_secs = 900
+implement_secs = 7200
+review_secs    = 3600
+test_secs      = 7200
+audit_secs     = 3600
+revise_secs    = 3600
+watchdog_secs  = 3600
 
 [models]
 implementor = "claude-opus-4"

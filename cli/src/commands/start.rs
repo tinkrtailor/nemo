@@ -22,6 +22,11 @@ pub struct StartArgs<'a> {
     /// Optional per-stage Job `activeDeadlineSeconds` override. Uniform
     /// across all stages. Server-side floored to 300s.
     pub stage_timeout_secs: Option<u32>,
+    /// Per-stage timeout overrides sourced from the repo-level
+    /// `nemo.toml` `[timeouts]` block. Attached to the submit body so
+    /// the server can stamp them on the loop record; per-stage beats
+    /// uniform `stage_timeout_secs` at stage-dispatch time.
+    pub project_timeouts: crate::project_config::TimeoutsSection,
 }
 
 pub async fn run(client: &NemoClient, args: StartArgs<'_>) -> Result<()> {
@@ -168,6 +173,11 @@ fn build_start_body(args: &StartArgs<'_>, spec_content: &str) -> serde_json::Val
         body["stage_timeout_secs"] = serde_json::json!(secs);
     }
 
+    if !args.project_timeouts.is_empty() {
+        body["timeouts"] =
+            serde_json::to_value(&args.project_timeouts).unwrap_or(serde_json::Value::Null);
+    }
+
     body
 }
 
@@ -194,6 +204,7 @@ mod tests {
             model_impl: None,
             model_review: None,
             stage_timeout_secs: None,
+            project_timeouts: Default::default(),
         };
         let body = build_start_body(&args, &content);
 
@@ -233,10 +244,68 @@ mod tests {
             model_impl: Some("claude-opus-4-6".to_string()),
             model_review: None,
             stage_timeout_secs: None,
+            project_timeouts: Default::default(),
         };
         let body = build_start_body(&args, "# Spec");
         assert!(body["model_overrides"].is_object());
         assert_eq!(body["model_overrides"]["implementor"], "claude-opus-4-6");
+    }
+
+    #[test]
+    fn test_build_start_body_includes_project_timeouts() {
+        // v0.7.12 regression guard: [timeouts] in the repo-level
+        // nemo.toml must flow through to the submit body so the server
+        // can stamp per-stage overrides on the loop record. Prior to
+        // this, `nemo init` generated [timeouts] that nothing read.
+        let args = StartArgs {
+            engineer: "alice",
+            spec_path: "specs/big.md",
+            harden: true,
+            harden_only: true,
+            auto_approve: false,
+            ship_mode: false,
+            model_impl: None,
+            model_review: None,
+            stage_timeout_secs: None,
+            project_timeouts: crate::project_config::TimeoutsSection {
+                implement_secs: Some(7200),
+                review_secs: Some(3600),
+                test_secs: Some(7200),
+                audit_secs: Some(3600),
+                revise_secs: Some(3600),
+                watchdog_secs: None,
+            },
+        };
+        let body = build_start_body(&args, "# Spec");
+        let timeouts = &body["timeouts"];
+        assert_eq!(timeouts["audit_secs"], 3600);
+        assert_eq!(timeouts["implement_secs"], 7200);
+        assert_eq!(timeouts["review_secs"], 3600);
+        assert!(
+            timeouts.get("watchdog_secs").is_none(),
+            "unset stages must not appear; server treats absent as cluster default"
+        );
+    }
+
+    #[test]
+    fn test_build_start_body_omits_empty_project_timeouts() {
+        let args = StartArgs {
+            engineer: "alice",
+            spec_path: "specs/ok.md",
+            harden: true,
+            harden_only: false,
+            auto_approve: false,
+            ship_mode: false,
+            model_impl: None,
+            model_review: None,
+            stage_timeout_secs: None,
+            project_timeouts: Default::default(),
+        };
+        let body = build_start_body(&args, "# Spec");
+        assert!(
+            body.get("timeouts").is_none(),
+            "empty [timeouts] must not be serialized (keeps request bodies clean)"
+        );
     }
 
     #[test]
@@ -251,6 +320,7 @@ mod tests {
             model_impl: None,
             model_review: None,
             stage_timeout_secs: None,
+            project_timeouts: Default::default(),
         };
         let body = build_start_body(&args, "# Spec");
         assert!(body.get("model_overrides").is_none());
@@ -300,6 +370,7 @@ mod tests {
             model_impl: None,
             model_review: None,
             stage_timeout_secs: None,
+            project_timeouts: Default::default(),
         };
         let body = build_start_body(&args, "# Spec");
         assert_eq!(
@@ -321,6 +392,7 @@ mod tests {
             model_impl: None,
             model_review: None,
             stage_timeout_secs: None,
+            project_timeouts: Default::default(),
         };
         let body = build_start_body(&args, "# Spec");
         assert_eq!(body["harden"], false, "--no-harden must send harden: false");
@@ -406,6 +478,7 @@ mod tests {
             model_impl: None,
             model_review: None,
             stage_timeout_secs: None,
+            project_timeouts: Default::default(),
         };
         assert_eq!(
             phase_plan_label(&args),
@@ -426,6 +499,7 @@ mod tests {
             model_impl: None,
             model_review: None,
             stage_timeout_secs: None,
+            project_timeouts: Default::default(),
         };
         assert_eq!(phase_plan_label(&args), "IMPLEMENT (harden skipped)");
     }
@@ -443,6 +517,7 @@ mod tests {
             model_impl: None,
             model_review: None,
             stage_timeout_secs: None,
+            project_timeouts: Default::default(),
         };
         assert_eq!(phase_plan_label(&args), "HARDEN \u{2192} IMPLEMENT");
     }
@@ -460,6 +535,7 @@ mod tests {
             model_impl: None,
             model_review: None,
             stage_timeout_secs: None,
+            project_timeouts: Default::default(),
         };
         assert_eq!(
             phase_plan_label(&args),
@@ -480,6 +556,7 @@ mod tests {
             model_impl: None,
             model_review: None,
             stage_timeout_secs: None,
+            project_timeouts: Default::default(),
         };
         assert_eq!(phase_plan_label(&args), "HARDEN");
     }

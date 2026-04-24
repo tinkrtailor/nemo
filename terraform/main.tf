@@ -44,4 +44,6 @@ module "nautiloop" {
   ssh_known_hosts      = var.ssh_known_hosts
 
   image_pull_secret_dockerconfigjson = var.image_pull_secret_dockerconfigjson
+
+  timeouts = var.timeouts
 }

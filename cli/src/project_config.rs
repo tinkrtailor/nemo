@@ -29,10 +29,51 @@ pub struct ModelsSection {
     pub reviewer: Option<String>,
 }
 
+/// `[timeouts]` block from the repo-level `nemo.toml`, mirroring the
+/// control-plane's `TimeoutConfig`. Every field is optional so operators
+/// can pin just the stage(s) they care about; unset stages fall through
+/// to the cluster default. Sent to the control-plane on every `nemo
+/// harden/start/ship` submit so the server stamps per-stage overrides
+/// on the loop record.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct TimeoutsSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implement_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revise_secs: Option<u32>,
+    /// Watchdog is a server-side concern (no-output timeout, separate
+    /// from `activeDeadlineSeconds`); accepted here so `nemo init`'s
+    /// generated block parses cleanly without being silently rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog_secs: Option<u32>,
+}
+
+impl TimeoutsSection {
+    /// True if every field is `None` — i.e. there's nothing to send
+    /// to the server. The CLI skips attaching an empty block to keep
+    /// request bodies clean.
+    pub fn is_empty(&self) -> bool {
+        self.implement_secs.is_none()
+            && self.review_secs.is_none()
+            && self.test_secs.is_none()
+            && self.audit_secs.is_none()
+            && self.revise_secs.is_none()
+            && self.watchdog_secs.is_none()
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ProjectTomlShape {
     #[serde(default)]
     models: ModelsSection,
+    #[serde(default)]
+    timeouts: TimeoutsSection,
 }
 
 /// Walk up from `start` looking for `nemo.toml`. Returns its directory
@@ -67,6 +108,20 @@ pub fn load_project_models(start: &Path) -> Result<ModelsSection> {
     let contents = std::fs::read_to_string(&path)?;
     let parsed: ProjectTomlShape = toml::from_str(&contents)?;
     Ok(parsed.models)
+}
+
+/// Load `[timeouts]` from the nearest `./nemo.toml`, walking up from
+/// `start`. Returns an empty section if no file is found or the
+/// section is absent. Used at submit time so per-stage deadlines
+/// configured in the repo actually flow to the K8s Job spec instead
+/// of being silently dropped.
+pub fn load_project_timeouts(start: &Path) -> Result<TimeoutsSection> {
+    let Some(path) = find_project_toml(start) else {
+        return Ok(TimeoutsSection::default());
+    };
+    let contents = std::fs::read_to_string(&path)?;
+    let parsed: ProjectTomlShape = toml::from_str(&contents)?;
+    Ok(parsed.timeouts)
 }
 
 /// Resolve the effective (implementor, reviewer) model pair using the
@@ -128,7 +183,12 @@ mod tests {
     #[test]
     fn find_none_when_absent() {
         let td = tmpdir();
-        assert!(find_project_toml(td.path()).is_none());
+        let got = find_project_toml(td.path());
+        assert!(
+            got.is_none(),
+            "expected None, got {got:?} for start={:?}",
+            td.path()
+        );
     }
 
     #[test]
@@ -294,6 +354,15 @@ mod tests {
 #[cfg(test)]
 mod tempdir_lite {
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Process-wide monotonic counter. Without this, two parallel tests
+    // that call `TempDir::new` in the same nanosecond collide on the
+    // generated path (both test binaries see the same PID + nanos),
+    // and one test's fixture file bleeds into the other's workspace.
+    // find_none_when_absent then fails because a parallel
+    // load_models_parses_section wrote nemo.toml into the shared dir.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     pub struct TempDir {
         path: PathBuf,
@@ -306,7 +375,8 @@ mod tempdir_lite {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
-            base.push(format!("{prefix}-{nanos}-{}", std::process::id()));
+            let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+            base.push(format!("{prefix}-{nanos}-{}-{seq}", std::process::id()));
             std::fs::create_dir_all(&base)?;
             Ok(Self { path: base })
         }
