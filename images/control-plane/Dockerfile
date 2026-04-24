@@ -7,24 +7,22 @@ FROM rust:1.88-bookworm AS builder
 WORKDIR /build
 
 # Cache dependency layer: copy manifests first.
-# Note: the workspace includes sidecar and sidecar/tests/parity as members,
-# so cargo requires those Cargo.toml files to exist even though this image
-# only builds nautiloop-control-plane. Stub them out to keep the workspace
-# resolver happy without pulling in sidecar sources or dependencies.
+# Note: the workspace includes sidecar as a member, so cargo requires
+# sidecar/Cargo.toml to exist even though this image only builds
+# nautiloop-control-plane. Stub it out to keep the workspace resolver
+# happy without pulling in sidecar sources or dependencies.
 COPY Cargo.toml Cargo.lock ./
 COPY control-plane/Cargo.toml control-plane/Cargo.toml
 COPY cli/Cargo.toml cli/Cargo.toml
 COPY sidecar/Cargo.toml sidecar/Cargo.toml
-COPY sidecar/tests/parity/Cargo.toml sidecar/tests/parity/Cargo.toml
 
 # Create stub sources so cargo can resolve the workspace
-RUN mkdir -p control-plane/src cli/src sidecar/src sidecar/tests/parity/src && \
+RUN mkdir -p control-plane/src cli/src sidecar/src && \
     echo "fn main() {}" > control-plane/src/main.rs && \
     echo "" > control-plane/src/lib.rs && \
     echo "fn main() {}" > cli/src/main.rs && \
     echo "" > sidecar/src/lib.rs && \
-    echo "fn main() {}" > sidecar/src/main.rs && \
-    echo "fn main() {}" > sidecar/tests/parity/src/main.rs
+    echo "fn main() {}" > sidecar/src/main.rs
 
 RUN cargo build --release --package nautiloop-control-plane 2>/dev/null || true
 
