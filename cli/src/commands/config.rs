@@ -93,8 +93,12 @@ fn handle_get(
     // Special: current_profile
     if key == "current_profile" {
         // Report the resolved effective profile (FR-6g).
-        // --profile flag is ignored for this key per spec; only NAUTILOOP_PROFILE > current_profile.
-        match config.resolve_profile_name(None) {
+        // --profile flag is ignored for this key per spec; the chain is
+        // NAUTILOOP_PROFILE > repo pin (./nemo.toml [profile] name) >
+        // current_profile.
+        match config
+            .resolve_profile_name(None, crate::project_config::current_repo_pin().as_deref())
+        {
             Ok(name) => {
                 println!("{name}");
                 Ok(())
@@ -105,7 +109,10 @@ fn handle_get(
             }
         }
     } else if is_profile_key(key) {
-        let profile_name = config.resolve_profile_name(profile_flag)?;
+        let profile_name = config.resolve_profile_name(
+            profile_flag,
+            crate::project_config::current_repo_pin().as_deref(),
+        )?;
         let profile = &config.profiles[&profile_name];
 
         let value = match key {
@@ -169,7 +176,10 @@ fn handle_set(config: &mut NemoConfig, kv: &str, profile_flag: Option<&str>) -> 
     }
 
     if is_profile_key(key) {
-        let profile_name = config.resolve_profile_name(profile_flag)?;
+        let profile_name = config.resolve_profile_name(
+            profile_flag,
+            crate::project_config::current_repo_pin().as_deref(),
+        )?;
         let profile = config.profiles.get_mut(&profile_name).unwrap();
 
         match key {
@@ -252,8 +262,13 @@ fn handle_set(config: &mut NemoConfig, kv: &str, profile_flag: Option<&str>) -> 
 }
 
 fn display_config(config: &NemoConfig, profile_flag: Option<&str>, unmask: bool) -> Result<()> {
-    // Try to resolve active profile
-    let active_name = config.resolve_profile_name(profile_flag).ok();
+    // Try to resolve active profile (respecting repo pin from ./nemo.toml).
+    let active_name = config
+        .resolve_profile_name(
+            profile_flag,
+            crate::project_config::current_repo_pin().as_deref(),
+        )
+        .ok();
 
     if let Some(ref name) = active_name {
         println!("Active profile: {name}");

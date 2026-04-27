@@ -56,7 +56,10 @@ pub fn run_show(
             }
             n.to_string()
         }
-        None => config.resolve_profile_name(profile_flag)?,
+        None => config.resolve_profile_name(
+            profile_flag,
+            crate::project_config::current_repo_pin().as_deref(),
+        )?,
     };
 
     let profile = &config.profiles[&profile_name];

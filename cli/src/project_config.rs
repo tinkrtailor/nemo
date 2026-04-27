@@ -86,6 +86,22 @@ impl CacheSection {
     }
 }
 
+/// `[profile]` block from repo-level `nemo.toml`. The `name` field
+/// pins which `~/.nemo/config.toml` profile this repo's `nemo`
+/// invocations should use, so an engineer working across two
+/// nautiloop projects on the same workstation doesn't have to remember
+/// `--profile dev` vs `--profile prod` on every command.
+///
+/// Slotted into `resolve_profile_name` between the `NAUTILOOP_PROFILE`
+/// env var and the global `current_profile` — explicit `--profile` and
+/// env still win, but the repo pin overrides whatever the engineer's
+/// global "current" happens to be.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct ProfileSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ProjectTomlShape {
     #[serde(default)]
@@ -94,6 +110,8 @@ struct ProjectTomlShape {
     timeouts: TimeoutsSection,
     #[serde(default)]
     cache: CacheSection,
+    #[serde(default)]
+    profile: ProfileSection,
 }
 
 /// Walk up from `start` looking for `nemo.toml`. Returns its directory
@@ -157,6 +175,40 @@ pub fn load_project_cache_env(start: &Path) -> Result<CacheSection> {
     let contents = std::fs::read_to_string(&path)?;
     let parsed: ProjectTomlShape = toml::from_str(&contents)?;
     Ok(parsed.cache)
+}
+
+/// Load `[profile] name` from the nearest `./nemo.toml`, walking up
+/// from `start`. Returns the pinned profile name if set, `None`
+/// otherwise. Empty strings and whitespace-only values are treated
+/// as unset to match the env-var semantics in `resolve_profile_name`.
+///
+/// Errors only on a malformed nemo.toml — a missing file or a missing
+/// `[profile]` block both return `Ok(None)`. Callers slot this between
+/// the `NAUTILOOP_PROFILE` env var and the global `current_profile`.
+pub fn load_project_profile_pin(start: &Path) -> Result<Option<String>> {
+    let Some(path) = find_project_toml(start) else {
+        return Ok(None);
+    };
+    let contents = std::fs::read_to_string(&path)?;
+    let parsed: ProjectTomlShape = toml::from_str(&contents)?;
+    Ok(parsed
+        .profile
+        .name
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty()))
+}
+
+/// Convenience wrapper around `load_project_profile_pin` that walks up
+/// from `$PWD` and silently returns `None` on any I/O / parse error.
+///
+/// Used by every CLI command site that resolves a profile, so a broken
+/// `nemo.toml` doesn't take down `nemo profile show` / `nemo config
+/// --get`. The strict Result variant is reserved for the active-profile
+/// path in `main.rs` where we want a malformed file to surface as an
+/// error rather than silently degrade to `current_profile`.
+pub fn current_repo_pin() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    load_project_profile_pin(&cwd).ok().flatten()
 }
 
 /// Resolve the effective (implementor, reviewer) model pair using the
@@ -254,6 +306,55 @@ mod tests {
         let m = load_project_models(td.path()).unwrap();
         assert!(m.implementor.is_none());
         assert!(m.reviewer.is_none());
+    }
+
+    #[test]
+    fn load_profile_pin_returns_name_when_set() {
+        let td = tmpdir();
+        fs::write(td.path().join("nemo.toml"), "[profile]\nname = \"dev\"\n").unwrap();
+        let pin = load_project_profile_pin(td.path()).unwrap();
+        assert_eq!(pin.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn load_profile_pin_walks_up() {
+        let td = tmpdir();
+        fs::write(td.path().join("nemo.toml"), "[profile]\nname = \"dev\"\n").unwrap();
+        let nested = td.path().join("a").join("b");
+        fs::create_dir_all(&nested).unwrap();
+        let pin = load_project_profile_pin(&nested).unwrap();
+        assert_eq!(pin.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn load_profile_pin_none_when_no_file() {
+        let td = tmpdir();
+        let pin = load_project_profile_pin(td.path()).unwrap();
+        assert!(pin.is_none());
+    }
+
+    #[test]
+    fn load_profile_pin_none_when_section_absent() {
+        let td = tmpdir();
+        fs::write(td.path().join("nemo.toml"), "[models]\n").unwrap();
+        let pin = load_project_profile_pin(td.path()).unwrap();
+        assert!(pin.is_none());
+    }
+
+    #[test]
+    fn load_profile_pin_filters_empty_and_whitespace() {
+        // `name = ""` and `name = "   "` are both treated as unset so a
+        // half-edited nemo.toml doesn't surface a confusing pin error.
+        for value in ["\"\"", "\"   \""] {
+            let td = tmpdir();
+            fs::write(
+                td.path().join("nemo.toml"),
+                format!("[profile]\nname = {value}\n"),
+            )
+            .unwrap();
+            let pin = load_project_profile_pin(td.path()).unwrap();
+            assert!(pin.is_none(), "value {value} should be filtered to None");
+        }
     }
 
     // resolve_models touches $PWD + env, which are process-global.

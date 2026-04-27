@@ -1067,7 +1067,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
     let nemo_config = config::load_config()?;
     let profile_flag = cli.profile.as_deref();
-    let (profile_name, active_profile) = nemo_config.active_profile(profile_flag)?;
+    // Repo-level [profile] name pin: walks up from $PWD looking for
+    // nemo.toml, same way [models] / [timeouts] / [cache.env] do. Slots
+    // between NAUTILOOP_PROFILE and current_profile so a checked-in
+    // dev-cluster pin wins over the engineer's global "current" without
+    // overriding an explicit --profile or env override.
+    let repo_pin = project_config::current_repo_pin();
+    let (profile_name, active_profile) =
+        nemo_config.active_profile(profile_flag, repo_pin.as_deref())?;
 
     let server_url = cli
         .server

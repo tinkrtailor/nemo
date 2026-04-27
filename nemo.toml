@@ -1,0 +1,15 @@
+# Per-repo nemo configuration. Walks up from $PWD like .git, so any
+# `nemo` invocation inside this checkout reads from this file.
+
+# Pin the profile this repo's loops dispatch to. The CLI resolves
+# the active profile in this order:
+#   1. --profile flag
+#   2. NAUTILOOP_PROFILE env var
+#   3. [profile] name below       <- this entry
+#   4. current_profile in ~/.nemo/config.toml
+#
+# `dev` matches the profile name `dev/setup.sh` writes after a fresh
+# k3d setup. To dispatch a one-off loop against a different cluster,
+# pass --profile <name> on the invocation.
+[profile]
+name = "dev"

@@ -84,9 +84,19 @@ pub struct NemoConfig {
 
 impl NemoConfig {
     /// Resolve the active profile name from the precedence chain:
-    /// `--profile` flag > `NAUTILOOP_PROFILE` env > `current_profile`.
-    /// Returns the resolved name or an error.
-    pub fn resolve_profile_name(&self, flag: Option<&str>) -> Result<String> {
+    /// `--profile` flag > `NAUTILOOP_PROFILE` env > repo-pinned
+    /// `[profile] name` from `./nemo.toml` > `current_profile`.
+    ///
+    /// `repo_pin` is the pin loaded from the nearest `nemo.toml` walking
+    /// up from `$PWD` (see `project_config::load_project_profile_pin`).
+    /// Pass `None` if you don't want repo-level pinning to participate.
+    /// Empty / whitespace strings are filtered to `None` upstream, so
+    /// this function treats `Some("")` as "no pin" defensively too.
+    pub fn resolve_profile_name(
+        &self,
+        flag: Option<&str>,
+        repo_pin: Option<&str>,
+    ) -> Result<String> {
         // 1. --profile flag
         if let Some(name) = flag {
             if !self.profiles.contains_key(name) {
@@ -108,7 +118,24 @@ impl NemoConfig {
             }
         }
 
-        // 3. current_profile from config
+        // 3. Repo-pinned [profile] name from ./nemo.toml. Slotted above
+        // current_profile so a checked-in repo can dictate "this repo
+        // talks to the dev cluster" without every engineer remembering
+        // to switch their global current_profile when they `cd` here.
+        if let Some(pin) = repo_pin {
+            let pin = pin.trim();
+            if !pin.is_empty() {
+                if !self.profiles.contains_key(pin) {
+                    let available = self.profile_names_sorted().join(", ");
+                    anyhow::bail!(
+                        "Repo-pinned profile '{pin}' (from nemo.toml [profile] name) not found. Available: {available}."
+                    );
+                }
+                return Ok(pin.to_string());
+            }
+        }
+
+        // 4. current_profile from config
         match &self.current_profile {
             Some(name) if !name.is_empty() => {
                 if !self.profiles.contains_key(name) {
@@ -132,9 +159,15 @@ impl NemoConfig {
         }
     }
 
-    /// Get the active profile (after precedence resolution).
-    pub fn active_profile(&self, profile_flag: Option<&str>) -> Result<(&str, &ProfileConfig)> {
-        let name = self.resolve_profile_name(profile_flag)?;
+    /// Get the active profile (after precedence resolution). `repo_pin`
+    /// is forwarded to `resolve_profile_name`; see that doc for the
+    /// full chain.
+    pub fn active_profile(
+        &self,
+        profile_flag: Option<&str>,
+        repo_pin: Option<&str>,
+    ) -> Result<(&str, &ProfileConfig)> {
+        let name = self.resolve_profile_name(profile_flag, repo_pin)?;
         let profile = self.profiles.get(&name).unwrap(); // safe: resolve_profile_name checks existence
         Ok((
             // Return a reference to the key in the map (stable lifetime)
@@ -482,48 +515,44 @@ desktop_notifications = true
         assert_eq!(redact_api_key("exactly12ch"), "****");
     }
 
+    fn make_profile(server: &str) -> ProfileConfig {
+        ProfileConfig {
+            server_url: server.to_string(),
+            api_key: None,
+            engineer: "a".to_string(),
+            name: None,
+            email: None,
+        }
+    }
+
     #[test]
     fn resolve_profile_flag_wins() {
         let mut config = NemoConfig {
             current_profile: Some("default".to_string()),
             ..Default::default()
         };
-        config.profiles.insert(
-            "default".to_string(),
-            ProfileConfig {
-                server_url: "http://default".to_string(),
-                api_key: None,
-                engineer: "a".to_string(),
-                name: None,
-                email: None,
-            },
-        );
-        config.profiles.insert(
-            "work".to_string(),
-            ProfileConfig {
-                server_url: "http://work".to_string(),
-                api_key: None,
-                engineer: "b".to_string(),
-                name: None,
-                email: None,
-            },
-        );
+        config
+            .profiles
+            .insert("default".to_string(), make_profile("http://default"));
+        config
+            .profiles
+            .insert("work".to_string(), make_profile("http://work"));
 
-        let name = config.resolve_profile_name(Some("work")).unwrap();
+        let name = config.resolve_profile_name(Some("work"), None).unwrap();
         assert_eq!(name, "work");
     }
 
     #[test]
     fn resolve_profile_missing_errors() {
         let config = NemoConfig::default();
-        let err = config.resolve_profile_name(Some("nope")).unwrap_err();
+        let err = config.resolve_profile_name(Some("nope"), None).unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
     #[test]
     fn resolve_profile_cold_start() {
         let config = NemoConfig::default();
-        let err = config.resolve_profile_name(None).unwrap_err();
+        let err = config.resolve_profile_name(None, None).unwrap_err();
         assert!(err.to_string().contains("No profiles configured"));
     }
 
@@ -533,17 +562,92 @@ desktop_notifications = true
             current_profile: Some("gone".to_string()),
             ..Default::default()
         };
-        config.profiles.insert(
-            "remaining".to_string(),
-            ProfileConfig {
-                server_url: "http://x".to_string(),
-                api_key: None,
-                engineer: "a".to_string(),
-                name: None,
-                email: None,
-            },
-        );
-        let err = config.resolve_profile_name(None).unwrap_err();
+        config
+            .profiles
+            .insert("remaining".to_string(), make_profile("http://x"));
+        let err = config.resolve_profile_name(None, None).unwrap_err();
         assert!(err.to_string().contains("Active profile 'gone' not found"));
+    }
+
+    #[test]
+    fn resolve_profile_repo_pin_overrides_current_profile() {
+        // Repo pin sits above current_profile, so a checked-in nemo.toml
+        // saying [profile] name = "dev" wins over a global current_profile
+        // that points elsewhere. This is the headline behavior for an
+        // engineer working across two nautiloop projects on one workstation.
+        let mut config = NemoConfig {
+            current_profile: Some("personal".to_string()),
+            ..Default::default()
+        };
+        config
+            .profiles
+            .insert("personal".to_string(), make_profile("http://personal"));
+        config
+            .profiles
+            .insert("dev".to_string(), make_profile("http://localhost:18080"));
+
+        let name = config.resolve_profile_name(None, Some("dev")).unwrap();
+        assert_eq!(name, "dev");
+    }
+
+    #[test]
+    fn resolve_profile_flag_beats_repo_pin() {
+        // Operators override per-invocation with --profile; the flag
+        // must trump the repo's pin so a one-off `nemo --profile prod
+        // status` still works inside a dev-pinned repo.
+        let mut config = NemoConfig {
+            current_profile: Some("personal".to_string()),
+            ..Default::default()
+        };
+        config
+            .profiles
+            .insert("dev".to_string(), make_profile("http://dev"));
+        config
+            .profiles
+            .insert("prod".to_string(), make_profile("http://prod"));
+        config
+            .profiles
+            .insert("personal".to_string(), make_profile("http://personal"));
+
+        let name = config
+            .resolve_profile_name(Some("prod"), Some("dev"))
+            .unwrap();
+        assert_eq!(name, "prod");
+    }
+
+    #[test]
+    fn resolve_profile_repo_pin_unknown_errors() {
+        // A repo pin that names a profile the engineer has never set up
+        // is a hard error with a clear message, not a silent fallthrough
+        // to current_profile — silent fallthrough would mask typos in a
+        // checked-in nemo.toml.
+        let mut config = NemoConfig {
+            current_profile: Some("personal".to_string()),
+            ..Default::default()
+        };
+        config
+            .profiles
+            .insert("personal".to_string(), make_profile("http://personal"));
+
+        let err = config.resolve_profile_name(None, Some("dev")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Repo-pinned profile 'dev'"), "got: {msg}");
+        assert!(msg.contains("nemo.toml"), "got: {msg}");
+    }
+
+    #[test]
+    fn resolve_profile_empty_repo_pin_falls_through() {
+        // Defensive: caller may pass Some("") or Some("   ") if the TOML
+        // had `name = ""`. Treat as unset, fall through to current_profile.
+        let mut config = NemoConfig {
+            current_profile: Some("personal".to_string()),
+            ..Default::default()
+        };
+        config
+            .profiles
+            .insert("personal".to_string(), make_profile("http://personal"));
+
+        let name = config.resolve_profile_name(None, Some("   ")).unwrap();
+        assert_eq!(name, "personal");
     }
 }
