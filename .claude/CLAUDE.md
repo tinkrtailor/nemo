@@ -6,6 +6,13 @@
 - **Auto-commit on success**: After completing a task (tests pass, build succeeds), commit automatically without waiting to be asked (see `.claude/rules/auto-commit-on-success.md`).
 - **Conventional commits required**: All commits must follow conventional commits format - enforced by hook (see `.claude/rules/conventional-commits.md`).
 
+## Release skew (high priority)
+
+- **`/health` `version` is the control-plane binary only.** The Nautiloop stack ships three independently-tagged images (control-plane, sidecar, agent-base). They MUST be deployed at the same tag. A control plane at vN paired with a sidecar at vN-1 silently misses fixes — this is what caused the v0.7.13/.14/.15 audit failures with `Unsupported parameter: max_tokens`: the sidecar's `max_tokens → max_output_tokens` rewrite (commit 108c426) was already in source but the running sidecar pod was older.
+- **Always check `sidecar_image` and `agent_image` from `/health`.** Since v0.7.16, `GET /health` returns those fields. If any of the three differs from what you expect, halt the operation and resolve the skew before continuing — do not run `nemo harden`/`start` against a skewed cluster.
+- **Release process must update all three together.** When cutting a release, bump the workspace `Cargo.toml` version AND every `terraform/**/variables.tf` default tag (control_plane_image, sidecar_image, agent_base_image) AND `docs/deploy.md`'s example `terraform apply` snippet. The `/release` skill does this automatically; if you do it by hand, miss any one of those five and you ship skew.
+- **For local k3d dev, `dev/build.sh` builds and imports all three from the same checkout** — it cannot produce skew. The trap is remote/prod deploys where someone updates one image without the others. Check `/health` after every prod deploy.
+
 ## Rust development (high priority)
 
 - **Workspace layout**: Cargo workspace with two crates: `control-plane/` (library + binary) and `cli/` (binary).

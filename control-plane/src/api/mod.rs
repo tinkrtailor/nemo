@@ -73,24 +73,50 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// Health check that verifies Postgres connectivity.
-/// Returns 200 with `{"status":"ok","version":"...","build_info":"..."}` if the store is reachable,
-/// 503 with `{"status":"degraded","version":"...","build_info":"..."}` otherwise.
+///
+/// Response body always includes:
+///   - `version` — the control-plane crate version (`CARGO_PKG_VERSION`).
+///   - `build_info` — the control-plane git SHA at build time.
+///   - `sidecar_image` — the sidecar image tag the control plane will stamp
+///     onto every new agent Job. Configured via `cluster.sidecar_image`.
+///   - `agent_image` — same, for the agent-base image.
+///
+/// `version` reflects only the control-plane binary. `sidecar_image` and
+/// `agent_image` are required to detect deploy skew: a control plane at
+/// 0.7.16 paired with a sidecar at 0.7.13 silently misses the api-key
+/// `max_tokens → max_output_tokens` rewrite (commit 108c426) and audit
+/// stages fail with `Unsupported parameter: max_tokens`. Operators and
+/// release tooling MUST verify all three tags match before trusting that
+/// a fix is actually deployed. (See `.claude/CLAUDE.md` "Release skew".)
+///
+/// Returns 200 with `{"status":"ok",...}` if the store is reachable,
+/// 503 with `{"status":"degraded",...}` otherwise.
 /// K8s liveness/readiness probes use this to detect a dead control plane.
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let version = env!("CARGO_PKG_VERSION");
     let build_info = option_env!("BUILD_SHA").unwrap_or("unknown");
+    let sidecar_image = state.config.cluster.sidecar_image.as_str();
+    let agent_image = state.config.cluster.agent_image.as_str();
     match state.store.health_check().await {
         Ok(()) => (
             StatusCode::OK,
-            axum::Json(
-                serde_json::json!({"status": "ok", "version": version, "build_info": build_info}),
-            ),
+            axum::Json(serde_json::json!({
+                "status": "ok",
+                "version": version,
+                "build_info": build_info,
+                "sidecar_image": sidecar_image,
+                "agent_image": agent_image,
+            })),
         ),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(
-                serde_json::json!({"status": "degraded", "version": version, "build_info": build_info}),
-            ),
+            axum::Json(serde_json::json!({
+                "status": "degraded",
+                "version": version,
+                "build_info": build_info,
+                "sidecar_image": sidecar_image,
+                "agent_image": agent_image,
+            })),
         ),
     }
 }
@@ -358,6 +384,20 @@ mod tests {
             .as_str()
             .expect("build_info should be a string");
         assert!(!build_info.is_empty(), "build_info should not be empty");
+        // Skew-detection fields: sidecar and agent-base image tags the
+        // control plane will stamp onto new Jobs. Operators read these to
+        // confirm all three deployed images match before trusting a fix.
+        let sidecar_image = json["sidecar_image"]
+            .as_str()
+            .expect("sidecar_image should be a string");
+        assert!(
+            !sidecar_image.is_empty(),
+            "sidecar_image should not be empty"
+        );
+        let agent_image = json["agent_image"]
+            .as_str()
+            .expect("agent_image should be a string");
+        assert!(!agent_image.is_empty(), "agent_image should not be empty");
     }
 
     #[tokio::test]
@@ -408,5 +448,18 @@ mod tests {
             .as_str()
             .expect("build_info should be a string");
         assert!(!build_info.is_empty(), "build_info should not be empty");
+        // Skew fields surface even on degraded so operators can still
+        // diagnose during partial outages.
+        let sidecar_image = json["sidecar_image"]
+            .as_str()
+            .expect("sidecar_image should be a string");
+        assert!(
+            !sidecar_image.is_empty(),
+            "sidecar_image should not be empty"
+        );
+        let agent_image = json["agent_image"]
+            .as_str()
+            .expect("agent_image should be a string");
+        assert!(!agent_image.is_empty(), "agent_image should not be empty");
     }
 }
