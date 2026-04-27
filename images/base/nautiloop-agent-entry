@@ -219,6 +219,38 @@ run_and_emit_result() {
     exit_code=$?
     set -e
 
+    # Guard: a successful exit with empty stdout is a verdict-channel
+    # failure dressed up as success. The downstream jq pipeline's
+    # rawfile fallback would otherwise emit `data:""`, the control
+    # plane would treat that as a malformed verdict, and after
+    # MAX_MALFORMED_VERDICT_RETRIES (driver.rs:1880-1908) the whole
+    # loop terminates as FAILED with no actionable signal in the logs.
+    # Surface it as an explicit error envelope so the operator sees
+    # exactly what happened and the loop engine can react with the
+    # standard failure path.
+    #
+    # Concrete trigger: opencode v1.3.x's `run --format json -s
+    # <ses_...>` resume invocation has been observed to exit 0 with
+    # zero bytes on stdout. The fix for that case is to stop passing
+    # `-s` (see the audit/review branch above), but this guard
+    # catches any future regression of the same shape from any CLI.
+    if [ "$exit_code" -eq 0 ] && [ ! -s "$cli_stdout" ]; then
+        local stderr_tail
+        stderr_tail=$(tail -c 5000 "$cli_stderr" 2>/dev/null || echo "")
+        local result
+        result=$(jq -nc \
+            --arg stage "$stage_name" \
+            --arg cli "$cli_cmd" \
+            --arg stderr "$stderr_tail" \
+            '{stage: $stage, data: {exit_code: 0, error: "CLI exited 0 with empty stdout — no verdict emitted. CLI=\($cli). stderr_tail=\($stderr)"}}')
+        echo "$result" > /output/result.json
+        echo "NAUTILOOP_RESULT:$result"
+        # Exit non-zero so the K8s Job is marked Failed and the loop
+        # engine reads `failed_from_state` cleanly. The verdict is
+        # already in /output/result.json for forensic capture.
+        exit 1
+    fi
+
     if [ "$exit_code" -ne 0 ]; then
         local stderr_tail stdout_tail
         stderr_tail=$(tail -c 5000 "$cli_stderr" 2>/dev/null || echo "")
@@ -525,11 +557,28 @@ case "$STAGE" in
                 esac
 
                 OPENCODE_ARGS=(run --format json -m "$OPENCODE_MODEL")
-                # Only resume an opencode ses_ session, not a Claude UUID.
-                if [ -n "${SESSION_ID:-}" ] && \
-                   printf '%s' "$SESSION_ID" | grep -Eq '^ses_[a-zA-Z0-9]+$'; then
-                    OPENCODE_ARGS+=(-s "$SESSION_ID")
-                fi
+                # NOTE: we deliberately do NOT pass `-s "$SESSION_ID"` here.
+                #
+                # opencode v1.3.x's `run --format json -s <ses_...>` resumed
+                # invocation has been observed to exit successfully with
+                # *zero bytes on stdout* — no events, no result, no error.
+                # The agent entrypoint then falls through to the rawfile
+                # branch and emits `NAUTILOOP_RESULT:{"stage":"audit",
+                # "data":""}`, the control plane fails to parse an
+                # AuditVerdict, malformed-verdict retries kick in, and the
+                # whole harden loop terminates as FAILED on round 2's
+                # audit even though round 1 audited cleanly.
+                #
+                # We don't need opencode's conversational memory across
+                # rounds: revise/rN already writes the updated spec to the
+                # branch worktree, and the next audit/rN+1 reads that
+                # revised spec from disk via the prompt template. Losing
+                # session continuation costs some tokens (no prompt-cache
+                # hit) but is correct and unblocks convergence. If/when
+                # opencode's resumed-stdout bug is fixed upstream we can
+                # revisit. (see PR #223 for the regression and #4138 on
+                # the openai/codex side for an unrelated but adjacent
+                # opencode/codex output-channel quirk.)
                 # Read prompt and truncate if extremely large to avoid ARG_MAX
                 PROMPT_CONTENT=$(cat "$PROMPT_FILE")
                 if [ "${#PROMPT_CONTENT}" -gt 100000 ]; then
