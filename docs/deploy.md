@@ -65,9 +65,9 @@ module "nautiloop" {
   acme_email = "me@mydomain.com"     # required if domain is set
 
   # Optional: images (defaults to latest public GHCR)
-  control_plane_image = "ghcr.io/tinkrtailor/nautiloop-control-plane:0.7.19"
-  agent_base_image    = "ghcr.io/tinkrtailor/nautiloop-agent-base:0.7.19"
-  sidecar_image       = "ghcr.io/tinkrtailor/nautiloop-sidecar:0.7.19"
+  control_plane_image = "ghcr.io/tinkrtailor/nautiloop-control-plane:0.7.20"
+  agent_base_image    = "ghcr.io/tinkrtailor/nautiloop-agent-base:0.7.20"
+  sidecar_image       = "ghcr.io/tinkrtailor/nautiloop-sidecar:0.7.20"
 }
 ```
 
@@ -83,9 +83,9 @@ module "nautiloop" {
 | `repo_ssh_private_key` | no | auto-generated | SSH deploy key. If null, generates ED25519 |
 | `domain` | no | `null` | Domain for TLS. null = HTTP on raw IP:8080 |
 | `acme_email` | no | `null` | Let's Encrypt email. Required if domain is set |
-| `control_plane_image` | no | `ghcr.io/tinkrtailor/nautiloop-control-plane:0.7.19` | Control plane image |
-| `agent_base_image` | no | `ghcr.io/tinkrtailor/nautiloop-agent-base:0.7.19` | Agent base image |
-| `sidecar_image` | no | `ghcr.io/tinkrtailor/nautiloop-sidecar:0.7.19` | Auth sidecar image |
+| `control_plane_image` | no | `ghcr.io/tinkrtailor/nautiloop-control-plane:0.7.20` | Control plane image |
+| `agent_base_image` | no | `ghcr.io/tinkrtailor/nautiloop-agent-base:0.7.20` | Agent base image |
+| `sidecar_image` | no | `ghcr.io/tinkrtailor/nautiloop-sidecar:0.7.20` | Auth sidecar image |
 | `k3s_version` | no | `v1.32.13+k3s1` | k3s version (v1.32+ required) |
 | `postgres_password` | no | auto-generated | Postgres password |
 | `postgres_volume_size` | no | `20` | Postgres volume size (Gi) |
@@ -233,9 +233,9 @@ nemo auth                    # pushes credentials (Claude, OpenAI, SSH) to clust
 ```bash
 ./build-images.sh --tag 0.2.0
 terraform apply \
-  -var="control_plane_image=ghcr.io/tinkrtailor/nautiloop-control-plane:0.7.19" \
-  -var="agent_base_image=ghcr.io/tinkrtailor/nautiloop-agent-base:0.7.19" \
-  -var="sidecar_image=ghcr.io/tinkrtailor/nautiloop-sidecar:0.7.19"
+  -var="control_plane_image=ghcr.io/tinkrtailor/nautiloop-control-plane:0.7.20" \
+  -var="agent_base_image=ghcr.io/tinkrtailor/nautiloop-agent-base:0.7.20" \
+  -var="sidecar_image=ghcr.io/tinkrtailor/nautiloop-sidecar:0.7.20"
 ```
 
 All three images must be updated together to avoid version skew.
