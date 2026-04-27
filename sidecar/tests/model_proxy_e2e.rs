@@ -256,9 +256,16 @@ async fn test_api_key_injects_instructions() {
 
 /// POST /openai/v1/responses with a CodexOauth credential.
 ///
-/// Assert: `instructions` injected, `max_output_tokens` renamed to
-/// `max_tokens`, Content-Length absent, Authorization = Bearer <access>,
-/// chatgpt-account-id header present.
+/// Assert: `instructions` injected, body's token field is
+/// `max_output_tokens` (regardless of whether the client sent
+/// `max_tokens` or `max_output_tokens`), Authorization = Bearer
+/// <access>, chatgpt-account-id header present.
+///
+/// v0.7.18 unified the rename: chatgpt.com/backend-api/codex/responses
+/// now requires `max_output_tokens` like api.openai.com does. The old
+/// inverted rename (max_output_tokens → max_tokens for CodexOauth) was
+/// the regression that surfaced as `Bad Request: {"detail":"Unsupported
+/// parameter: max_tokens"}`.
 #[tokio::test]
 async fn test_codex_oauth_patches_body() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -277,10 +284,12 @@ async fn test_codex_oauth_patches_body() {
     })
     .await;
 
+    // Send `max_tokens` — the legacy name. The sidecar must rewrite to
+    // `max_output_tokens` even on the codex-oauth route.
     let (status, _body) = post(
         proxy_addr,
         "/openai/v1/responses",
-        r#"{"model":"gpt-5.4","input":"review","max_output_tokens":4096}"#,
+        r#"{"model":"gpt-5.4","input":"review","max_tokens":4096}"#,
     )
     .await;
     assert_eq!(status, 200);
@@ -312,7 +321,7 @@ async fn test_codex_oauth_patches_body() {
         );
     }
 
-    // Body: instructions injected, max_tokens renamed, max_output_tokens gone
+    // Body: instructions injected, max_tokens rewritten to max_output_tokens.
     let body: serde_json::Value =
         serde_json::from_slice(&req.body).expect("upstream body must be JSON");
     assert!(
@@ -320,13 +329,13 @@ async fn test_codex_oauth_patches_body() {
         "instructions must be injected: {body}"
     );
     assert_eq!(
-        body.get("max_tokens").and_then(|v| v.as_u64()),
+        body.get("max_output_tokens").and_then(|v| v.as_u64()),
         Some(4096),
-        "max_tokens must be 4096 after rename: {body}"
+        "max_output_tokens must be 4096 after rename: {body}"
     );
     assert!(
-        body.get("max_output_tokens").is_none(),
-        "max_output_tokens must be removed: {body}"
+        body.get("max_tokens").is_none(),
+        "max_tokens must be removed: {body}"
     );
 }
 
