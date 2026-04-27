@@ -6,6 +6,19 @@
 - **Auto-commit on success**: After completing a task (tests pass, build succeeds), commit automatically without waiting to be asked (see `.claude/rules/auto-commit-on-success.md`).
 - **Conventional commits required**: All commits must follow conventional commits format - enforced by hook (see `.claude/rules/conventional-commits.md`).
 
+## Primary source before changing a contract (high priority)
+
+Before changing how we shape requests to or parse responses from an upstream (HTTP API, CLI, database protocol, file format), find at least one **primary source** before writing code:
+
+- the upstream's open-source client (most authoritative — it's what they actually ship),
+- the official API spec / docs (current version, not last year's),
+- an upstream issue tracker entry confirming behavior,
+- or a live probe through the actual sidecar/proxy demonstrating the contract.
+
+Do NOT infer from our own code comments, our own tests, or a third-party analysis — those are derivative and rot fastest at exactly the contracts they describe. Code comments routinely lag upstream changes by months. The v0.7.18 regression (`max_tokens` symptom moved from one field name to another) shipped because the fix was inferred from "OpenAI probably unified the wire format" instead of read from OpenAI's own Codex CLI source. v0.7.19's fix (verified from [`codex-rs/core/src/client.rs`](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs) + a live probe + an upstream bug report) landed correct on the first try.
+
+Pattern that works: **read upstream source first → probe live endpoint to confirm → write code third**. The probe is forensic, not the source of truth — it tells you what the endpoint accepts *today*, but the upstream client tells you what they intend the contract to be.
+
 ## Release skew (high priority)
 
 - **`/health` `version` is the control-plane binary only.** The Nautiloop stack ships three independently-tagged images (control-plane, sidecar, agent-base). They MUST be deployed at the same tag. A control plane at vN paired with a sidecar at vN-1 silently misses fixes — this is what caused the v0.7.13/.14/.15 audit failures with `Unsupported parameter: max_tokens`: the sidecar's `max_tokens → max_output_tokens` rewrite (commit 108c426) was already in source but the running sidecar pod was older.
